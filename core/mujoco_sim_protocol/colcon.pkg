@@ -1,0 +1,5 @@
+name: mujoco_sim_protocol
+type: cmake
+
+dependencies:
+    - mujoco_sim_core

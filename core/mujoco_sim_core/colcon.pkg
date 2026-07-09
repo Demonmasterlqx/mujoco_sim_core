@@ -1,0 +1,2 @@
+name: mujoco_sim_core
+type: cmake

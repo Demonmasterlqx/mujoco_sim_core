@@ -1,0 +1,4 @@
+name: mujoco_sim_adapter_sdk
+type: cmake
+
+dependencies:
