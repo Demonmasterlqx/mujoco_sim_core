@@ -1,0 +1,18 @@
+<?xml version="1.0"?>
+<package format="3">
+  <name>mujoco_sim_sample_adapter</name>
+  <version>0.1.0</version>
+  <description>Sample controller adapter for the V1 MuJoCo simulator SDK.</description>
+  <maintainer email="pnx@example.com">pnx</maintainer>
+  <license>Apache-2.0</license>
+
+  <buildtool_depend>cmake</buildtool_depend>
+  <depend>mujoco_sim_adapter_sdk</depend>
+  <depend>mujoco_sim_protocol</depend>
+  <test_depend>gtest</test_depend>
+  <test_depend>mujoco_sim_server</test_depend>
+
+  <export>
+    <build_type>cmake</build_type>
+  </export>
+</package>

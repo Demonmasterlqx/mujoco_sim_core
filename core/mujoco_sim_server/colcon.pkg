@@ -1,5 +1,0 @@
-name: mujoco_sim_server
-type: cmake
-
-dependencies:
-    - mujoco_sim_core

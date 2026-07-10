@@ -2,20 +2,58 @@
 
 ## 构建方式
 
-使用 colcon 作为构建工具，支持 python/c++ 等语言
+使用 colcon 作为构建工具。当前 V1 包均为纯 CMake 包：
+
+server 配置解析依赖系统提供的 CLI11 和 yaml-cpp，可通过 rosdep 安装，
+对应 Ubuntu 包为 `libcli11-dev` 和 `libyaml-cpp-dev`。
+
+```bash
+colcon list --topological-order
+colcon build --packages-up-to mujoco_sim_server --cmake-args -DBUILD_TESTING=ON
+colcon build --packages-up-to mujoco_sim_sample_adapter --cmake-args -DBUILD_TESTING=ON
+colcon test --packages-select mujoco_sim_protocol mujoco_sim_core mujoco_sim_server mujoco_sim_adapter_sdk mujoco_sim_sample_adapter
+colcon test-result --verbose
+```
 
 ## 架构设计
 
-以 mujoco_core 为核心，mujoco掌管整个仿真进程，包括仿真进度（包括开始仿真/结束仿真），时间 clock 发布。
+以 `mujoco_sim_core` 为核心，MuJoCo server 掌管整个仿真进程，包括模型加载、仿真进度、仿真时间和 `mj_step()`。
 
-使用 eCAL 作为ICP方案，~~支持多机分散仿真（幻想）~~
+V1 使用 eCAL 作为 IPC 方案。外部控制器通过 adapter 接入，不直接访问 `mjModel` 或 `mjData`。
 
-外部控制器（ros2/RTOS/裸机等） 通过 adaptor 接入。
+外部控制器（ROS 2/RTOS/裸机/native C++ 等）通过 adapter 接入。
 
-mujoco 会加载全部的模型，然后通过 adaptor 与各个控制器通信。
+MuJoCo server 会加载模型，然后通过同步 Tick/Commit 协议与各控制器通信。
 
-启动参数传递使用统一的 yaml 文件传参 + 命令行设置。
+启动参数使用 CLI11 解析，配置文件使用 yaml-cpp 解析标准 YAML。配置优先级固定为
+“命令行 > YAML > 程序默认值”，与 `--config` 在命令行中的位置无关。YAML 顶层必须是
+单个 mapping，未知字段、重复字段、错误类型和整数溢出都会导致启动失败。
 
-# todo
+```yaml
+server_name: default
+model_path: robot.xml
+max_ticks: 0
+tick_timeout_ms: 1000
+startup_timeout_ms: 5000
+status_period_ms: 100
+```
 
-+ 增加构建方式介绍/增加依赖安装部分
+使用 `mujoco-sim-server --config server.yaml` 加载配置；`--model`、
+`--server-name`、`--max-ticks`、`--tick-timeout-ms` 和
+`--startup-timeout-ms` 可以覆盖对应 YAML 字段。
+
+## V1 运行示例
+
+```bash
+source install/setup.bash
+
+mujoco-sim-server \
+  --model core/mujoco_sim_core/test/testdata/simple_actuator.xml \
+  --max-ticks 5
+
+mujoco-sim-sample-adapter \
+  --ticks 5 \
+  --command-value 0.1
+```
+
+server 是唯一物理状态所有者。每个 Tick 中，adapter 接收 observation，提交完整 actuator command；server 收齐 Barrier 后写入 `data->ctrl` 并调用 `mj_step()`。

@@ -1,10 +1,141 @@
-V1 完成范围：
+# MuJoCo Sim Core V1 实施计划与完成范围
 
-+ 完成 
-    * mujoco_sim_adapter_sdk 
-    * mujoco_sim_sample_adapter
-    * mujoco_sim_core
-    * mujoco_sim_protocol
-    * mujoco_sim_server
-+ 跑通整个mujoco server逻辑
-+ 完成 mujoco_sim_sample_adapter + mujoco server 的完整仿真逻辑。
+## 1. V1 目标
+
+V1 要把当前仓库从包骨架推进到可运行的 MuJoCo lockstep 仿真闭环：
+
+- `mujoco_sim_server` 加载 MuJoCo MJCF 模型，是唯一 `mjModel/mjData` 持有者、唯一 `mjData.ctrl` 写入者和唯一 `mj_step()` 调用者。
+- `mujoco_sim_sample_adapter` 通过 `mujoco_sim_adapter_sdk` 使用真实 eCAL 注册到 server，接收 Tick，提交 Commit。
+- `mujoco_sim_protocol` 使用 Protobuf 定义跨进程消息。
+- `mujoco_sim_core` 不依赖 eCAL，不依赖任何具体 adapter。
+- 所有代码必须有对应测试；所有计划和代码必须交给 subagent 审查，审查发现作为验收门禁。
+
+V1 不实现 observer-only adapter、运行中动态增加 controller、异步相机/点云、动态 contact list、多 controller 叠加控制同一 actuator、优先级控制、通配符资源声明。
+
+## 2. 包职责
+
+### `mujoco_sim_protocol`
+
+职责：
+
+- 保存 V1 `.proto` 定义并生成 C++ Protobuf 绑定。
+- 定义 Header、错误码、资源描述、Register/Activate/Unregister、Tick、Commit、Heartbeat、Status。
+- 定义 eCAL service/topic 命名辅助函数。
+
+约束：
+
+- 不依赖 MuJoCo、Core、Server、eCAL 业务实现或任何 adapter。
+- Protobuf 源文件是协议真相，生成物由构建系统生成。
+
+### `mujoco_sim_core`
+
+职责：
+
+- 加载 MJCF，管理 `mjModel/mjData` 生命周期。
+- 构建具名 Sensor catalog 和具名 Actuator catalog。
+- 执行 Controller 注册、资源存在性检查、Actuator 独占检查、Session/Epoch/Tick 校验。
+- 管理 Active controller 集合、Tick Barrier、Commit 幂等去重、超时 fail-stop。
+- 将合法 command 写入 `data->ctrl[actuator_id]` 并调用 `mj_step()`。
+
+约束：
+
+- 不依赖 eCAL，不创建 topic/service。
+- Observation 只来自具名 MuJoCo Sensor；Command 只对应具名 MuJoCo Actuator。
+- Command 维度固定为 1。
+
+### `mujoco_sim_server`
+
+职责：
+
+- 作为 composition root 创建 Core 和真实 eCAL 通信端。
+- 提供 registry service：`GetAvailableResources`、`RegisterController`、`ActivateController`、`UnregisterController`。
+- 发布 per-controller Tick，订阅 Commit/Heartbeat，发布 ServerStatus。
+- 使用 CLI11 加载命令行、使用 yaml-cpp 加载标准 YAML 配置，处理固定 tick 数运行和错误退出。
+
+约束：
+
+- transport 实现在 server 内，V1 不新增独立 transport 包。
+- Core API 调用必须加锁，eCAL callback 不直接访问 MuJoCo。
+- 配置优先级固定为命令行、YAML、程序默认值；YAML 必须是单个顶层 mapping，并严格拒绝未知字段、重复字段、错误类型和整数溢出。
+- `ServerConfig`、`LoadConfigFile`、`ParseCommandLine` 和 `Usage` 保持为 server 的配置公共接口；解析失败不得修改调用方配置。
+
+### `mujoco_sim_adapter_sdk`
+
+职责：
+
+- 封装 eCAL 初始化、registry service 调用、Tick 订阅、Commit/Heartbeat 发布。
+- 提供同步 adapter runner：用户只需实现 `Tick -> commands` 回调。
+- 处理 service discovery 等待、session/epoch/tick 继承、重复 Tick 下的 Commit 重发。
+
+约束：
+
+- 不直接访问 MuJoCo。
+- 不写共享内存中的 `mjData`。
+
+### `mujoco_sim_sample_adapter`
+
+职责：
+
+- 提供最小 C++ adapter 示例。
+- 默认申请 `hinge_pos,hinge_vel` observations 和 `hinge_motor` command。
+- 对每个 Tick 提交固定 command 值，用于端到端测试。
+
+## 3. 仿真循环
+
+1. Server 启动，加载 MJCF，Core 遍历具名 Sensor/Actuator：
+   - Sensor 进入 Observation catalog，维度来自 `model->sensor_dim`，数据来自 `data->sensordata`。
+   - Actuator 进入 Command catalog，维度固定为 1，控制值写入 `data->ctrl`。
+2. Adapter 通过 registry service 注册：
+   - 声明 observation sensor 名称和 command actuator 名称。
+   - Server 校验协议版本、资源存在性、重复声明和 actuator 独占。
+   - 注册成功进入 `PROVISIONAL`，返回 session、epoch 和 resource layout。
+3. Adapter 创建 Tick subscriber 和 Commit/Heartbeat publisher 后调用 Activate。
+4. Server 将 controller 标记为 `ACTIVE`，开始 Tick：
+   - Core 读取当前 `sensordata`，为每个 active controller 生成 Tick。
+   - Server 发布 `mujoco_sim/<server>/tick/<controller_id>`。
+5. Adapter 收到 Tick：
+   - 读取 observation values。
+   - 调用用户控制回调。
+   - 原子提交 `AdapterCommit(tick_id, commands)`。
+   - 若收到重复 Tick，则重发上一份 Commit，不重复计数。
+6. Server 收到 Commit：
+   - 校验 controller、session、epoch、tick、actuator ownership、命令数量、finite 值和 ctrl range。
+   - 重复 Commit 幂等忽略。
+   - 收齐所有 active controller 后写入 `data->ctrl` 并调用 `mj_step()`。
+7. Core 递增 tick，Server 发布下一帧 Tick。
+8. 任一 active controller 超时、提交非法命令或 session/epoch/tick 不匹配，Server 进入 `ERROR_PAUSED`，V1 默认 fail-stop。
+
+## 4. 测试与验收
+
+每个包必须有对应测试：
+
+- `mujoco_sim_protocol`：topic 命名、Protobuf 序列化/反序列化、Register/Tick/Commit 字段。
+- `mujoco_sim_core`：模型加载、catalog、注册失败路径、actuator 冲突、Activate、Tick observation、Barrier step、非法 command、range 校验、tick/session/epoch 错误、超时。
+- `mujoco_sim_server`：CLI11 命令行解析、yaml-cpp 严格配置解析、CLI 覆盖优先级、解析事务性、help 退出行为、安装后 CMake consumer、topic/service 命名。
+- `mujoco_sim_adapter_sdk`：Commit 和 Heartbeat 构造。
+- `mujoco_sim_sample_adapter`：参数解析、默认资源、固定 command 生成。
+- 端到端：真实 eCAL server + sample adapter 固定 tick 数闭环，进程均以 0 退出。
+
+验收命令：
+
+```bash
+colcon list --topological-order
+colcon build --packages-up-to mujoco_sim_server --cmake-args -DBUILD_TESTING=ON
+colcon build --packages-up-to mujoco_sim_sample_adapter --cmake-args -DBUILD_TESTING=ON
+colcon test --packages-select mujoco_sim_protocol mujoco_sim_core mujoco_sim_server mujoco_sim_adapter_sdk mujoco_sim_sample_adapter
+colcon test-result --verbose
+```
+
+端到端验收：
+
+```bash
+source install/setup.bash
+mujoco-sim-server --model core/mujoco_sim_core/test/testdata/simple_actuator.xml --max-ticks 5
+mujoco-sim-sample-adapter --ticks 5 --command-value 0.1
+```
+
+## 5. 审查约束
+
+- 完成计划文档后，必须让 subagent 做计划审查。
+- 完成代码后，必须让 subagent 做代码审查。
+- 审查重点：包边界、协议一致性、仿真循环、资源所有权、Barrier/超时、测试覆盖、构建/install 可用性。

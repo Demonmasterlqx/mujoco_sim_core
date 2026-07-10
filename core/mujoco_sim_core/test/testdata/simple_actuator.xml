@@ -1,0 +1,17 @@
+<mujoco model="simple_actuator">
+  <option timestep="0.001"/>
+  <worldbody>
+    <body name="link" pos="0 0 0">
+      <joint name="hinge" type="hinge" axis="0 0 1" limited="true" range="-180 180"/>
+      <geom name="link_geom" type="capsule" size="0.02" fromto="0 0 0 0.2 0 0" mass="1"/>
+    </body>
+  </worldbody>
+  <actuator>
+    <motor name="hinge_motor" joint="hinge" ctrllimited="true" ctrlrange="-1 1"/>
+  </actuator>
+  <sensor>
+    <jointpos name="hinge_pos" joint="hinge"/>
+    <jointvel name="hinge_vel" joint="hinge"/>
+    <actuatorfrc name="hinge_force" actuator="hinge_motor"/>
+  </sensor>
+</mujoco>

@@ -1,0 +1,20 @@
+<?xml version="1.0"?>
+<package format="3">
+  <name>mujoco_sim_server</name>
+  <version>0.1.0</version>
+  <description>eCAL composition root for the MuJoCo simulator V1 server.</description>
+  <maintainer email="pnx@example.com">pnx</maintainer>
+  <license>Apache-2.0</license>
+
+  <buildtool_depend>cmake</buildtool_depend>
+  <depend>cli11</depend>
+  <depend>ecal</depend>
+  <depend>mujoco_sim_core</depend>
+  <depend>mujoco_sim_protocol</depend>
+  <depend>yaml-cpp</depend>
+  <test_depend>gtest</test_depend>
+
+  <export>
+    <build_type>cmake</build_type>
+  </export>
+</package>

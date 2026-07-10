@@ -1,0 +1,11 @@
+@PACKAGE_INIT@
+
+include(CMakeFindDependencyMacro)
+find_dependency(CLI11 CONFIG)
+find_dependency(eCAL)
+find_dependency(mujoco_sim_core)
+find_dependency(mujoco_sim_protocol)
+find_dependency(yaml-cpp CONFIG)
+
+include("${CMAKE_CURRENT_LIST_DIR}/mujoco_sim_serverTargets.cmake")
+check_required_components(mujoco_sim_server)

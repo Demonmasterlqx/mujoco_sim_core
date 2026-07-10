@@ -1,0 +1,17 @@
+<?xml version="1.0"?>
+<package format="3">
+  <name>mujoco_sim_adapter_sdk</name>
+  <version>0.1.0</version>
+  <description>C++ SDK for writing V1 MuJoCo simulator sync controller adapters.</description>
+  <maintainer email="pnx@example.com">pnx</maintainer>
+  <license>Apache-2.0</license>
+
+  <buildtool_depend>cmake</buildtool_depend>
+  <depend>ecal</depend>
+  <depend>mujoco_sim_protocol</depend>
+  <test_depend>gtest</test_depend>
+
+  <export>
+    <build_type>cmake</build_type>
+  </export>
+</package>
