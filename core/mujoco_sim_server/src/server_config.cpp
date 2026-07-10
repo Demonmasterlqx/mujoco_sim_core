@@ -16,6 +16,7 @@ namespace {
 
 constexpr const char* kYamlIntegerTag = "tag:yaml.org,2002:int";
 constexpr const char* kYamlStringTag = "tag:yaml.org,2002:str";
+constexpr const char* kYamlBooleanTag = "tag:yaml.org,2002:bool";
 
 struct CommandLineOverrides {
   std::optional<std::string> config_path;
@@ -24,6 +25,8 @@ struct CommandLineOverrides {
   std::optional<std::uint64_t> max_ticks;
   std::optional<std::uint32_t> tick_timeout_ms;
   std::optional<std::uint32_t> startup_timeout_ms;
+  bool headless = false;
+  bool gui = false;
 };
 
 std::string ConfigLocation(const std::string& path, const YAML::Mark& mark) {
@@ -62,6 +65,18 @@ bool ParseStringField(const std::string& path, const std::string& key,
                        error_message);
   }
   *value = node.as<std::string>();
+  return true;
+}
+
+bool ParseBooleanField(const std::string& path, const std::string& key,
+                       const YAML::Node& node, bool* value,
+                       std::string* error_message) {
+  const std::string tag = node.Tag();
+  if (!node.IsScalar() || (tag != "?" && tag != kYamlBooleanTag) ||
+      !YAML::convert<bool>::decode(node, *value)) {
+    return ConfigError(path, node.Mark(), key + " must be a boolean",
+                       error_message);
+  }
   return true;
 }
 
@@ -113,6 +128,10 @@ bool ApplyYamlField(const std::string& path, const std::string& key,
     return ParseUnsignedField(path, key, value, &config->status_period_ms,
                               error_message);
   }
+  if (key == "headless") {
+    return ParseBooleanField(path, key, value, &config->headless,
+                             error_message);
+  }
   return ConfigError(path, value.Mark(), "unknown field: " + key,
                      error_message);
 }
@@ -138,6 +157,16 @@ void ConfigureCommandLine(CLI::App* app, CommandLineOverrides* overrides) {
   app->add_option("--startup-timeout-ms", overrides->startup_timeout_ms,
                   "Controller startup timeout in milliseconds")
       ->multi_option_policy(CLI::MultiOptionPolicy::Throw);
+  CLI::Option* headless =
+      app->add_flag("--headless", overrides->headless,
+                    "Run without creating a graphical viewer")
+      ->multi_option_policy(CLI::MultiOptionPolicy::Throw);
+  CLI::Option* gui =
+      app->add_flag("--gui", overrides->gui,
+                    "Run with the graphical viewer")
+          ->multi_option_policy(CLI::MultiOptionPolicy::Throw);
+  headless->excludes(gui);
+  gui->excludes(headless);
 }
 
 }  // namespace
@@ -233,6 +262,11 @@ bool ParseCommandLine(int argc, char** argv, ServerConfig* config,
   }
   if (overrides.startup_timeout_ms.has_value()) {
     parsed.startup_timeout_ms = *overrides.startup_timeout_ms;
+  }
+  if (overrides.headless) {
+    parsed.headless = true;
+  } else if (overrides.gui) {
+    parsed.headless = false;
   }
 
   if (parsed.model_path.empty()) {

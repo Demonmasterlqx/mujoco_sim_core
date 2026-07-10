@@ -52,6 +52,7 @@ void ExpectConfigEquals(const mujoco_sim::server::ServerConfig& actual,
   EXPECT_EQ(actual.tick_timeout_ms, expected.tick_timeout_ms);
   EXPECT_EQ(actual.startup_timeout_ms, expected.startup_timeout_ms);
   EXPECT_EQ(actual.status_period_ms, expected.status_period_ms);
+  EXPECT_EQ(actual.headless, expected.headless);
 }
 
 TEST(ServerConfigTest, ParsesCommandLine) {
@@ -67,7 +68,8 @@ TEST(ServerConfigTest, ParsesCommandLine) {
                          "--tick-timeout-ms",
                          "50",
                          "--startup-timeout-ms",
-                         "250"},
+                         "250",
+                         "--headless"},
                         &config, &error))
       << error;
   EXPECT_EQ(config.model_path, "robot.xml");
@@ -76,6 +78,7 @@ TEST(ServerConfigTest, ParsesCommandLine) {
   EXPECT_EQ(config.tick_timeout_ms, 50);
   EXPECT_EQ(config.startup_timeout_ms, 250);
   EXPECT_EQ(config.status_period_ms, 100);
+  EXPECT_TRUE(config.headless);
 }
 
 TEST(ServerConfigTest, KeepsDefaultsForUnspecifiedCommandLineOptions) {
@@ -89,6 +92,7 @@ TEST(ServerConfigTest, KeepsDefaultsForUnspecifiedCommandLineOptions) {
   EXPECT_EQ(config.tick_timeout_ms, 1000);
   EXPECT_EQ(config.startup_timeout_ms, 5000);
   EXPECT_EQ(config.status_period_ms, 100);
+  EXPECT_FALSE(config.headless);
 }
 
 TEST(ServerConfigTest, ReturnsGeneratedHelp) {
@@ -98,6 +102,8 @@ TEST(ServerConfigTest, ReturnsGeneratedHelp) {
   EXPECT_EQ(error, mujoco_sim::server::Usage());
   EXPECT_NE(error.find("--startup-timeout-ms"), std::string::npos);
   EXPECT_NE(error.find("MuJoCo MJCF model path"), std::string::npos);
+  EXPECT_NE(error.find("--headless"), std::string::npos);
+  EXPECT_NE(error.find("--gui"), std::string::npos);
 }
 
 TEST(ServerConfigTest, RejectsInvalidCommandLine) {
@@ -111,6 +117,7 @@ TEST(ServerConfigTest, RejectsInvalidCommandLine) {
       {"mujoco-sim-server", "--model", "robot.xml", "--tick-timeout-ms",
        "4294967296"},
       {"mujoco-sim-server", "--model", "one.xml", "--model", "two.xml"},
+      {"mujoco-sim-server", "--model", "robot.xml", "--headless", "--gui"},
   };
 
   for (const auto& arguments : invalid_arguments) {
@@ -142,7 +149,8 @@ TEST(ServerConfigTest, LoadsStrictYamlWithAllFields) {
       "max_ticks: 18446744073709551615\n"
       "tick_timeout_ms: 4294967295\n"
       "startup_timeout_ms: 6000\n"
-      "status_period_ms: 25\n");
+      "status_period_ms: 25\n"
+      "headless: true\n");
 
   mujoco_sim::server::ServerConfig config;
   std::string error;
@@ -156,6 +164,7 @@ TEST(ServerConfigTest, LoadsStrictYamlWithAllFields) {
             std::numeric_limits<std::uint32_t>::max());
   EXPECT_EQ(config.startup_timeout_ms, 6000);
   EXPECT_EQ(config.status_period_ms, 25);
+  EXPECT_TRUE(config.headless);
 }
 
 TEST(ServerConfigTest, AcceptsEmptyYamlWithoutChangingConfig) {
@@ -228,6 +237,10 @@ TEST(ServerConfigTest, RejectsUnknownDuplicateAndWrongTypeYamlFields) {
        "tick_timeout_ms must be an unsigned integer in range"},
       {"mujoco_sim_server_overflow.yaml", "status_period_ms: 4294967296\n",
        "status_period_ms must be an unsigned integer in range"},
+      {"mujoco_sim_server_quoted_bool.yaml", "headless: \"true\"\n",
+       "headless must be a boolean"},
+      {"mujoco_sim_server_invalid_bool.yaml", "headless: enabled\n",
+       "headless must be a boolean"},
   };
 
   for (const auto& test_case : cases) {
@@ -250,7 +263,8 @@ TEST(ServerConfigTest, CommandLineOverridesYamlRegardlessOfArgumentOrder) {
       "max_ticks: 10\n"
       "tick_timeout_ms: 20\n"
       "startup_timeout_ms: 30\n"
-      "status_period_ms: 40\n");
+      "status_period_ms: 40\n"
+      "headless: false\n");
 
   const std::vector<std::vector<std::string>> argument_orders = {
       {"mujoco-sim-server", "--config", file.path(), "--model", "cli.xml",
@@ -258,7 +272,8 @@ TEST(ServerConfigTest, CommandLineOverridesYamlRegardlessOfArgumentOrder) {
        "21", "--startup-timeout-ms", "31"},
       {"mujoco-sim-server", "--model", "cli.xml", "--server-name", "cli",
        "--max-ticks", "11", "--tick-timeout-ms", "21",
-       "--startup-timeout-ms", "31", "--config", file.path()},
+       "--startup-timeout-ms", "31", "--config", file.path(),
+       "--headless"},
   };
 
   for (const auto& arguments : argument_orders) {
@@ -271,7 +286,20 @@ TEST(ServerConfigTest, CommandLineOverridesYamlRegardlessOfArgumentOrder) {
     EXPECT_EQ(config.tick_timeout_ms, 21);
     EXPECT_EQ(config.startup_timeout_ms, 31);
     EXPECT_EQ(config.status_period_ms, 40);
+    EXPECT_EQ(config.headless, arguments.back() == "--headless");
   }
+}
+
+TEST(ServerConfigTest, CommandLineGuiOverridesYamlHeadless) {
+  ScopedConfigFile file("mujoco_sim_server_gui_override.yaml",
+                        "model_path: robot.xml\nheadless: true\n");
+  mujoco_sim::server::ServerConfig config;
+  std::string error;
+  ASSERT_TRUE(ParseArgs({"mujoco-sim-server", "--config", file.path(),
+                         "--gui"},
+                        &config, &error))
+      << error;
+  EXPECT_FALSE(config.headless);
 }
 
 TEST(ServerConfigTest, LoadFailureDoesNotModifyConfig) {

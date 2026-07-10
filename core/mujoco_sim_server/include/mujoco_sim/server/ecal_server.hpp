@@ -16,6 +16,8 @@
 
 namespace mujoco_sim::server {
 
+class SimViewer;
+
 class EcalServer {
  public:
   explicit EcalServer(ServerConfig config);
@@ -31,6 +33,8 @@ class EcalServer {
   const ServerConfig& config() const { return config_; }
 
  private:
+  int RunLoop();
+  int RunGraphical();
   void RegisterServices();
   void RegisterSubscribersAndPublishers();
   void PublishTicks(const std::vector<mujoco_sim::v1::Tick>& ticks);
@@ -50,6 +54,8 @@ class EcalServer {
 
   ServerConfig config_;
   mujoco_sim::core::SimulationCore core_;
+  std::unique_ptr<mujoco_sim::core::SimulationSnapshot> viewer_snapshot_;
+  std::unique_ptr<SimViewer> viewer_;
   std::unique_ptr<eCAL::CServiceServer> registry_;
   std::unique_ptr<eCAL::CSubscriber> commit_subscriber_;
   std::unique_ptr<eCAL::CSubscriber> heartbeat_subscriber_;

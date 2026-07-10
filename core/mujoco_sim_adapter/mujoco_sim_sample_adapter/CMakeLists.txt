@@ -73,6 +73,25 @@ if(BUILD_TESTING)
       "$<TARGET_FILE:mujoco_sim::mujoco-sim-server>"
       "$<TARGET_FILE:mujoco-sim-sample-adapter>"
       "${CMAKE_CURRENT_SOURCE_DIR}/../../mujoco_sim_core/test/testdata/simple_actuator.xml"
+      headless
   )
   set_tests_properties(sample_adapter_e2e PROPERTIES TIMEOUT 20)
+
+  set(MUJOCO_SIM_GUI_TEST_PREFIX)
+  if(NOT DEFINED ENV{DISPLAY} OR "$ENV{DISPLAY}" STREQUAL "")
+    find_program(XVFB_RUN_EXECUTABLE NAMES xvfb-run REQUIRED)
+    set(MUJOCO_SIM_GUI_TEST_PREFIX "${XVFB_RUN_EXECUTABLE}" -a)
+  endif()
+  add_test(
+    NAME sample_adapter_gui_e2e
+    COMMAND
+      ${MUJOCO_SIM_GUI_TEST_PREFIX}
+      bash
+      "${CMAKE_CURRENT_SOURCE_DIR}/test/e2e_lockstep.sh"
+      "$<TARGET_FILE:mujoco_sim::mujoco-sim-server>"
+      "$<TARGET_FILE:mujoco-sim-sample-adapter>"
+      "${CMAKE_CURRENT_SOURCE_DIR}/../../mujoco_sim_core/test/testdata/simple_actuator.xml"
+      gui
+  )
+  set_tests_properties(sample_adapter_gui_e2e PROPERTIES TIMEOUT 20)
 endif()

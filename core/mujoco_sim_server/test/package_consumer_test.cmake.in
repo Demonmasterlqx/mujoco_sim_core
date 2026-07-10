@@ -1,7 +1,8 @@
-set(stage_dir "@CMAKE_CURRENT_BINARY_DIR@/package_consumer_stage")
+set(deployment_dir "@CMAKE_CURRENT_BINARY_DIR@/package_consumer_stage")
+set(stage_dir "${deployment_dir}/mujoco_sim_server")
 set(build_dir "@CMAKE_CURRENT_BINARY_DIR@/package_consumer_build")
 
-file(REMOVE_RECURSE "${stage_dir}" "${build_dir}")
+file(REMOVE_RECURSE "${deployment_dir}" "${build_dir}")
 
 execute_process(
   COMMAND "@CMAKE_COMMAND@" --install "@CMAKE_CURRENT_BINARY_DIR@"
@@ -12,6 +13,19 @@ if(NOT install_result EQUAL 0)
   message(FATAL_ERROR "Failed to install mujoco_sim_server test package")
 endif()
 
+get_filename_component(
+  core_prefix "@mujoco_sim_core_DIR@/../../.." ABSOLUTE
+)
+file(GLOB mujoco_runtime "${core_prefix}/@CMAKE_INSTALL_LIBDIR@/libmujoco.so*")
+if(NOT mujoco_runtime)
+  message(FATAL_ERROR "Failed to locate the installed MuJoCo runtime")
+endif()
+set(core_runtime_dir
+  "${deployment_dir}/mujoco_sim_core/@CMAKE_INSTALL_LIBDIR@"
+)
+file(MAKE_DIRECTORY "${core_runtime_dir}")
+file(COPY ${mujoco_runtime} DESTINATION "${core_runtime_dir}")
+
 execute_process(
   COMMAND "@CMAKE_COMMAND@"
           -S "@CMAKE_CURRENT_SOURCE_DIR@/test/package_consumer"
@@ -19,6 +33,7 @@ execute_process(
           "-Dmujoco_sim_server_DIR=${stage_dir}/@CMAKE_INSTALL_LIBDIR@/cmake/mujoco_sim_server"
           "-DCLI11_DIR=@CLI11_DIR@"
           "-DeCAL_DIR=@eCAL_DIR@"
+          "-Dglfw3_DIR=@glfw3_DIR@"
           "-Dmujoco_sim_core_DIR=@mujoco_sim_core_DIR@"
           "-Dmujoco_sim_protocol_DIR=@mujoco_sim_protocol_DIR@"
           "-Dyaml-cpp_DIR=@yaml-cpp_DIR@"
@@ -42,4 +57,18 @@ execute_process(
 )
 if(NOT run_result EQUAL 0)
   message(FATAL_ERROR "Failed to run mujoco_sim_server package consumer")
+endif()
+
+execute_process(
+  COMMAND "${stage_dir}/@CMAKE_INSTALL_BINDIR@/mujoco-sim-server@CMAKE_EXECUTABLE_SUFFIX@"
+          --help
+  RESULT_VARIABLE server_run_result
+  OUTPUT_VARIABLE server_help
+  ERROR_VARIABLE server_error
+)
+if(NOT server_run_result EQUAL 0 OR
+   NOT server_help MATCHES "--headless")
+  message(FATAL_ERROR
+    "Failed to run installed mujoco-sim-server: ${server_error}"
+  )
 endif()

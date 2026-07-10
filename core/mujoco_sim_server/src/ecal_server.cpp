@@ -1,5 +1,7 @@
 #include <mujoco_sim/server/ecal_server.hpp>
 
+#include "sim_viewer.hpp"
+
 #include <chrono>
 #include <iostream>
 #include <string>
@@ -64,6 +66,19 @@ bool EcalServer::Start(std::string* error_message) {
     return false;
   }
 
+  if (!config_.headless) {
+    viewer_snapshot_ = core_.CreateSnapshot(error_message);
+    if (viewer_snapshot_ == nullptr) {
+      return false;
+    }
+    viewer_ = std::make_unique<SimViewer>();
+    if (!viewer_->Initialize(error_message)) {
+      viewer_.reset();
+      viewer_snapshot_.reset();
+      return false;
+    }
+  }
+
   RegisterServices();
   RegisterSubscribersAndPublishers();
   return true;
@@ -121,15 +136,49 @@ void EcalServer::RegisterSubscribersAndPublishers() {
 }
 
 int EcalServer::Run() {
+  if (viewer_ != nullptr) {
+    return RunGraphical();
+  }
+  return RunLoop();
+}
+
+int EcalServer::RunGraphical() {
+  int result = 1;
+  std::thread server_thread([this, &result]() {
+    std::string error;
+    if (!viewer_->QueueLoad(viewer_snapshot_.get(), config_.model_path,
+                            &error)) {
+      if (viewer_->close_requested()) {
+        result = 0;
+      }
+      if (!error.empty()) {
+        std::cerr << error << '\n';
+      }
+      viewer_->RequestClose();
+      return;
+    }
+    result = RunLoop();
+    viewer_->RequestClose();
+  });
+
+  viewer_->RenderLoop();
+  Stop();
+  server_thread.join();
+  return result;
+}
+
+int EcalServer::RunLoop() {
   const auto startup_deadline =
       std::chrono::steady_clock::now() +
       std::chrono::milliseconds(config_.startup_timeout_ms);
   auto next_status = std::chrono::steady_clock::now();
+  auto next_viewer_sync = std::chrono::steady_clock::now();
 
   while (!stop_requested_ && eCAL::Ok()) {
     std::vector<mujoco_sim::v1::Tick> ticks;
     bool should_stop_success = false;
     bool should_stop_error = false;
+    std::string viewer_error;
 
     {
       std::unique_lock lock(mutex_);
@@ -149,10 +198,24 @@ int EcalServer::Run() {
         ticks = OpenTickLocked();
         core_.CheckTickTimeout(std::chrono::steady_clock::now());
       }
+
+      if (viewer_ != nullptr &&
+          std::chrono::steady_clock::now() >= next_viewer_sync) {
+        if (viewer_->Synchronize(&core_, viewer_snapshot_.get(),
+                                 &viewer_error)) {
+          next_viewer_sync = std::chrono::steady_clock::now() +
+                             std::chrono::milliseconds(16);
+        } else if (!viewer_->close_requested()) {
+          should_stop_error = true;
+        }
+      }
     }
 
     if (!ticks.empty()) {
       PublishTicks(ticks);
+    }
+    if (!viewer_error.empty()) {
+      std::cerr << viewer_error << '\n';
     }
 
     if (std::chrono::steady_clock::now() >= next_status) {

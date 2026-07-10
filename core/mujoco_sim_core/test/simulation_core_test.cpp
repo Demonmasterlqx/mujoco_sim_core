@@ -4,6 +4,7 @@
 #include <limits>
 #include <string>
 
+#include <mujoco/mujoco.h>
 #include <mujoco_sim/core/simulation_core.hpp>
 #include <mujoco_sim/protocol/topics.hpp>
 
@@ -93,6 +94,52 @@ TEST(SimulationCoreTest, ProvidesAvailableResources) {
   EXPECT_EQ(response.code(), mujoco_sim::v1::OK);
   EXPECT_EQ(response.observations_size(), 3);
   EXPECT_EQ(response.commands_size(), 1);
+}
+
+TEST(SimulationCoreTest, CreatesIsolatedVisualizationSnapshot) {
+  auto core = LoadedCore();
+  std::string error;
+  auto snapshot = core.CreateSnapshot(&error);
+  ASSERT_NE(snapshot, nullptr) << error;
+  ASSERT_NE(snapshot->model(), nullptr);
+  ASSERT_NE(snapshot->data(), nullptr);
+
+  snapshot->data()->qpos[0] = 0.75;
+  auto independent = core.CreateSnapshot(&error);
+  ASSERT_NE(independent, nullptr) << error;
+  EXPECT_NE(independent->data()->qpos[0], snapshot->data()->qpos[0]);
+
+  ASSERT_TRUE(core.UpdateSnapshot(snapshot.get(), &error)) << error;
+  EXPECT_DOUBLE_EQ(snapshot->data()->qpos[0], independent->data()->qpos[0]);
+}
+
+TEST(SimulationCoreTest, RefreshesVisualizationSnapshotAfterStep) {
+  auto core = LoadedCore();
+  std::string error;
+  auto snapshot = core.CreateSnapshot(&error);
+  ASSERT_NE(snapshot, nullptr) << error;
+
+  const auto registration = RegisterAndActivate(&core);
+  ASSERT_EQ(core.OpenTick().size(), 1);
+  ASSERT_TRUE(core.SubmitCommit(CommitFor(registration, 0, 0.2)).stepped);
+  ASSERT_TRUE(core.UpdateSnapshot(snapshot.get(), &error)) << error;
+  EXPECT_DOUBLE_EQ(snapshot->data()->time, core.simulation_time());
+}
+
+TEST(SimulationCoreTest, RejectsSnapshotFromAnotherCoreOrModelGeneration) {
+  auto first = LoadedCore();
+  auto second = LoadedCore();
+  std::string error;
+  auto snapshot = first.CreateSnapshot(&error);
+  ASSERT_NE(snapshot, nullptr) << error;
+
+  EXPECT_FALSE(second.UpdateSnapshot(snapshot.get(), &error));
+  EXPECT_NE(error.find("does not belong"), std::string::npos);
+
+  ASSERT_TRUE(first.LoadModel(MUJOCO_SIM_CORE_DUAL_TEST_MODEL, &error))
+      << error;
+  EXPECT_FALSE(first.UpdateSnapshot(snapshot.get(), &error));
+  EXPECT_NE(error.find("does not belong"), std::string::npos);
 }
 
 TEST(SimulationCoreTest, RejectsUnknownAndConflictingResources) {

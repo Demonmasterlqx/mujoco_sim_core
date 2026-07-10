@@ -32,6 +32,7 @@ V1 不实现 observer-only adapter、运行中动态增加 controller、异步�
 职责：
 
 - 加载 MJCF，管理 `mjModel/mjData` 生命周期。
+- 为图形化 viewer 创建和刷新隔离的 `mjModel/mjData` 深拷贝快照。
 - 构建具名 Sensor catalog 和具名 Actuator catalog。
 - 执行 Controller 注册、资源存在性检查、Actuator 独占检查、Session/Epoch/Tick 校验。
 - 管理 Active controller 集合、Tick Barrier、Commit 幂等去重、超时 fail-stop。
@@ -40,6 +41,7 @@ V1 不实现 observer-only adapter、运行中动态增加 controller、异步�
 约束：
 
 - 不依赖 eCAL，不创建 topic/service。
+- 真实模型和数据仍由 Core 独占；viewer 只能访问稳定快照，不能写回仿真状态。
 - Observation 只来自具名 MuJoCo Sensor；Command 只对应具名 MuJoCo Actuator。
 - Command 维度固定为 1。
 
@@ -51,12 +53,15 @@ V1 不实现 observer-only adapter、运行中动态增加 controller、异步�
 - 提供 registry service：`GetAvailableResources`、`RegisterController`、`ActivateController`、`UnregisterController`。
 - 发布 per-controller Tick，订阅 Commit/Heartbeat，发布 ServerStatus。
 - 使用 CLI11 加载命令行、使用 yaml-cpp 加载标准 YAML 配置，处理固定 tick 数运行和错误退出。
+- 默认使用仓库自带的 MuJoCo `simulate` 官方 UI 渲染 Core 快照，并提供 `--headless` 模式。
 
 约束：
 
 - transport 实现在 server 内，V1 不新增独立 transport 包。
 - Core API 调用必须加锁，eCAL callback 不直接访问 MuJoCo。
-- 配置优先级固定为命令行、YAML、程序默认值；YAML 必须是单个顶层 mapping，并严格拒绝未知字段、重复字段、错误类型和整数溢出。
+- GLFW RenderLoop 运行在主线程，server 仿真循环运行在 worker；两侧退出均须通知并 join，禁止持锁等待。
+- 图形界面依赖系统 GLFW 和 libpng；官方 UI 的截图调用由内部兼容层转接到 libpng，不引入不可复现的 LodePNG 运行时依赖。
+- 配置优先级固定为命令行、YAML、程序默认值；`--headless`/`--gui` 可双向覆盖 YAML；YAML 必须是单个顶层 mapping，并严格拒绝未知字段、重复字段、错误类型和整数溢出。
 - `ServerConfig`、`LoadConfigFile`、`ParseCommandLine` 和 `Usage` 保持为 server 的配置公共接口；解析失败不得修改调用方配置。
 
 ### `mujoco_sim_adapter_sdk`
@@ -103,18 +108,19 @@ V1 不实现 observer-only adapter、运行中动态增加 controller、异步�
    - 重复 Commit 幂等忽略。
    - 收齐所有 active controller 后写入 `data->ctrl` 并调用 `mj_step()`。
 7. Core 递增 tick，Server 发布下一帧 Tick。
-8. 任一 active controller 超时、提交非法命令或 session/epoch/tick 不匹配，Server 进入 `ERROR_PAUSED`，V1 默认 fail-stop。
+8. GUI 模式下，Server 以固定刷新周期把 Core 状态复制到 viewer 快照；渲染不参与 Barrier，也不改变仿真时间。
+9. 任一 active controller 超时、提交非法命令或 session/epoch/tick 不匹配，Server 进入 `ERROR_PAUSED`，V1 默认 fail-stop。
 
 ## 4. 测试与验收
 
 每个包必须有对应测试：
 
 - `mujoco_sim_protocol`：topic 命名、Protobuf 序列化/反序列化、Register/Tick/Commit 字段。
-- `mujoco_sim_core`：模型加载、catalog、注册失败路径、actuator 冲突、Activate、Tick observation、Barrier step、非法 command、range 校验、tick/session/epoch 错误、超时。
-- `mujoco_sim_server`：CLI11 命令行解析、yaml-cpp 严格配置解析、CLI 覆盖优先级、解析事务性、help 退出行为、安装后 CMake consumer、topic/service 命名。
+- `mujoco_sim_core`：模型加载、catalog、隔离 viewer 快照及刷新、注册失败路径、actuator 冲突、Activate、Tick observation、Barrier step、非法 command、range 校验、tick/session/epoch 错误、超时。
+- `mujoco_sim_server`：CLI11 命令行解析、yaml-cpp 严格配置解析、GUI/headless、真实 GLFW viewer 生命周期、PNG 截图编码回读、CLI 覆盖优先级、解析事务性、help 退出行为、安装后 CMake consumer 与可执行文件启动、topic/service 命名。
 - `mujoco_sim_adapter_sdk`：Commit 和 Heartbeat 构造。
 - `mujoco_sim_sample_adapter`：参数解析、默认资源、固定 command 生成。
-- 端到端：真实 eCAL server + sample adapter 固定 tick 数闭环，进程均以 0 退出。
+- 端到端：真实 eCAL server + sample adapter 分别在无 DISPLAY 的 headless 模式和真实 GUI 模式完成固定 tick 数闭环，进程均以 0 退出。
 
 验收命令：
 

@@ -26,6 +26,27 @@ struct CommitResult {
   bool stepped = false;
 };
 
+class SimulationSnapshot {
+ public:
+  ~SimulationSnapshot();
+
+  SimulationSnapshot(const SimulationSnapshot&) = delete;
+  SimulationSnapshot& operator=(const SimulationSnapshot&) = delete;
+  SimulationSnapshot(SimulationSnapshot&&) noexcept;
+  SimulationSnapshot& operator=(SimulationSnapshot&&) noexcept;
+
+  mjModel_* model() const;
+  mjData_* data() const;
+
+ private:
+  struct Impl;
+  SimulationSnapshot();
+
+  std::unique_ptr<Impl> impl_;
+
+  friend class SimulationCore;
+};
+
 class SimulationCore {
  public:
   explicit SimulationCore(CoreOptions options = {});
@@ -38,6 +59,10 @@ class SimulationCore {
 
   bool LoadModel(const std::string& model_path, std::string* error_message);
   bool IsModelLoaded() const;
+  std::unique_ptr<SimulationSnapshot> CreateSnapshot(
+      std::string* error_message) const;
+  bool UpdateSnapshot(SimulationSnapshot* snapshot,
+                      std::string* error_message) const;
 
   const std::vector<mujoco_sim::v1::ResourceDescriptor>& observations() const;
   const std::vector<mujoco_sim::v1::ResourceDescriptor>& commands() const;
@@ -103,6 +128,8 @@ class SimulationCore {
   bool tick_open_ = false;
   std::chrono::steady_clock::time_point tick_started_at_{};
   std::string status_message_;
+  std::shared_ptr<void> snapshot_identity_ = std::make_shared<char>();
+  std::uint64_t model_generation_ = 0;
 };
 
 }  // namespace mujoco_sim::core

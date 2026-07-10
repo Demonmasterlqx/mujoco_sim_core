@@ -50,6 +50,9 @@ install(TARGETS ${PROJECT_NAME}
   RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR}
 )
 install(DIRECTORY include/ DESTINATION ${CMAKE_INSTALL_INCLUDEDIR})
+install(DIRECTORY "${MUJOCO_ROOT}/include/mujoco"
+  DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}
+)
 install(FILES "${MUJOCO_LIBRARY}" DESTINATION ${CMAKE_INSTALL_LIBDIR})
 
 write_basic_package_version_file(
@@ -77,7 +80,11 @@ include(CTest)
 if(BUILD_TESTING)
   find_package(GTest REQUIRED)
   add_executable(core_test test/simulation_core_test.cpp)
-  target_link_libraries(core_test PRIVATE ${PROJECT_NAME} GTest::gtest_main)
+  target_link_libraries(core_test PRIVATE
+    ${PROJECT_NAME}
+    GTest::gtest_main
+    mujoco::mujoco
+  )
   target_compile_definitions(core_test PRIVATE
     MUJOCO_SIM_CORE_TEST_MODEL="${CMAKE_CURRENT_SOURCE_DIR}/test/testdata/simple_actuator.xml"
     MUJOCO_SIM_CORE_DUAL_TEST_MODEL="${CMAKE_CURRENT_SOURCE_DIR}/test/testdata/dual_actuator.xml"

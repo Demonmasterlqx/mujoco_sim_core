@@ -10,6 +10,7 @@ if(NOT TARGET mujoco_vendor)
   add_library(mujoco_vendor SHARED IMPORTED)
   set_target_properties(mujoco_vendor PROPERTIES
     IMPORTED_LOCATION "${_mujoco_sim_core_prefix}/@CMAKE_INSTALL_LIBDIR@/libmujoco.so.3.10.0"
+    INTERFACE_INCLUDE_DIRECTORIES "${_mujoco_sim_core_prefix}/@CMAKE_INSTALL_INCLUDEDIR@"
   )
 endif()
 if(NOT TARGET mujoco::mujoco)

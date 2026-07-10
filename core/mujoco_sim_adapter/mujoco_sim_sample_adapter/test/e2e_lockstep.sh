@@ -4,6 +4,7 @@ set -euo pipefail
 server_bin="$1"
 adapter_bin="$2"
 model_path="$3"
+mode="${4:-headless}"
 
 instance_name="e2e_${BASHPID}_$(date +%s%N)"
 server_log="/tmp/mujoco_sim_server_${instance_name}.log"
@@ -18,13 +19,22 @@ cleanup() {
 }
 trap cleanup EXIT
 
-"${server_bin}" \
-  --server-name "${instance_name}" \
-  --model "${model_path}" \
-  --max-ticks 5 \
-  --startup-timeout-ms 5000 \
-  --tick-timeout-ms 1000 \
-  >"${server_log}" 2>&1 &
+server_args=(
+  --server-name "${instance_name}"
+  --model "${model_path}"
+  --max-ticks 5
+  --startup-timeout-ms 5000
+  --tick-timeout-ms 1000
+)
+if [[ "${mode}" == "headless" ]]; then
+  env -u DISPLAY -u WAYLAND_DISPLAY "${server_bin}" \
+    "${server_args[@]}" --headless >"${server_log}" 2>&1 &
+elif [[ "${mode}" == "gui" ]]; then
+  "${server_bin}" "${server_args[@]}" >"${server_log}" 2>&1 &
+else
+  echo "unknown server mode: ${mode}" >&2
+  exit 1
+fi
 server_pid="$!"
 
 sleep 0.5

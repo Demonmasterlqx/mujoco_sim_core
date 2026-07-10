@@ -120,6 +120,31 @@ struct SimulationCore::Controller {
   std::string message;
 };
 
+struct SimulationSnapshot::Impl {
+  ~Impl() {
+    if (data != nullptr) {
+      mj_deleteData(data);
+    }
+    if (model != nullptr) {
+      mj_deleteModel(model);
+    }
+  }
+
+  mjModel* model = nullptr;
+  mjData* data = nullptr;
+  std::weak_ptr<void> owner;
+  std::uint64_t model_generation = 0;
+};
+
+SimulationSnapshot::SimulationSnapshot() : impl_(std::make_unique<Impl>()) {}
+SimulationSnapshot::~SimulationSnapshot() = default;
+SimulationSnapshot::SimulationSnapshot(SimulationSnapshot&&) noexcept = default;
+SimulationSnapshot& SimulationSnapshot::operator=(
+    SimulationSnapshot&&) noexcept = default;
+
+mjModel_* SimulationSnapshot::model() const { return impl_->model; }
+mjData_* SimulationSnapshot::data() const { return impl_->data; }
+
 void SimulationCore::MjModelDeleter::operator()(mjModel_* model) const {
   if (model != nullptr) {
     mj_deleteModel(model);
@@ -162,6 +187,7 @@ bool SimulationCore::LoadModel(const std::string& model_path,
 
   model_ = std::move(model);
   data_ = std::move(data);
+  ++model_generation_;
   mj_resetData(model_.get(), data_.get());
   mj_forward(model_.get(), data_.get());
 
@@ -183,6 +209,64 @@ bool SimulationCore::LoadModel(const std::string& model_path,
 }
 
 bool SimulationCore::IsModelLoaded() const { return model_ && data_; }
+
+std::unique_ptr<SimulationSnapshot> SimulationCore::CreateSnapshot(
+    std::string* error_message) const {
+  if (!IsModelLoaded()) {
+    if (error_message != nullptr) {
+      *error_message = "cannot create snapshot before loading a model";
+    }
+    return nullptr;
+  }
+
+  auto snapshot = std::unique_ptr<SimulationSnapshot>(
+      new SimulationSnapshot());
+  snapshot->impl_->owner = snapshot_identity_;
+  snapshot->impl_->model_generation = model_generation_;
+  snapshot->impl_->model = mj_copyModel(nullptr, model_.get());
+  if (snapshot->impl_->model == nullptr) {
+    if (error_message != nullptr) {
+      *error_message = "failed to copy MuJoCo model for visualization";
+    }
+    return nullptr;
+  }
+  snapshot->impl_->data =
+      mj_copyData(nullptr, snapshot->impl_->model, data_.get());
+  if (snapshot->impl_->data == nullptr) {
+    if (error_message != nullptr) {
+      *error_message = "failed to copy MuJoCo data for visualization";
+    }
+    return nullptr;
+  }
+  return snapshot;
+}
+
+bool SimulationCore::UpdateSnapshot(SimulationSnapshot* snapshot,
+                                    std::string* error_message) const {
+  if (!IsModelLoaded() || snapshot == nullptr || snapshot->impl_ == nullptr ||
+      snapshot->impl_->model == nullptr || snapshot->impl_->data == nullptr) {
+    if (error_message != nullptr) {
+      *error_message = "invalid visualization snapshot";
+    }
+    return false;
+  }
+  if (snapshot->impl_->owner.lock() != snapshot_identity_ ||
+      snapshot->impl_->model_generation != model_generation_) {
+    if (error_message != nullptr) {
+      *error_message = "visualization snapshot does not belong to this model";
+    }
+    return false;
+  }
+  if (snapshot->impl_->model->nbuffer != model_->nbuffer) {
+    if (error_message != nullptr) {
+      *error_message = "visualization snapshot model is incompatible";
+    }
+    return false;
+  }
+
+  mj_copyData(snapshot->impl_->data, snapshot->impl_->model, data_.get());
+  return true;
+}
 
 const std::vector<mujoco_sim::v1::ResourceDescriptor>&
 SimulationCore::observations() const {
