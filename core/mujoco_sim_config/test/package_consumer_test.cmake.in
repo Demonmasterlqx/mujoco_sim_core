@@ -1,0 +1,46 @@
+set(stage_dir "@CMAKE_CURRENT_BINARY_DIR@/package_consumer_stage")
+set(build_dir "@CMAKE_CURRENT_BINARY_DIR@/package_consumer_build")
+
+file(REMOVE_RECURSE "${stage_dir}" "${build_dir}")
+
+execute_process(
+  COMMAND "@CMAKE_COMMAND@" --install "@CMAKE_CURRENT_BINARY_DIR@"
+          --prefix "${stage_dir}"
+  RESULT_VARIABLE install_result
+)
+if(NOT install_result EQUAL 0)
+  message(FATAL_ERROR "Failed to install mujoco_sim_config")
+endif()
+
+execute_process(
+  COMMAND "@CMAKE_COMMAND@"
+          -S "@CMAKE_CURRENT_SOURCE_DIR@/test/package_consumer"
+          -B "${build_dir}"
+          "-Dmujoco_sim_config_DIR=${stage_dir}/@CMAKE_INSTALL_LIBDIR@/cmake/mujoco_sim_config"
+  RESULT_VARIABLE configure_result
+)
+if(NOT configure_result EQUAL 0)
+  message(FATAL_ERROR "Failed to configure installed package consumer")
+endif()
+
+execute_process(
+  COMMAND "@CMAKE_COMMAND@" --build "${build_dir}"
+  RESULT_VARIABLE build_result
+)
+if(NOT build_result EQUAL 0)
+  message(FATAL_ERROR "Failed to build installed package consumer")
+endif()
+
+set(generated_dir "${build_dir}/mujoco_sim_config/consumer_generated")
+if(NOT EXISTS "${generated_dir}/consumer_config.hpp" OR
+   NOT EXISTS "${generated_dir}/consumer_config.cpp")
+  message(FATAL_ERROR "Consumer did not generate build-tree C++ outputs")
+endif()
+
+execute_process(
+  COMMAND "${build_dir}/package_consumer@CMAKE_EXECUTABLE_SUFFIX@"
+  RESULT_VARIABLE run_result
+)
+if(NOT run_result EQUAL 0)
+  message(FATAL_ERROR "Installed package consumer failed: ${run_result}")
+endif()

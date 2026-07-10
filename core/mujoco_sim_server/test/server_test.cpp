@@ -48,6 +48,7 @@ void ExpectConfigEquals(const mujoco_sim::server::ServerConfig& actual,
                         const mujoco_sim::server::ServerConfig& expected) {
   EXPECT_EQ(actual.server_name, expected.server_name);
   EXPECT_EQ(actual.model_path, expected.model_path);
+  EXPECT_EQ(actual.initial_keyframe, expected.initial_keyframe);
   EXPECT_EQ(actual.max_ticks, expected.max_ticks);
   EXPECT_EQ(actual.tick_timeout_ms, expected.tick_timeout_ms);
   EXPECT_EQ(actual.startup_timeout_ms, expected.startup_timeout_ms);
@@ -63,6 +64,8 @@ TEST(ServerConfigTest, ParsesCommandLine) {
                          "robot.xml",
                          "--server-name",
                          "sim",
+                         "--initial-keyframe",
+                         "home",
                          "--max-ticks",
                          "10",
                          "--tick-timeout-ms",
@@ -74,6 +77,7 @@ TEST(ServerConfigTest, ParsesCommandLine) {
       << error;
   EXPECT_EQ(config.model_path, "robot.xml");
   EXPECT_EQ(config.server_name, "sim");
+  EXPECT_EQ(config.initial_keyframe, "home");
   EXPECT_EQ(config.max_ticks, 10);
   EXPECT_EQ(config.tick_timeout_ms, 50);
   EXPECT_EQ(config.startup_timeout_ms, 250);
@@ -95,6 +99,19 @@ TEST(ServerConfigTest, KeepsDefaultsForUnspecifiedCommandLineOptions) {
   EXPECT_FALSE(config.headless);
 }
 
+TEST(ServerConfigTest, PreservesLegacyAggregateInitializationOrder) {
+  const mujoco_sim::server::ServerConfig config{
+      "legacy", "robot.xml", 7, 8, 9, 10, true};
+  EXPECT_EQ(config.server_name, "legacy");
+  EXPECT_EQ(config.model_path, "robot.xml");
+  EXPECT_EQ(config.max_ticks, 7U);
+  EXPECT_EQ(config.tick_timeout_ms, 8U);
+  EXPECT_EQ(config.startup_timeout_ms, 9U);
+  EXPECT_EQ(config.status_period_ms, 10U);
+  EXPECT_TRUE(config.headless);
+  EXPECT_TRUE(config.initial_keyframe.empty());
+}
+
 TEST(ServerConfigTest, ReturnsGeneratedHelp) {
   mujoco_sim::server::ServerConfig config;
   std::string error;
@@ -102,6 +119,7 @@ TEST(ServerConfigTest, ReturnsGeneratedHelp) {
   EXPECT_EQ(error, mujoco_sim::server::Usage());
   EXPECT_NE(error.find("--startup-timeout-ms"), std::string::npos);
   EXPECT_NE(error.find("MuJoCo MJCF model path"), std::string::npos);
+  EXPECT_NE(error.find("--initial-keyframe"), std::string::npos);
   EXPECT_NE(error.find("--headless"), std::string::npos);
   EXPECT_NE(error.find("--gui"), std::string::npos);
 }
@@ -141,11 +159,25 @@ TEST(ServerConfigTest, RequiresModelAndNonEmptyServerName) {
   EXPECT_EQ(error, "server name is required");
 }
 
+TEST(ServerConfigTest, EmptyYamlModelPathRemainsEmptyAndRequired) {
+  ScopedConfigFile file("mujoco_sim_server_empty_model.yaml",
+                        "model_path: \"\"\n");
+  mujoco_sim::server::ServerConfig config;
+  config.model_path = "unchanged.xml";
+  std::string error;
+
+  EXPECT_FALSE(ParseArgs({"mujoco-sim-server", "--config", file.path()},
+                         &config, &error));
+  EXPECT_EQ(error, "model path is required");
+  EXPECT_EQ(config.model_path, "unchanged.xml");
+}
+
 TEST(ServerConfigTest, LoadsStrictYamlWithAllFields) {
   ScopedConfigFile file(
       "mujoco_sim_server_all_fields.yaml",
       "server_name: \"sim:#1\" # quoted colon and hash\n"
       "model_path: robot.xml\n"
+      "initial_keyframe: home\n"
       "max_ticks: 18446744073709551615\n"
       "tick_timeout_ms: 4294967295\n"
       "startup_timeout_ms: 6000\n"
@@ -158,7 +190,9 @@ TEST(ServerConfigTest, LoadsStrictYamlWithAllFields) {
       mujoco_sim::server::LoadConfigFile(file.path(), &config, &error))
       << error;
   EXPECT_EQ(config.server_name, "sim:#1");
-  EXPECT_EQ(config.model_path, "robot.xml");
+  EXPECT_EQ(config.model_path,
+            (std::filesystem::temp_directory_path() / "robot.xml").string());
+  EXPECT_EQ(config.initial_keyframe, "home");
   EXPECT_EQ(config.max_ticks, std::numeric_limits<std::uint64_t>::max());
   EXPECT_EQ(config.tick_timeout_ms,
             std::numeric_limits<std::uint32_t>::max());
@@ -232,11 +266,11 @@ TEST(ServerConfigTest, RejectsUnknownDuplicateAndWrongTypeYamlFields) {
       {"mujoco_sim_server_tagged_string.yaml", "model_path: !!int 123\n",
        "model_path must be a string"},
       {"mujoco_sim_server_quoted_number.yaml", "max_ticks: \"12\"\n",
-       "max_ticks must be an unsigned integer"},
+       "max_ticks must be an unsigned 64-bit integer"},
       {"mujoco_sim_server_negative.yaml", "tick_timeout_ms: -1\n",
-       "tick_timeout_ms must be an unsigned integer in range"},
+       "tick_timeout_ms must be an unsigned 32-bit integer in range"},
       {"mujoco_sim_server_overflow.yaml", "status_period_ms: 4294967296\n",
-       "status_period_ms must be an unsigned integer in range"},
+       "status_period_ms must be an unsigned 32-bit integer in range"},
       {"mujoco_sim_server_quoted_bool.yaml", "headless: \"true\"\n",
        "headless must be a boolean"},
       {"mujoco_sim_server_invalid_bool.yaml", "headless: enabled\n",

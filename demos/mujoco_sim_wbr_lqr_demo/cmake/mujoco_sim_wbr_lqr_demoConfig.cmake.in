@@ -1,0 +1,10 @@
+@PACKAGE_INIT@
+
+set_and_check(mujoco_sim_wbr_lqr_demo_MJCF_DIR
+  "${PACKAGE_PREFIX_DIR}/@CMAKE_INSTALL_DATADIR@/mujoco_sim_wbr_lqr_demo/mjcf")
+
+include(CMakeFindDependencyMacro)
+find_dependency(mujoco_sim_adapter_sdk)
+
+include("${CMAKE_CURRENT_LIST_DIR}/mujoco_sim_wbr_lqr_demoTargets.cmake")
+check_required_components(mujoco_sim_wbr_lqr_demo)

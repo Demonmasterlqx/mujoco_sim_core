@@ -1,0 +1,106 @@
+set(stage_dir "@CMAKE_CURRENT_BINARY_DIR@/package_consumer_stage")
+set(build_dir "@CMAKE_CURRENT_BINARY_DIR@/package_consumer_build")
+
+file(REMOVE_RECURSE "${stage_dir}" "${build_dir}")
+
+execute_process(
+  COMMAND "@CMAKE_COMMAND@" --install "@CMAKE_CURRENT_BINARY_DIR@"
+          --prefix "${stage_dir}"
+  RESULT_VARIABLE install_result
+)
+if(NOT install_result EQUAL 0)
+  message(FATAL_ERROR "Failed to install mujoco_sim_wbr_lqr_demo")
+endif()
+
+execute_process(
+  COMMAND "@CMAKE_COMMAND@"
+          -S "@CMAKE_CURRENT_SOURCE_DIR@/test/package_consumer"
+          -B "${build_dir}"
+          "-Dmujoco_sim_wbr_lqr_demo_DIR=${stage_dir}/@CMAKE_INSTALL_LIBDIR@/cmake/mujoco_sim_wbr_lqr_demo"
+          "-Dmujoco_sim_adapter_sdk_DIR=@mujoco_sim_adapter_sdk_DIR@"
+          "-Dmujoco_sim_protocol_DIR=@mujoco_sim_protocol_DIR@"
+          "-DeCAL_DIR=@eCAL_DIR@"
+  RESULT_VARIABLE configure_result
+)
+if(NOT configure_result EQUAL 0)
+  message(FATAL_ERROR "Failed to configure installed WBR package consumer")
+endif()
+
+execute_process(
+  COMMAND "@CMAKE_COMMAND@" --build "${build_dir}"
+  RESULT_VARIABLE build_result
+)
+if(NOT build_result EQUAL 0)
+  message(FATAL_ERROR "Failed to build installed WBR package consumer")
+endif()
+
+execute_process(
+  COMMAND "${build_dir}/package_consumer@CMAKE_EXECUTABLE_SUFFIX@"
+  RESULT_VARIABLE run_result
+)
+if(NOT run_result EQUAL 0)
+  message(FATAL_ERROR "Installed WBR package consumer failed: ${run_result}")
+endif()
+
+set(adapter_executable
+  "${stage_dir}/@CMAKE_INSTALL_BINDIR@/mujoco-sim-wbr-lqr-adapter@CMAKE_EXECUTABLE_SUFFIX@"
+)
+execute_process(
+  COMMAND "${adapter_executable}" --help
+  RESULT_VARIABLE help_result
+  OUTPUT_VARIABLE help_output
+  ERROR_VARIABLE help_error
+)
+if(NOT help_result EQUAL 0 OR NOT help_output MATCHES "--config")
+  message(FATAL_ERROR
+    "Failed to run installed WBR adapter help: ${help_error}"
+  )
+endif()
+
+set(share_dir
+  "${stage_dir}/@CMAKE_INSTALL_DATADIR@/mujoco_sim_wbr_lqr_demo"
+)
+foreach(relative_path IN ITEMS
+    config/wbr_lqr.yaml
+    config/wbr_lqr.schema.yaml
+    config/wbr_server.yaml
+    mjcf/scene.xml
+    mjcf/mjmodel.xml)
+  if(NOT EXISTS "${share_dir}/${relative_path}")
+    message(FATAL_ERROR "Installed WBR asset was not found: ${relative_path}")
+  endif()
+endforeach()
+
+file(GLOB mesh_files "${share_dir}/mjcf/meshes/*.STL")
+list(LENGTH mesh_files mesh_count)
+if(NOT mesh_count EQUAL 15)
+  message(FATAL_ERROR "Expected 15 installed WBR meshes, found ${mesh_count}")
+endif()
+
+get_filename_component(server_prefix "@mujoco_sim_server_DIR@/../../.." ABSOLUTE)
+set(server_executable
+  "${server_prefix}/@CMAKE_INSTALL_BINDIR@/mujoco-sim-server@CMAKE_EXECUTABLE_SUFFIX@"
+)
+if(NOT EXISTS "${server_executable}")
+  message(FATAL_ERROR "Installed mujoco-sim-server was not found")
+endif()
+
+execute_process(
+  COMMAND bash "@CMAKE_CURRENT_SOURCE_DIR@/test/e2e_wbr_lqr.sh"
+          "${server_executable}"
+          "${adapter_executable}"
+          "${share_dir}/config/wbr_server.yaml"
+          "${share_dir}/config/wbr_lqr.yaml"
+          headless 300
+  WORKING_DIRECTORY "${build_dir}"
+  TIMEOUT 30
+  RESULT_VARIABLE e2e_result
+  OUTPUT_VARIABLE e2e_output
+  ERROR_VARIABLE e2e_error
+)
+if(NOT e2e_result EQUAL 0)
+  message(FATAL_ERROR
+    "Installed WBR configuration E2E failed (${e2e_result}):\n"
+    "${e2e_output}\n${e2e_error}"
+  )
+endif()

@@ -1,9 +1,15 @@
 add_library(mujoco_sim_status_lib STATIC status_tool.cpp)
+mujoco_sim_generate_config(
+  TARGET status_config_generated
+  SCHEMA config/status_config.yaml
+  OUTPUT_NAME status_config_generated
+  OWNER_TARGET mujoco_sim_status_lib
+)
 target_compile_features(mujoco_sim_status_lib PUBLIC cxx_std_20)
 target_include_directories(mujoco_sim_status_lib PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}")
 target_link_libraries(mujoco_sim_status_lib
   PUBLIC mujoco_sim::protocol
-  PRIVATE CLI11::CLI11 eCAL::core Threads::Threads
+  PRIVATE eCAL::core Threads::Threads
 )
 
 add_executable(mujoco-sim-status main.cpp)

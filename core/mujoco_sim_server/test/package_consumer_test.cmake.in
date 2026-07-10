@@ -31,6 +31,7 @@ execute_process(
           -S "@CMAKE_CURRENT_SOURCE_DIR@/test/package_consumer"
           -B "${build_dir}"
           "-Dmujoco_sim_server_DIR=${stage_dir}/@CMAKE_INSTALL_LIBDIR@/cmake/mujoco_sim_server"
+          "-Dmujoco_sim_config_DIR=@mujoco_sim_config_DIR@"
           "-DCLI11_DIR=@CLI11_DIR@"
           "-DeCAL_DIR=@eCAL_DIR@"
           "-Dglfw3_DIR=@glfw3_DIR@"
@@ -99,7 +100,7 @@ if(NOT readelf_result EQUAL 0)
   message(FATAL_ERROR "Failed to inspect mujoco-sim-status: ${readelf_error}")
 endif()
 if(status_dynamic_section MATCHES
-   "libmujoco[.]so|libmujoco_sim_core[.]so|libmujoco_sim_server|libglfw|libpng|libyaml|libGL|libOpenGL|libEGL|libGLES|libX11|libxcb|libwayland")
+   "libmujoco[.]so|libmujoco_sim_core[.]so|libmujoco_sim_server|libglfw|libpng|libGL|libOpenGL|libEGL|libGLES|libX11|libxcb|libwayland")
   message(FATAL_ERROR
     "mujoco-sim-status has an unexpected heavy dependency:\n${status_dynamic_section}"
   )

@@ -5,11 +5,18 @@ include(GNUInstallDirs)
 include(CMakePackageConfigHelpers)
 
 find_package(mujoco_sim_adapter_sdk CONFIG REQUIRED)
+find_package(mujoco_sim_config CONFIG REQUIRED)
 
 add_library(${PROJECT_NAME}_lib
   src/sample_adapter.cpp
 )
 add_library(mujoco_sim::sample_adapter ALIAS ${PROJECT_NAME}_lib)
+mujoco_sim_generate_config(
+  TARGET sample_config_generated
+  SCHEMA config/sample_adapter.yaml
+  OUTPUT_NAME sample_config_generated
+  OWNER_TARGET ${PROJECT_NAME}_lib
+)
 target_compile_features(${PROJECT_NAME}_lib PUBLIC cxx_std_20)
 target_include_directories(${PROJECT_NAME}_lib
   PUBLIC

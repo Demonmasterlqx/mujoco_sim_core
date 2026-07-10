@@ -14,6 +14,25 @@ V1 不实现 observer-only adapter、运行中动态增加 controller、异步�
 
 ## 2. 包职责
 
+### `mujoco_sim_config`
+
+职责：
+
+- 提供类似 generate_parameter_library 的构建期配置代码生成能力：从 schema 生成 C++20
+  DTO、CLI11 命令行声明、yaml-cpp 严格 YAML 加载和帮助文本。
+- 提供 `mujoco_sim_generate_config()` CMake API，并支持把生成源码附着到需要导出的静态
+  library，保证 build tree 与 install tree consumer 均可用。
+- 统一实现“CLI 显式值 > YAML > C++ 默认值”、事务性解析、文件/行/列错误位置和 YAML
+  相对 path 按配置文件目录解析。
+- 支持 primitive、enum、定长 array、嵌套 object 和 object sequence；字段是否暴露 CLI
+  由 schema 显式选择。
+
+约束：
+
+- 生成发生在构建期，运行时不读取 schema，也不 vendor 第三方解析器。
+- 只承担通用字段级校验；业务语义和跨字段约束由使用包的转换层负责。
+- server、status、sample adapter 和 WBR demo 不再各自实现 YAML/CLI parser。
+
 ### `mujoco_sim_protocol`
 
 职责：
@@ -32,6 +51,7 @@ V1 不实现 observer-only adapter、运行中动态增加 controller、异步�
 职责：
 
 - 加载 MJCF，管理 `mjModel/mjData` 生命周期。
+- 可选按具名 keyframe 初始化模型；keyframe 不存在时加载必须原子失败且保留旧模型/状态。
 - 为图形化 viewer 创建和刷新隔离的 `mjModel/mjData` 深拷贝快照。
 - 构建具名 Sensor catalog 和具名 Actuator catalog。
 - 执行 Controller 注册、资源存在性检查、Actuator 独占检查、Session/Epoch/Tick 校验。
@@ -52,7 +72,8 @@ V1 不实现 observer-only adapter、运行中动态增加 controller、异步�
 - 作为 composition root 创建 Core 和真实 eCAL 通信端。
 - 提供 registry service：`GetAvailableResources`、`RegisterController`、`ActivateController`、`UnregisterController`。
 - 发布 per-controller Tick，订阅 Commit/Heartbeat，发布 ServerStatus。
-- 使用 CLI11 加载命令行、使用 yaml-cpp 加载标准 YAML 配置，处理固定 tick 数运行和错误退出。
+- 使用 `mujoco_sim_config` 生成的 CLI11/yaml-cpp 配置，处理 initial keyframe、固定 tick 数
+  运行和错误退出。
 - 默认使用仓库自带的 MuJoCo `simulate` 官方 UI 渲染 Core 快照，并提供 `--headless` 模式。
 - 提供独立的 `mujoco-sim-status` 命令行目标，通过 status topic 和 registry service 查询 server、controller 与模型资源，支持单次、watch 和 JSON/NDJSON 输出。
 
@@ -64,7 +85,9 @@ V1 不实现 observer-only adapter、运行中动态增加 controller、异步�
 - 图形界面依赖系统 GLFW 和 libpng；官方 UI 的截图调用由内部兼容层转接到 libpng，不引入不可复现的 LodePNG 运行时依赖。
 - 配置优先级固定为命令行、YAML、程序默认值；`--headless`/`--gui` 可双向覆盖 YAML；YAML 必须是单个顶层 mapping，并严格拒绝未知字段、重复字段、错误类型和整数溢出。
 - `ServerConfig`、`LoadConfigFile`、`ParseCommandLine` 和 `Usage` 保持为 server 的配置公共接口；解析失败不得修改调用方配置。
-- 状态工具源码和内部 library 位于 `tools/status`，不链接 server library、Core、MuJoCo、GUI、PNG 或 YAML；资源查询失败不得掩盖已收到的有效 ServerStatus。
+- 状态工具源码和内部 library 位于 `tools/status`，使用生成式 YAML/CLI 配置，但不链接
+  server library、Core、MuJoCo、GUI 或 PNG；资源查询失败不得掩盖已收到的有效
+  ServerStatus。
 
 ### `mujoco_sim_adapter_sdk`
 
@@ -72,7 +95,8 @@ V1 不实现 observer-only adapter、运行中动态增加 controller、异步�
 
 - 封装 eCAL 初始化、registry service 调用、Tick 订阅、Commit/Heartbeat 发布。
 - 提供同步 adapter runner：用户只需实现 `Tick -> commands` 回调。
-- 处理 service discovery 等待、session/epoch/tick 继承、重复 Tick 下的 Commit 重发。
+- 处理 service discovery 等待、session/epoch/tick 继承、重复 Tick 下的 Commit 重发；并发
+  收到同一 Tick 时控制回调最多执行一次，其余路径重发缓存 Commit。
 
 约束：
 
@@ -86,10 +110,34 @@ V1 不实现 observer-only adapter、运行中动态增加 controller、异步�
 - 提供最小 C++ adapter 示例。
 - 默认申请 `hinge_pos,hinge_vel` observations 和 `hinge_motor` command。
 - 对每个 Tick 提交固定 command 值，用于端到端测试。
+- 通过生成式 YAML/CLI 配置 server/controller、state/command 资源、超时、Tick 数和固定
+  command 值。
+
+### `mujoco_sim_wbr_lqr_demo`
+
+职责：
+
+- 迁移 `CosmosMount/wbr_mujoco` 的 WBR LQR 运行时控制头文件、MJCF 和 mesh，记录固定的
+  upstream commit 与迁移差异。
+- 将原四线程/latest-value 控制流程改写为每个 V1 Tick 执行一次的确定性同步 pipeline，
+  尽可能保持 IMU、融合、双腿解算、里程计、FSM、VMC/LQR 和六电机力矩逻辑不变。
+- 提供可执行 adapter、server/adapter YAML、headless 与 GUI 闭环示例。
+- 将 IMU 以及六个语义电机的全部 position/velocity/effort state 和 effort command 名称
+  配置化；资源 layout 和 YAML motor 项顺序不参与语义绑定。
+- 在协议边界按注册返回的 actuator ctrlrange 限幅，并统计限幅次数。
+- 记录迁移中暴露的 SDK、配置、接口绑定、启动编排和诊断问题，作为下一阶段改进目标。
+
+约束：
+
+- 不修改 vendored 上游控制公式和系数表；仓库适配代码放在独立 library/source 中。
+- 控制周期与模型 timestep 固定为 `0.001 s`，模型从 `home` keyframe 启动。
+- resource name 只来自配置，控制逻辑内部只依赖六个固定 semantic slot。
 
 ## 3. 仿真循环
 
-1. Server 启动，加载 MJCF，Core 遍历具名 Sensor/Actuator：
+1. Server 启动，加载 MJCF；若配置了 `initial_keyframe`，Core 在发布资源前原子应用该
+   keyframe、清零 actuator ctrl 并执行 `mj_forward()`。随后 Core 遍历具名
+   Sensor/Actuator：
    - Sensor 进入 Observation catalog，维度来自 `model->sensor_dim`，数据来自 `data->sensordata`。
    - Actuator 进入 Command catalog，维度固定为 1，控制值写入 `data->ctrl`。
 2. Adapter 通过 registry service 注册：
@@ -104,7 +152,8 @@ V1 不实现 observer-only adapter、运行中动态增加 controller、异步�
    - 读取 observation values。
    - 调用用户控制回调。
    - 原子提交 `AdapterCommit(tick_id, commands)`。
-   - 若收到重复 Tick，则重发上一份 Commit，不重复计数。
+   - 若收到重复 Tick，则重发上一份 Commit，不重复计数；SDK 串行化 handler，确保并发
+     重复 Tick 也不会重复执行控制计算。
 6. Server 收到 Commit：
    - 校验 controller、session、epoch、tick、actuator ownership、命令数量、finite 值和 ctrl range。
    - 重复 Commit 幂等忽略。
@@ -117,15 +166,24 @@ V1 不实现 observer-only adapter、运行中动态增加 controller、异步�
 
 每个包必须有对应测试：
 
+- `mujoco_sim_config`：schema 合法/非法输入、生成代码、严格 YAML/CLI、嵌套类型、相对
+  path、优先级、事务性和安装后 consumer 生成。
 - `mujoco_sim_protocol`：topic 命名、Protobuf 序列化/反序列化、Register/Tick/Commit 字段。
-- `mujoco_sim_core`：模型加载、catalog、隔离 viewer 快照及刷新、注册失败路径、actuator 冲突、Activate、Tick observation、Barrier step、非法 command、range 校验、tick/session/epoch 错误、超时。
+- `mujoco_sim_core`：模型加载、具名 keyframe 成功/失败原子性、catalog、隔离 viewer 快照
+  及刷新、注册失败路径、actuator 冲突、Activate、Tick observation、Barrier step、非法
+  command、range 校验、tick/session/epoch 错误、超时。
 - `mujoco_sim_server`：CLI11 命令行解析、yaml-cpp 严格配置解析、GUI/headless、真实 GLFW viewer 生命周期、PNG 截图编码回读、CLI 覆盖优先级、解析事务性、help 退出行为、安装后 CMake consumer 与可执行文件启动、topic/service 命名。
 - 状态工具单元测试：CLI 默认值、全部参数、help、未知参数、缺失值、零值、负数和整数溢出；status payload 与 publisher 切换；资源成功/失败；controller 和资源排序；人类输出、JSON 字段/转义/uint64 精度及 NDJSON。
-- `mujoco_sim_adapter_sdk`：Commit 和 Heartbeat 构造。
-- `mujoco_sim_sample_adapter`：参数解析、默认资源、固定 command 生成。
+- `mujoco_sim_adapter_sdk`：Commit/Heartbeat 构造、重复 Tick 缓存重发和并发 handler
+  单次执行。
+- `mujoco_sim_sample_adapter`：生成式 YAML/CLI、默认/自定义资源、固定 command 生成。
+- `mujoco_sim_wbr_lqr_demo`：上游 golden、同步 pipeline、全部资源改名/乱序映射、严格配置
+  转换、输入脚本效果、真实模型 keyframe contract、GUI 非空像素截图、安装态配置闭环、
+  6000 Tick headless 验收以及 GUI/Xvfb E2E。
 - 端到端：真实 eCAL server + sample adapter 分别在无 DISPLAY 的 headless 模式和真实 GUI 模式完成固定 tick 数闭环，进程均以 0 退出。
 - 状态工具端到端：查询 headless server 的状态与资源，持续输出 NDJSON，验证无 server 超时、SIGINT 正常退出、server 停止后的 stale 提示与空闲等待、同名重启后的 recovered 和资源重新查询。
-- 状态工具安装测试：staged `mujoco-sim-status --help` 可运行，ELF 不链接 server、Core、MuJoCo、GLFW、PNG、YAML 或 OpenGL/窗口系统依赖。
+- 状态工具安装测试：staged `mujoco-sim-status --help` 可运行，ELF 允许生成配置所需的
+  yaml-cpp，但不链接 server、Core、MuJoCo、GLFW、PNG 或 OpenGL/窗口系统依赖。
 
 状态工具验收示例：
 
@@ -141,9 +199,8 @@ mujoco-sim-status --server-name default --json
 
 ```bash
 colcon list --topological-order
-colcon build --packages-up-to mujoco_sim_server --cmake-args -DBUILD_TESTING=ON
-colcon build --packages-up-to mujoco_sim_sample_adapter --cmake-args -DBUILD_TESTING=ON
-colcon test --packages-select mujoco_sim_protocol mujoco_sim_core mujoco_sim_server mujoco_sim_adapter_sdk mujoco_sim_sample_adapter
+colcon build --cmake-args -DBUILD_TESTING=ON
+colcon test --packages-select mujoco_sim_config mujoco_sim_protocol mujoco_sim_core mujoco_sim_server mujoco_sim_adapter_sdk mujoco_sim_sample_adapter mujoco_sim_wbr_lqr_demo
 colcon test-result --verbose
 ```
 
@@ -159,4 +216,7 @@ mujoco-sim-sample-adapter --ticks 5 --command-value 0.1
 
 - 完成计划文档后，必须让 subagent 做计划审查。
 - 完成代码后，必须让 subagent 做代码审查。
+- 所有新增或修改的生产行为必须有对应自动化测试；不能以手工验证替代可重复测试。
+- 配置 schema、生成器、包导出、迁移文档和全部代码差异都必须进入 subagent 审查范围；
+  修复发现后重新执行相关测试并进行最终复审。
 - 审查重点：包边界、协议一致性、仿真循环、资源所有权、Barrier/超时、测试覆盖、构建/install 可用性。

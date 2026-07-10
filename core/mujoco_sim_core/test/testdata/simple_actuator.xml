@@ -14,4 +14,7 @@
     <jointvel name="hinge_vel" joint="hinge"/>
     <actuatorfrc name="hinge_force" actuator="hinge_motor"/>
   </sensor>
+  <keyframe>
+    <key name="ready" time="1.25" qpos="0.5" qvel="-0.25" ctrl="0.75"/>
+  </keyframe>
 </mujoco>

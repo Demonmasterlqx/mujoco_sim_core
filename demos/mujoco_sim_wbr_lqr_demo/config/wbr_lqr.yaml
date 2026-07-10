@@ -1,0 +1,50 @@
+adapter:
+  server_name: wbr
+  controller_id: wbr_lqr_controller
+  timeout_ms: 5000
+  service_timeout_ms: 10000
+  max_ticks: 6000
+
+interfaces:
+  imu:
+    quaternion: imu_quat
+    angular_velocity: imu_gyro
+    linear_acceleration: imu_accel
+  motors:
+    - {semantic_name: left_joint_1, position_state: ljoint1_pos, velocity_state: ljoint1_vel, effort_state: ljoint1_tor, effort_command: ljoint1_actuator}
+    - {semantic_name: left_joint_4, position_state: ljoint4_pos, velocity_state: ljoint4_vel, effort_state: ljoint4_tor, effort_command: ljoint4_actuator}
+    - {semantic_name: left_wheel, position_state: lwheel_pos, velocity_state: lwheel_vel, effort_state: lwheel_tor, effort_command: lwheel_actuator}
+    - {semantic_name: right_joint_1, position_state: rjoint1_pos, velocity_state: rjoint1_vel, effort_state: rjoint1_tor, effort_command: rjoint1_actuator}
+    - {semantic_name: right_joint_4, position_state: rjoint4_pos, velocity_state: rjoint4_vel, effort_state: rjoint4_tor, effort_command: rjoint4_actuator}
+    - {semantic_name: right_wheel, position_state: rwheel_pos, velocity_state: rwheel_vel, effort_state: rwheel_tor, effort_command: rwheel_actuator}
+
+pipeline:
+  imu_mode: mahony
+  control:
+    force_relax: false
+    motor_zero_rad: [-0.06, -0.20, 0.0, 0.06, 0.20, 0.0]
+    pid:
+      leg:
+        len: {kp: 6000.0, ki: 0.0, kd: -1500.0, max_out: 100.0, max_i: 0.0, mode: dvel}
+        phi: {kp: 0.7, ki: 0.0, kd: 1.4, max_out: 20.0, max_i: 0.005, mode: position}
+      roll: {kp: 0.7, ki: 0.0001, kd: 1.4, max_out: 0.05, max_i: 0.005}
+      len_balance: {kp: 2000.0, ki: 0.0, kd: -400.0, max_out: 125.0, max_i: 0.0}
+      recover: {kp: 20.0, kd: 10.0, slope: 0.005, kick_torque: 15.0}
+      flatten:
+        high_phi: {kp: 10.0, kd: 5.0, slope: 0.01}
+        low_phi: {kp: 5.0, kd: 10.0, slope: 0.002}
+      neutral: {kp: 30.0, kd: 10.0, slope: 0.003}
+    fsm:
+      enter_normal_alpha: 0.58
+      enter_normal_ticks: 8
+      exit_relax_alpha: 1.05
+      exit_relax_ticks: 250
+      offground_min_air_ticks: 800
+
+input_script:
+  - {begin_tick: 0, end_tick: 1}
+  - {begin_tick: 1, end_tick: 2, space: true}
+  - {begin_tick: 2000, end_tick: 2001, e: true}
+  - {begin_tick: 4000, end_tick: 4001, q: true}
+
+log_every_ticks: 1000

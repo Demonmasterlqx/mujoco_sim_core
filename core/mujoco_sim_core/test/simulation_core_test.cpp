@@ -84,6 +84,85 @@ TEST(SimulationCoreTest, LoadsModelAndBuildsCatalogs) {
   EXPECT_DOUBLE_EQ(core.commands()[0].ctrl_max(), 1.0);
 }
 
+TEST(SimulationCoreTest, LoadsModelFromInitialKeyframeAndClearsControl) {
+  mujoco_sim::core::SimulationCore core;
+  mujoco_sim::core::ModelLoadOptions options;
+  options.initial_keyframe = "ready";
+  std::string error;
+  ASSERT_TRUE(core.LoadModel(MUJOCO_SIM_CORE_TEST_MODEL, options, &error))
+      << error;
+
+  auto snapshot = core.CreateSnapshot(&error);
+  ASSERT_NE(snapshot, nullptr) << error;
+  EXPECT_DOUBLE_EQ(snapshot->data()->time, 1.25);
+  EXPECT_DOUBLE_EQ(snapshot->data()->qpos[0], 0.5);
+  EXPECT_DOUBLE_EQ(snapshot->data()->qvel[0], -0.25);
+  EXPECT_DOUBLE_EQ(snapshot->data()->ctrl[0], 0.0);
+  EXPECT_DOUBLE_EQ(snapshot->data()->sensordata[0], 0.5);
+  EXPECT_DOUBLE_EQ(core.simulation_time(), 1.25);
+}
+
+TEST(SimulationCoreTest, EmptyModelLoadOptionsPreserveDefaultResetBehavior) {
+  mujoco_sim::core::SimulationCore legacy_core;
+  mujoco_sim::core::SimulationCore options_core;
+  std::string error;
+  ASSERT_TRUE(legacy_core.LoadModel(MUJOCO_SIM_CORE_TEST_MODEL, &error))
+      << error;
+  ASSERT_TRUE(options_core.LoadModel(MUJOCO_SIM_CORE_TEST_MODEL,
+                                    mujoco_sim::core::ModelLoadOptions{},
+                                    &error))
+      << error;
+
+  auto legacy_snapshot = legacy_core.CreateSnapshot(&error);
+  ASSERT_NE(legacy_snapshot, nullptr) << error;
+  auto options_snapshot = options_core.CreateSnapshot(&error);
+  ASSERT_NE(options_snapshot, nullptr) << error;
+  EXPECT_DOUBLE_EQ(options_snapshot->data()->time,
+                   legacy_snapshot->data()->time);
+  EXPECT_DOUBLE_EQ(options_snapshot->data()->qpos[0],
+                   legacy_snapshot->data()->qpos[0]);
+  EXPECT_DOUBLE_EQ(options_snapshot->data()->qvel[0],
+                   legacy_snapshot->data()->qvel[0]);
+  EXPECT_DOUBLE_EQ(options_snapshot->data()->ctrl[0],
+                   legacy_snapshot->data()->ctrl[0]);
+  EXPECT_DOUBLE_EQ(options_snapshot->data()->sensordata[0],
+                   legacy_snapshot->data()->sensordata[0]);
+  EXPECT_DOUBLE_EQ(options_snapshot->data()->time, 0.0);
+  EXPECT_DOUBLE_EQ(options_snapshot->data()->qpos[0], 0.0);
+}
+
+TEST(SimulationCoreTest, MissingInitialKeyframeLeavesLoadedModelUnchanged) {
+  auto core = LoadedCore();
+  std::string error;
+  auto snapshot = core.CreateSnapshot(&error);
+  ASSERT_NE(snapshot, nullptr) << error;
+  const auto registration = RegisterAndActivate(&core);
+  ASSERT_EQ(core.OpenTick().size(), 1);
+  const auto epoch = core.epoch();
+  const auto tick_id = core.current_tick_id();
+  const auto simulation_time = core.simulation_time();
+
+  mujoco_sim::core::ModelLoadOptions options;
+  options.initial_keyframe = "missing_pose";
+  EXPECT_FALSE(core.LoadModel(MUJOCO_SIM_CORE_DUAL_TEST_MODEL, options, &error));
+  EXPECT_EQ(error,
+            "initial keyframe 'missing_pose' was not found in MuJoCo model");
+  EXPECT_TRUE(core.IsModelLoaded());
+  EXPECT_EQ(core.epoch(), epoch);
+  EXPECT_EQ(core.current_tick_id(), tick_id);
+  EXPECT_DOUBLE_EQ(core.simulation_time(), simulation_time);
+  EXPECT_EQ(core.server_state(), mujoco_sim::v1::RUNNING);
+  EXPECT_TRUE(core.tick_open());
+  EXPECT_EQ(core.active_controller_count(), 1);
+  ASSERT_EQ(core.commands().size(), 1);
+  EXPECT_EQ(core.commands()[0].name(), "hinge_motor");
+  EXPECT_TRUE(core.UpdateSnapshot(snapshot.get(), &error)) << error;
+
+  const auto result = core.SubmitCommit(CommitFor(registration, tick_id, 0.2));
+  EXPECT_EQ(result.code, mujoco_sim::v1::OK);
+  EXPECT_TRUE(result.stepped);
+}
+
 TEST(SimulationCoreTest, ProvidesAvailableResources) {
   auto core = LoadedCore();
   mujoco_sim::v1::GetAvailableResourcesRequest request;

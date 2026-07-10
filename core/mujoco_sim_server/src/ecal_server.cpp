@@ -62,7 +62,10 @@ bool EcalServer::Start(std::string* error_message) {
     }
   }
 
-  if (!core_.LoadModel(config_.model_path, error_message)) {
+  if (!core_.LoadModel(
+          config_.model_path,
+          mujoco_sim::core::ModelLoadOptions{config_.initial_keyframe},
+          error_message)) {
     return false;
   }
 

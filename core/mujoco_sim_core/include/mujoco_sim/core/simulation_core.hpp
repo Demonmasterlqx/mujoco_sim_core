@@ -19,6 +19,10 @@ struct CoreOptions {
   std::uint32_t default_timeout_ms = 1000;
 };
 
+struct ModelLoadOptions {
+  std::string initial_keyframe;
+};
+
 struct CommitResult {
   mujoco_sim::v1::ErrorCode code = mujoco_sim::v1::OK;
   std::string message;
@@ -58,6 +62,9 @@ class SimulationCore {
   SimulationCore& operator=(SimulationCore&&) noexcept;
 
   bool LoadModel(const std::string& model_path, std::string* error_message);
+  bool LoadModel(const std::string& model_path,
+                 const ModelLoadOptions& options,
+                 std::string* error_message);
   bool IsModelLoaded() const;
   std::unique_ptr<SimulationSnapshot> CreateSnapshot(
       std::string* error_message) const;

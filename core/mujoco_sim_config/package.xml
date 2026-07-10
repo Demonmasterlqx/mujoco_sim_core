@@ -1,0 +1,18 @@
+<?xml version="1.0"?>
+<package format="3">
+  <name>mujoco_sim_config</name>
+  <version>0.1.0</version>
+  <description>Generated strict YAML and CLI configuration for MuJoCo simulator packages.</description>
+  <maintainer email="pnx@example.com">pnx</maintainer>
+  <license>Apache-2.0</license>
+
+  <buildtool_depend>cmake</buildtool_depend>
+  <depend>cli11</depend>
+  <depend>python3</depend>
+  <depend>python3-yaml</depend>
+  <depend>yaml-cpp</depend>
+
+  <export>
+    <build_type>cmake</build_type>
+  </export>
+</package>

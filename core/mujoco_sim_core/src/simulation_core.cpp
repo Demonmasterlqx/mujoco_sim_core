@@ -166,6 +166,12 @@ SimulationCore& SimulationCore::operator=(SimulationCore&&) noexcept = default;
 
 bool SimulationCore::LoadModel(const std::string& model_path,
                                std::string* error_message) {
+  return LoadModel(model_path, ModelLoadOptions{}, error_message);
+}
+
+bool SimulationCore::LoadModel(const std::string& model_path,
+                               const ModelLoadOptions& options,
+                               std::string* error_message) {
   char load_error[1024] = {};
   std::unique_ptr<mjModel_, MjModelDeleter> model(
       mj_loadXML(model_path.c_str(), nullptr, load_error, sizeof(load_error)));
@@ -185,11 +191,28 @@ bool SimulationCore::LoadModel(const std::string& model_path,
     return false;
   }
 
+  if (options.initial_keyframe.empty()) {
+    mj_resetData(model.get(), data.get());
+  } else {
+    const int keyframe_id =
+        mj_name2id(model.get(), mjOBJ_KEY, options.initial_keyframe.c_str());
+    if (keyframe_id < 0) {
+      if (error_message != nullptr) {
+        *error_message = "initial keyframe '" + options.initial_keyframe +
+                         "' was not found in MuJoCo model";
+      }
+      return false;
+    }
+    mj_resetDataKeyframe(model.get(), data.get(), keyframe_id);
+  }
+  if (model->nu > 0) {
+    mju_zero(data->ctrl, model->nu);
+  }
+  mj_forward(model.get(), data.get());
+
   model_ = std::move(model);
   data_ = std::move(data);
   ++model_generation_;
-  mj_resetData(model_.get(), data_.get());
-  mj_forward(model_.get(), data_.get());
 
   observations_.clear();
   commands_.clear();

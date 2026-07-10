@@ -1,0 +1,15 @@
+@NOTICE@
+#pragma once
+
+#include <array>
+#include <cstdint>
+#include <filesystem>
+#include <limits>
+#include <string>
+#include <vector>
+
+namespace @NAMESPACE@ {
+
+@DECLARATIONS@
+
+}  // namespace @NAMESPACE@

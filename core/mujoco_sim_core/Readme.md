@@ -16,7 +16,8 @@ Tick 的 commit barrier 后执行一次 `mj_step()`。
 
 本包负责：
 
-- 通过 `mj_loadXML()` 加载 MJCF XML，并创建、重置和持有唯一真实仿真状态。
+- 通过 `mj_loadXML()` 加载 MJCF XML，可从具名 keyframe 初始化，并创建、重置和持有
+  唯一真实仿真状态。
 - 从具名 MuJoCo sensor 和 actuator 建立 observation/command 资源目录。
 - 校验资源发现、控制器注册、激活、注销、session、epoch 与 tick。
 - 对 command actuator 实施单控制器独占所有权。
@@ -110,10 +111,11 @@ API 位于 `mujoco_sim::core` 命名空间。
 | 类型/API | 行为 |
 | --- | --- |
 | `CoreOptions` | `server_name` 默认 `default`；`default_timeout_ms` 默认 `1000` |
+| `ModelLoadOptions` | 可选的 `initial_keyframe`；空字符串保持默认 reset 行为 |
 | `CommitResult` | 返回 `code`、说明文本、是否为重复提交及本次是否实际 step |
 | `SimulationSnapshot` | move-only 的隔离 MuJoCo model/data 副本，提供 `model()`、`data()` |
 | `SimulationCore(options)` | 构造 move-only Core；不自动加载模型 |
-| `LoadModel()`、`IsModelLoaded()` | 加载 MJCF XML 并查询模型状态 |
+| `LoadModel()`、`IsModelLoaded()` | 加载 MJCF XML，可选初始 keyframe，并查询模型状态 |
 | `observations()`、`commands()` | 读取当前模型建立的资源目录 |
 | `GetAvailableResources()` | 校验 server/协议版本并返回资源目录 |
 | `RegisterController()` | 校验并分配资源，返回 session、epoch、layout 和 provisional 状态 |
@@ -127,8 +129,30 @@ API 位于 `mujoco_sim::core` 命名空间。
 | `CreateSnapshot()`、`UpdateSnapshot()` | 创建和刷新隔离的可视化副本 |
 | 状态 getter | `epoch()`、`current_tick_id()`、`simulation_time()`、`server_state()`、`tick_open()`、`active_controller_count()` |
 
-`LoadModel()`、`CreateSnapshot()` 和 `UpdateSnapshot()` 的 `error_message` 可传
-`nullptr`；需要诊断信息时传入 `std::string*`。
+`LoadModel()` 保留原有 `(model_path, error_message)` 签名，并新增
+`(model_path, ModelLoadOptions, error_message)` 重载。所有 `LoadModel()`、
+`CreateSnapshot()` 和 `UpdateSnapshot()` 的 `error_message` 均可传 `nullptr`；需要诊断
+信息时传入 `std::string*`。
+
+### 初始 keyframe
+
+`initial_keyframe` 为空时，旧重载和新重载都执行原有的 `mj_resetData()` 与
+`mj_forward()` 流程。指定名称时，Core 在临时 model/data 上用 `mjOBJ_KEY` 查找 keyframe，
+调用 `mj_resetDataKeyframe()`，将整个 `data->ctrl` 清零，再调用 `mj_forward()`：
+
+```cpp
+mujoco_sim::core::ModelLoadOptions load_options;
+load_options.initial_keyframe = "ready";
+
+std::string error;
+if (!simulation.LoadModel(model_path, load_options, &error)) {
+  // error 包含缺失的 keyframe 名称或 MuJoCo 加载诊断。
+}
+```
+
+keyframe 的 time、qpos、qvel、act 等状态会成为初始状态；其中保存的 ctrl 不会成为启动
+命令。只有临时状态完成初始化后才替换当前模型。XML 加载、data 分配或 keyframe 查找失败
+时，现有 model/data、资源目录、controller、epoch、Tick、快照 generation 和服务状态均不变。
 
 ## 最小可用示例
 
@@ -261,9 +285,10 @@ if (!simulation.UpdateSnapshot(snapshot.get(), &error)) {
 
 ## 关键约束
 
-- `LoadModel()` 只调用 `mj_loadXML()`，当前没有 MJB 加载 API。成功加载会重置 data，
-  清空 controllers、actuator owners 和 pending commits，递增 epoch 和模型 generation，
-  将 tick 归零并回到 `IDLE`；加载失败不会替换当前模型。
+- `LoadModel()` 只支持通过 `mj_loadXML()` 加载 XML，当前没有 MJB 加载 API。成功加载会按
+  默认 reset 或指定 keyframe 初始化 data、清空 ctrl，随后清空 controllers、actuator owners
+  和 pending commits，递增 epoch 和模型 generation，将 tick 归零并回到 `IDLE`；加载失败
+  不会替换或修改当前模型状态。
 - 资源目录只包含具名 sensor 和具名 actuator，未命名资源会被跳过。Observation 维度
   来自 `sensor_dim`；每个 command actuator 当前固定为一个 `double`，并按模型的
   `ctrlrange` 校验。
@@ -303,9 +328,10 @@ colcon test-result \
   --verbose
 ```
 
-[simulation_core_test.cpp](test/simulation_core_test.cpp) 当前覆盖模型/资源目录、资源发现、
-快照隔离与刷新、注册冲突、激活、Tick observation、barrier、重复 commit、非法值和
-control range、session/epoch/tick 校验及超时进入 `ERROR_PAUSED`。
+[simulation_core_test.cpp](test/simulation_core_test.cpp) 当前覆盖默认与 keyframe 模型初始化、
+缺失 keyframe 的原子失败、模型/资源目录、资源发现、快照隔离与刷新、注册冲突、激活、
+Tick observation、barrier、重复 commit、非法值和 control range、session/epoch/tick 校验及
+超时进入 `ERROR_PAUSED`。
 
 ## 相关包
 

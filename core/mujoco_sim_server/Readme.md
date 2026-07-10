@@ -12,7 +12,8 @@ MuJoCo `simulate` 图形界面，并安装只读状态查询命令 `mujoco-sim-s
 
 本包负责：
 
-- 解析命令行和严格 YAML 配置，构造 `ServerConfig`。
+- 使用 `mujoco_sim_config` 的构建期 schema 生成器解析命令行和严格 YAML，构造
+  `ServerConfig`。
 - 初始化 eCAL、加载 MJCF，并注册 controller registry service 和运行时 topic。
 - 驱动 Tick/Commit barrier：向每个 active controller 发布 Tick，收齐有效 Commit
   后由 Core 写入 actuator command 并执行一个 `mj_step()`。
@@ -39,12 +40,12 @@ MuJoCo `simulate` 图形界面，并安装只读状态查询命令 `mujoco-sim-s
 | 类别 | 依赖 | 用途 |
 |---|---|---|
 | 构建 | CMake `>= 3.22`、C++20 | 配置和编译 |
-| 仓库内 | `mujoco_sim_core`、`mujoco_sim_protocol` | 仿真 Core、V1 Protobuf 与命名规则 |
-| 系统 | CLI11、eCAL、GLFW 3、libpng、yaml-cpp、Threads | CLI、IPC、GUI、PNG 兼容层、YAML、线程 |
+| 仓库内 | `mujoco_sim_config`、`mujoco_sim_core`、`mujoco_sim_protocol` | 生成配置、仿真 Core、V1 Protobuf 与命名规则 |
+| 系统 | Python 3/PyYAML、CLI11、eCAL、GLFW 3、libpng、yaml-cpp、Threads | 构建期生成、CLI、IPC、GUI、PNG、YAML、线程 |
 | 测试 | GTest、Xvfb、`readelf` | 单元/包消费测试、状态工具依赖检查和无物理显示器的 GUI 测试 |
 
-对应 `package.xml` key 为 `cli11`、`ecal`、`libglfw3-dev`、`libpng-dev`、
-`yaml-cpp`，测试还需要 `gtest` 和 `xvfb`。即使运行时始终使用 `--headless`，当前
+CLI11、yaml-cpp、Python 和 PyYAML 由 `mujoco_sim_config` 传递；本包直接声明 eCAL、
+GLFW 和 libpng，测试还需要 GTest 和 Xvfb。即使运行时始终使用 `--headless`，当前
 构建仍会编译 GUI，因此 GLFW 和 libpng 仍是构建依赖。MuJoCo 3.10.0 库及
 `simulate` 源码来自 `mujoco_sim_core` 中现有的 Linux/x86 vendored 目录。
 安装态 package consumer 使用 `readelf` 检查状态工具没有引入 MuJoCo/GUI 等重依赖；
@@ -129,6 +130,7 @@ Xvfb 仍会初始化并运行 GUI 渲染；如果不需要渲染，应直接使�
 | `-h`, `--help` | 无 | - | 将 CLI11 生成的帮助写到 stdout 并以 `0` 退出。 |
 | `--config PATH` | 已存在的文件 | 不加载配置文件 | 加载一个 YAML 文件；CLI11 在解析阶段检查文件存在。 |
 | `--model PATH` | 字符串 | 空 | MuJoCo MJCF 路径；合并配置后必须非空。文件读取和 MJCF 校验在启动阶段进行。 |
+| `--initial-keyframe NAME` | 字符串 | 空 | 模型加载后原子应用具名 MuJoCo keyframe；空值使用模型默认初始状态。 |
 | `--server-name NAME` | 非空字符串 | `default` | eCAL service/topic 的命名空间。 |
 | `--max-ticks N` | `uint64`，`0..18446744073709551615` | `0` | 达到 N 个 tick 后成功退出；`0` 表示无限运行。 |
 | `--tick-timeout-ms N` | `uint32`，`0..4294967295` | `1000` | controller 注册请求未提供非零 timeout 时使用的 Commit barrier 超时。 |
@@ -144,8 +146,8 @@ CLI 还执行以下校验：
 - 无符号整数拒绝负数、非数字和溢出值。
 - 最终 `model_path` 和 `server_name` 必须非空。
 
-相对 `--model` 路径按 server 进程的当前工作目录解析，不按 YAML 文件所在目录解析；
-本文命令从仓库根目录运行，因此示例模型路径以 `core/` 开头。
+相对 `--model` 路径按 server 进程的当前工作目录解析；YAML 中的相对 `model_path` 按
+YAML 文件所在目录解析。因此安装态配置可以用相对路径稳定引用同包安装的 MJCF。
 
 ## YAML 配置
 
@@ -155,6 +157,7 @@ YAML 顶层支持且只支持以下字段：
 |---|---|---|---|---|
 | `server_name` | string，最终非空 | `default` | eCAL server 命名空间 | `--server-name` |
 | `model_path` | string，最终非空 | 空 | MJCF 模型路径 | `--model` |
+| `initial_keyframe` | string | 空 | 初始具名 MuJoCo keyframe；空值不应用 keyframe | `--initial-keyframe` |
 | `max_ticks` | unsigned integer (`uint64`)，`0..18446744073709551615` | `0` | 最大 tick 数；`0` 无限 | `--max-ticks` |
 | `tick_timeout_ms` | unsigned integer (`uint32`)，`0..4294967295` | `1000` | 默认 Commit barrier 超时 | `--tick-timeout-ms` |
 | `startup_timeout_ms` | unsigned integer (`uint32`)，`0..4294967295` | `5000` | 有界运行的 controller 启动超时 | `--startup-timeout-ms` |
@@ -174,6 +177,7 @@ YAML 顶层支持且只支持以下字段：
   `"true"` 和 `enabled` 非法。
 - YAML 语法错误、多 document、类型错误、未知/重复字段都会中止启动。错误文本包含
   配置路径以及可用的行列号；失败的加载不会部分修改配置。
+- YAML 中的相对 path 字段按配置文件目录解析；CLI path 保持相对进程当前目录。
 - 完成 YAML 与 CLI 合并后，空 `model_path` 或空 `server_name` 仍会中止启动。
 
 ### 优先级
@@ -192,6 +196,7 @@ YAML 顶层支持且只支持以下字段：
 ```yaml
 server_name: demo
 model_path: core/mujoco_sim_core/test/testdata/simple_actuator.xml
+initial_keyframe: ""
 max_ticks: 5
 tick_timeout_ms: 1000
 startup_timeout_ms: 5000
@@ -268,8 +273,9 @@ controller 提交完整且有效的 actuator command、Core 收齐 barrier 后�
 ## 状态查询工具
 
 本包同时安装独立可执行文件 `mujoco-sim-status`。其源码、内部 library 和测试位于
-`tools/status/`，目标只链接 CLI11、eCAL、Threads 和 `mujoco_sim_protocol`，不链接
-server library、MuJoCo、GLFW、libpng 或 yaml-cpp。它仍属于同一个 ROS/colcon 包，
+`tools/status/`，目标使用 `mujoco_sim_config` 生成配置并链接 eCAL、Threads 和
+`mujoco_sim_protocol`，不链接 server library、Core、MuJoCo、GLFW 或 libpng。它仍属于
+同一个 ROS/colcon 包，
 因此这不是包管理层面的独立轻量包。
 
 默认查询名为 `default` 的 server，收到一条状态后退出：
@@ -291,6 +297,7 @@ mujoco-sim-status --server-name demo --watch --json
 | 参数 | 默认值 | 行为 |
 |---|---:|---|
 | `-h`, `--help` | - | 输出 CLI11 帮助并以 `0` 退出。 |
+| `--config PATH` | - | 加载严格 YAML；命令行显式值覆盖 YAML。 |
 | `--server-name NAME` | `default` | 选择 status topic 和 registry service 的 namespace。 |
 | `--timeout-ms N` | `3000` | 首条有效状态的等待上限，也是 watch 的 stale 阈值；必须大于 0。 |
 | `--watch` | 关闭 | 持续监控；stale 时提示但不退出，恢复后继续输出。 |
@@ -302,6 +309,9 @@ mujoco-sim-status --server-name demo --watch --json
 和 `resource_error`；资源查询失败不会使状态查询失败，此时 `resources` 为 `null`，具体
 原因位于 `resource_error`。stdout 只包含状态结果，stale/recovered 和冲突诊断写入
 stderr。
+
+状态 YAML 支持 `server_name`、`timeout_ms`、`interval_ms`、`watch` 和 `json`。其严格
+类型、事务性和优先级规则与 server 配置一致。
 
 退出码为：成功或正常 Ctrl-C 返回 `0`，CLI/eCAL/格式化错误返回 `1`，在
 `--timeout-ms` 内没有收到有效状态返回 `2`。工具锁定首个有效 status publisher；同名
@@ -395,8 +405,9 @@ target_link_libraries(my_server PRIVATE mujoco_sim::server)
 [`server_config.hpp`](include/mujoco_sim/server/server_config.hpp) 和
 [`ecal_server.hpp`](include/mujoco_sim/server/ecal_server.hpp)，提供配置解析以及
 `EcalServer::Start/Run/Stop`。可执行 target 用于 `$<TARGET_FILE:...>`、测试或部署，
-不作为链接库使用。安装态 package config 会继续查找 CLI11、eCAL、GLFW、
-`mujoco_sim_core`、`mujoco_sim_protocol`、PNG、Threads 和 yaml-cpp。
+不作为链接库使用。安装态 package config 会继续查找 `mujoco_sim_config`、eCAL、GLFW、
+`mujoco_sim_core`、`mujoco_sim_protocol`、PNG 和 Threads；配置包再传递 CLI11 与
+yaml-cpp。
 状态工具内部静态库 `mujoco_sim_status_lib` 仅供本包构建和测试，不安装、不导出。
 
 ## 测试
@@ -417,7 +428,8 @@ ctest --test-dir build/mujoco_sim_server --output-on-failure
 
 本包注册的测试包括：
 
-- `server_test`：CLI、默认值、严格 YAML、优先级和 endpoint 命名。
+- `server_test`：生成式 CLI、默认值、严格 YAML、相对 path、initial keyframe、优先级和
+  endpoint 命名。
 - `png_writer_test`：PNG 兼容写出路径。
 - `server_help`：帮助输出和退出码。
 - `server_package_consumer`：安装、外部 `find_package`、链接、两个安装态命令和状态工具

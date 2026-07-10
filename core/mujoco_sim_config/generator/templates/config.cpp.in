@@ -1,0 +1,28 @@
+@NOTICE@
+#include "@HEADER_INCLUDE@"
+
+#include <cmath>
+#include <cstddef>
+#include <filesystem>
+#include <optional>
+#include <string>
+#include <unordered_set>
+#include <utility>
+#include <vector>
+
+#include <CLI/CLI.hpp>
+#include <mujoco_sim/config/runtime.hpp>
+#include <yaml-cpp/yaml.h>
+
+namespace @NAMESPACE@ {
+namespace {
+
+namespace runtime = ::mujoco_sim::config::runtime;
+
+@HELPERS@
+
+}  // namespace
+
+@DEFINITIONS@
+
+}  // namespace @NAMESPACE@

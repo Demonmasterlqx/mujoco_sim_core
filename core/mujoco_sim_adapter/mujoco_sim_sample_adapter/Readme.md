@@ -34,8 +34,9 @@ descriptor，并为每个名称生成一个 `command_value`。本包不加载模
 
 ## 依赖与构建
 
-生产代码要求 CMake 3.22、C++20 和 `mujoco_sim_adapter_sdk`；eCAL、协议与 Protobuf 由
-SDK target 传递。生产程序不直接依赖 MuJoCo。启用测试后还需要 GTest、
+生产代码要求 CMake 3.22、C++20、`mujoco_sim_adapter_sdk` 和
+`mujoco_sim_config`；eCAL、协议、Protobuf、CLI11 和 yaml-cpp 由依赖 target 传递，配置
+代码在构建期由 Python/PyYAML 生成。生产程序不直接依赖 MuJoCo。启用测试后还需要 GTest、
 `mujoco_sim_server`，以及在无 `DISPLAY` 环境中用于 GUI E2E 的 `xvfb-run`。Server 构建
 还需要 CLI11、yaml-cpp、GLFW 和 libpng，详见[仓库 README](../../../Readme.md)。
 
@@ -52,35 +53,54 @@ source install/setup.bash
 
 ## 命令行参数
 
-主程序使用默认构造的 `SampleOptions`，因此下表是直接运行可执行程序时的默认值。
-解析器实际支持以下全部参数。参数和值必须写成两个 argv，例如 `--server-name demo`；
-当前实现不支持 `--server-name=demo` 形式。
+主程序使用 schema 生成的 CLI11 解析器。解析是事务性的，错误不会部分修改
+`SampleOptions`；`--help` 文本也由同一 schema 生成。
 
 | 参数 | 默认值 | 当前含义 |
 |---|---:|---|
 | `-h`, `--help` | - | 输出用法并以 `0` 退出，不连接 server。 |
+| `--config PATH` | - | 加载严格 YAML 配置；CLI 显式值覆盖 YAML。 |
 | `--server-name NAME` | `default` | registry 和 topic namespace；必须与 server 一致。 |
 | `--controller-id ID` | `sample_controller` | controller 唯一 ID；不能为空。 |
-| `--observations a,b` | `hinge_pos,hinge_vel` | 逗号分隔的 observation 名称；条目会去除首尾空白，空条目被丢弃，空列表允许。 |
-| `--commands a,b` | `hinge_motor` | 逗号分隔的 actuator 名称；处理规则同上，但最终必须至少有一个名称。 |
+| `--observations a,b` | `hinge_pos,hinge_vel` | 逗号分隔的唯一 observation 名称；空列表允许。 |
+| `--commands a,b` | `hinge_motor` | 逗号分隔的唯一 actuator 名称；最终必须至少有一个名称。 |
 | `--ticks N` | `0` | 处理 N 个不同的新 Tick 后成功退出；`0` 表示无限等待。 |
 | `--command-value VALUE` | `0.0` | 为 Tick layout 中每个 command 提交的 `double` 标量。 |
 | `--timeout-ms N` | `1000` | 注册给 server 的每 Tick Commit 等待上限；`0` 表示使用 server 默认 timeout。 |
 | `--service-timeout-ms N` | `5000` | 注册和激活各自等待 registry service 的总上限，单位毫秒。 |
 
-`N` 当前通过 `std::stoull` 解析，`VALUE` 通过 `std::stod` 解析。缺少值、无法解析的
-数值、未知参数、空 controller ID 或空 command 列表都会导致参数解析失败。当前
-`--help` 输出是简略 synopsis，其中未列出两个 timeout 参数，但解析器支持它们。
-
-当前 parser 没有额外拒绝前导负号，`std::stoull` 可能把 `-1` 接受为无符号值；两个
-timeout 还会从 `uint64_t` 直接转换为 `uint32_t`，超过 `4294967295` 的值会截断，例如
-`4294967296` 会变成 `0`。这不是推荐用法：`--ticks` 应使用 `0..UINT64_MAX`，两个
-timeout 应限制在 `0..4294967295`，并且不要传负数。
+未知/重复参数、缺少值、负无符号数、整数溢出以及 `NaN`/`Inf` command 值都会失败。
+`--ticks` 接受 `uint64`，两个 timeout 接受 `uint32`，不会发生静默截断。
 
 `--timeout-ms` 与 server 的 `--startup-timeout-ms` 含义不同：前者在 controller 注册后
 约束每个 Tick 的 Commit 等待时间；后者约束一个设置了有限 `--max-ticks` 的 server
 等待首个 active controller 的时间。`--service-timeout-ms` 只控制 Adapter 调用 registry
 service 的等待时间。
+
+## YAML 配置
+
+YAML 顶层支持 `server_name`、`controller_id`、`observation_names`、`command_names`、
+`max_ticks`、`command_value`、`timeout_ms` 和 `service_timeout_ms`。例如：
+
+```yaml
+server_name: demo
+controller_id: sample_controller
+observation_names: [hinge_pos, hinge_vel]
+command_names: [hinge_motor]
+max_ticks: 5
+command_value: 0.1
+timeout_ms: 1000
+service_timeout_ms: 5000
+```
+
+加载方式：
+
+```bash
+mujoco-sim-sample-adapter --config sample.yaml --ticks 10
+```
+
+优先级固定为“CLI > YAML > 默认值”，与 `--config` 的 argv 位置无关。解析器拒绝未知或
+重复字段、错误类型、重复资源名、非有限数值和整数溢出。
 
 ## 公开 Target 与 API
 
@@ -108,8 +128,8 @@ target_link_libraries(my_target PRIVATE mujoco_sim::sample_adapter)
 | `SampleOptions` | 组合 SDK `AdapterOptions`、`max_ticks` 和 `command_value`。 |
 | `ParseNameList()` | 拆分逗号列表、去除条目首尾空白并丢弃空条目。 |
 | `ConstantCommandsForTick()` | 按 Tick command layout 生成完整的同值 `CommandValue` 列表。 |
-| `ParseCommandLine()` | 重置 server/controller、资源列表和 `timeout_ms` 后解析 CLI；省略时保留传入对象原有的 `max_ticks`、`command_value` 和 `service_timeout_ms`。 |
-| `Usage()` | 返回当前简略命令行 synopsis。 |
+| `ParseCommandLine()` | 通过生成式 YAML/CLI 解析器合并配置；兼容保留调用方预置的 `max_ticks`、`command_value` 和 `service_timeout_ms`。 |
+| `Usage()` | 返回 schema 生成的完整 CLI11 help。 |
 
 ## 单独启动 Adapter
 
@@ -254,7 +274,7 @@ mujoco-sim-sample-adapter \
 
 | 测试 | 覆盖范围 |
 |---|---|
-| `sample_adapter_test` | 名称列表解析、按 Tick layout 生成固定 command、CLI 默认值与覆盖。 |
+| `sample_adapter_test` | 名称列表、固定 command、生成式 CLI/YAML、严格校验、优先级和事务性。 |
 | `sample_adapter_e2e` | 启动真实 headless server 和 Adapter，完成 5 个 lockstep Tick。 |
 | `sample_adapter_gui_e2e` | 启动真实 GUI server 和 Adapter，完成 5 个 lockstep Tick；无显示环境通过 `xvfb-run`。 |
 

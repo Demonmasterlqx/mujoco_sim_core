@@ -1,0 +1,183 @@
+version: 1
+namespace: mujoco_sim::wbr_lqr_demo::generated
+name: WbrConfig
+program: mujoco-sim-wbr-lqr-adapter
+description: Run the synchronous WBR LQR controller adapter
+fields:
+  adapter:
+    type: object
+    fields:
+      server_name:
+        type: string
+        default: wbr
+        non_empty: true
+        cli: [--server-name]
+      controller_id:
+        type: string
+        default: wbr_lqr_controller
+        non_empty: true
+        cli: [--controller-id]
+      timeout_ms:
+        type: uint32
+        default: 5000
+        cli: [--timeout-ms]
+      service_timeout_ms:
+        type: uint32
+        default: 10000
+        min: 1
+        cli: [--service-timeout-ms]
+      max_ticks:
+        type: uint64
+        default: 6000
+        cli: [--ticks]
+  interfaces:
+    type: object
+    fields:
+      imu:
+        type: object
+        fields:
+          quaternion: {type: string, default: imu_quat, non_empty: true}
+          angular_velocity: {type: string, default: imu_gyro, non_empty: true}
+          linear_acceleration: {type: string, default: imu_accel, non_empty: true}
+      motors:
+        type: object_sequence
+        size: 6
+        default:
+          - {semantic_name: left_joint_1, position_state: ljoint1_pos, velocity_state: ljoint1_vel, effort_state: ljoint1_tor, effort_command: ljoint1_actuator}
+          - {semantic_name: left_joint_4, position_state: ljoint4_pos, velocity_state: ljoint4_vel, effort_state: ljoint4_tor, effort_command: ljoint4_actuator}
+          - {semantic_name: left_wheel, position_state: lwheel_pos, velocity_state: lwheel_vel, effort_state: lwheel_tor, effort_command: lwheel_actuator}
+          - {semantic_name: right_joint_1, position_state: rjoint1_pos, velocity_state: rjoint1_vel, effort_state: rjoint1_tor, effort_command: rjoint1_actuator}
+          - {semantic_name: right_joint_4, position_state: rjoint4_pos, velocity_state: rjoint4_vel, effort_state: rjoint4_tor, effort_command: rjoint4_actuator}
+          - {semantic_name: right_wheel, position_state: rwheel_pos, velocity_state: rwheel_vel, effort_state: rwheel_tor, effort_command: rwheel_actuator}
+        items:
+          type: object
+          fields:
+            semantic_name: {type: string, non_empty: true}
+            position_state: {type: string, non_empty: true}
+            velocity_state: {type: string, non_empty: true}
+            effort_state: {type: string, non_empty: true}
+            effort_command: {type: string, non_empty: true}
+  pipeline:
+    type: object
+    fields:
+      imu_mode:
+        type: enum
+        values: [bypass, mahony]
+        default: mahony
+        cli: [--imu-mode]
+      mahony:
+        type: object
+        fields:
+          kp: {type: double, default: 2.0, finite: true, min: 0.0}
+          ki: {type: double, default: 0.0, finite: true, min: 0.0}
+          accel_norm_min: {type: double, default: 0.001, finite: true, min: 0.0}
+      control:
+        type: object
+        fields:
+          force_relax: {type: bool, default: false}
+          motor_zero_rad:
+            type: array
+            items: double
+            size: 6
+            default: [-0.06, -0.20, 0.0, 0.06, 0.20, 0.0]
+            finite: true
+          pid:
+            type: object
+            fields:
+              leg:
+                type: object
+                fields:
+                  len:
+                    type: object
+                    fields:
+                      kp: {type: double, default: 6000.0, finite: true}
+                      ki: {type: double, default: 0.0, finite: true}
+                      kd: {type: double, default: -1500.0, finite: true}
+                      max_out: {type: double, default: 100.0, finite: true, min: 0.0}
+                      max_i: {type: double, default: 0.0, finite: true, min: 0.0}
+                      mode: {type: enum, values: [position, dvel], default: dvel}
+                  phi:
+                    type: object
+                    fields:
+                      kp: {type: double, default: 0.7, finite: true}
+                      ki: {type: double, default: 0.0, finite: true}
+                      kd: {type: double, default: 1.4, finite: true}
+                      max_out: {type: double, default: 20.0, finite: true, min: 0.0}
+                      max_i: {type: double, default: 0.005, finite: true, min: 0.0}
+                      mode: {type: enum, values: [position, dvel], default: position}
+              roll:
+                type: object
+                fields:
+                  kp: {type: double, default: 0.7, finite: true}
+                  ki: {type: double, default: 0.0001, finite: true}
+                  kd: {type: double, default: 1.4, finite: true}
+                  max_out: {type: double, default: 0.05, finite: true, min: 0.0}
+                  max_i: {type: double, default: 0.005, finite: true, min: 0.0}
+              len_balance:
+                type: object
+                fields:
+                  kp: {type: double, default: 2000.0, finite: true}
+                  ki: {type: double, default: 0.0, finite: true}
+                  kd: {type: double, default: -400.0, finite: true}
+                  max_out: {type: double, default: 125.0, finite: true, min: 0.0}
+                  max_i: {type: double, default: 0.0, finite: true, min: 0.0}
+              recover:
+                type: object
+                fields:
+                  kp: {type: double, default: 20.0, finite: true}
+                  kd: {type: double, default: 10.0, finite: true}
+                  slope: {type: double, default: 0.005, finite: true, min: 0.0}
+                  kick_torque: {type: double, default: 15.0, finite: true, min: 0.0}
+              flatten:
+                type: object
+                fields:
+                  high_phi:
+                    type: object
+                    fields:
+                      kp: {type: double, default: 10.0, finite: true}
+                      kd: {type: double, default: 5.0, finite: true}
+                      slope: {type: double, default: 0.01, finite: true, min: 0.0}
+                  low_phi:
+                    type: object
+                    fields:
+                      kp: {type: double, default: 5.0, finite: true}
+                      kd: {type: double, default: 10.0, finite: true}
+                      slope: {type: double, default: 0.002, finite: true, min: 0.0}
+              neutral:
+                type: object
+                fields:
+                  kp: {type: double, default: 30.0, finite: true}
+                  kd: {type: double, default: 10.0, finite: true}
+                  slope: {type: double, default: 0.003, finite: true, min: 0.0}
+          fsm:
+            type: object
+            fields:
+              enter_normal_alpha: {type: double, default: 0.58, finite: true, min: 0.0}
+              enter_normal_ticks: {type: uint32, default: 8, min: 1}
+              exit_relax_alpha: {type: double, default: 1.05, finite: true, min: 0.0}
+              exit_relax_ticks: {type: uint32, default: 250, min: 1}
+              offground_min_air_ticks: {type: uint32, default: 800}
+  input_script:
+    type: object_sequence
+    default:
+      - {begin_tick: 0, end_tick: 1}
+      - {begin_tick: 1, end_tick: 2, space: true}
+      - {begin_tick: 2000, end_tick: 2001, e: true}
+      - {begin_tick: 4000, end_tick: 4001, q: true}
+    items:
+      type: object
+      fields:
+        begin_tick: {type: uint64, default: 0}
+        end_tick: {type: uint64, default: 0}
+        w: {type: bool, default: false}
+        s: {type: bool, default: false}
+        a: {type: bool, default: false}
+        d: {type: bool, default: false}
+        q: {type: bool, default: false}
+        e: {type: bool, default: false}
+        f: {type: bool, default: false}
+        space: {type: bool, default: false}
+  log_every_ticks:
+    type: uint64
+    default: 1000
+    cli: [--log-every-ticks]

@@ -1,0 +1,118 @@
+version: 1
+namespace: mujoco_sim::config::test
+name: RuntimeConfig
+program: runtime-config-test
+description: Exercise generated configuration parsing
+config:
+  flags: [--config, -c]
+  description: Test YAML configuration file
+fields:
+  name:
+    type: string
+    description: Instance name
+    default: simulator
+    non_empty: true
+    cli: [--name]
+  model:
+    type: path
+    description: Model path
+    required: true
+    non_empty: true
+    cli: [--model, -m]
+  enabled:
+    type: bool
+    description: Enable processing
+    default: true
+    cli:
+      flags: [--enabled]
+      inverse_flags: [--disabled]
+  retries:
+    type: uint32
+    description: Retry count
+    default: 3
+    min: 1
+    max: 5
+    cli: [--retries]
+  cycles:
+    type: uint64
+    description: Cycle budget
+    default: 10
+    min: 1
+    max: 18446744073709551615
+    cli: [--cycles]
+  gain:
+    type: double
+    description: Controller gain
+    default: 0.5
+    min: 0.0
+    max: 1.0
+    finite: true
+    cli: [--gain]
+  code:
+    type: string
+    description: Three-character code
+    default: sim
+    size: 3
+    cli: [--code]
+  tags:
+    type: vector<string>
+    description: Labels
+    default: [base]
+    non_empty: true
+    unique: true
+    cli: [--tag]
+  gravity:
+    type: array
+    description: Gravity vector
+    items: double
+    size: 3
+    default: [0.0, 0.0, -9.81]
+    min: -100.0
+    max: 100.0
+    finite: true
+    cli: [--gravity]
+  mode:
+    type: enum
+    description: Timing mode
+    values: [lockstep, real-time]
+    default: lockstep
+    cli: [--mode]
+  network:
+    type: object
+    fields:
+      host:
+        type: string
+        description: Remote host
+        required: true
+        non_empty: true
+        cli: [--host]
+      port:
+        type: uint32
+        description: Remote port
+        default: 7000
+        min: 1
+        max: 65535
+        cli: [--port]
+  workers:
+    type: object_sequence
+    required: true
+    non_empty: true
+    items:
+      type: object
+      fields:
+        id:
+          type: uint64
+          required: true
+        label:
+          type: string
+          required: true
+          non_empty: true
+        axes:
+          type: array
+          items: uint32
+          size: 2
+          unique: true
+        policy:
+          type: enum
+          values: [primary, backup]
+          default: backup

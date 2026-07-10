@@ -26,6 +26,7 @@ class SimViewer {
                    mujoco_sim::core::SimulationSnapshot* snapshot,
                    std::string* error_message);
   void RenderLoop();
+  void RequestScreenshot();
   void RequestClose();
   bool close_requested() const;
   bool model_loaded() const;

@@ -1,0 +1,22 @@
+version: 1
+namespace: install_consumer
+name: ConsumerConfig
+program: config-consumer
+description: Installed package consumer
+fields:
+  model:
+    type: path
+    required: true
+    non_empty: true
+    cli: [--model]
+  headless:
+    type: bool
+    default: false
+    cli:
+      flags: [--headless]
+      inverse_flags: [--gui]
+  labels:
+    type: vector<string>
+    default: [default]
+    unique: true
+    cli: [--label]

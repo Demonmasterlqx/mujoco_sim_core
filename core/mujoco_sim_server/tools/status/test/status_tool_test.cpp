@@ -1,9 +1,12 @@
 #include <gtest/gtest.h>
 
 #include <chrono>
+#include <filesystem>
+#include <fstream>
 #include <limits>
 #include <sstream>
 #include <string>
+#include <utility>
 #include <vector>
 
 #include <google/protobuf/struct.pb.h>
@@ -14,6 +17,25 @@
 
 namespace {
 using namespace mujoco_sim::server::status_tool;
+
+class ScopedConfigFile {
+ public:
+  ScopedConfigFile(std::string name, const std::string& contents)
+      : path_(std::filesystem::temp_directory_path() / std::move(name)) {
+    std::ofstream output(path_);
+    output << contents;
+  }
+
+  ~ScopedConfigFile() {
+    std::error_code error;
+    std::filesystem::remove(path_, error);
+  }
+
+  std::string path() const { return path_.string(); }
+
+ private:
+  std::filesystem::path path_;
+};
 
 CommandLineResult ParseArgs(const std::vector<std::string>& arguments,
                             StatusOptions* options, std::string* message) {
@@ -101,6 +123,7 @@ TEST(StatusCommandLineTest, GeneratesHelpAndRejectsInvalidArguments) {
   EXPECT_EQ(ParseArgs({"mujoco-sim-status", "--help"}, &options, &message),
             CommandLineResult::kHelp);
   EXPECT_NE(message.find("--watch"), std::string::npos);
+  EXPECT_NE(message.find("--config"), std::string::npos);
   EXPECT_EQ(message, Usage());
   const std::vector<std::vector<std::string>> invalid = {
       {"mujoco-sim-status", "--unknown"},
@@ -119,6 +142,56 @@ TEST(StatusCommandLineTest, GeneratesHelpAndRejectsInvalidArguments) {
               CommandLineResult::kError);
     EXPECT_EQ(original.server_name, "unchanged");
     EXPECT_FALSE(message.empty());
+  }
+}
+
+TEST(StatusCommandLineTest, LoadsYamlAndAppliesCommandLineOverrides) {
+  ScopedConfigFile file("mujoco_sim_status.yaml",
+                        "server_name: yaml_server\n"
+                        "timeout_ms: 4000\n"
+                        "interval_ms: 200\n"
+                        "watch: true\n"
+                        "json: false\n");
+  StatusOptions options;
+  std::string message;
+  EXPECT_EQ(ParseArgs({"mujoco-sim-status", "--timeout-ms", "4500",
+                       "--json", "--config", file.path()},
+                      &options, &message),
+            CommandLineResult::kSuccess)
+      << message;
+  EXPECT_EQ(options.server_name, "yaml_server");
+  EXPECT_EQ(options.timeout_ms, 4500u);
+  EXPECT_EQ(options.interval_ms, 200u);
+  EXPECT_TRUE(options.watch);
+  EXPECT_TRUE(options.json);
+}
+
+TEST(StatusCommandLineTest, RejectsInvalidYamlTransactionally) {
+  const std::vector<std::pair<std::string, std::string>> invalid = {
+      {"unknown: true\n", "unknown"},
+      {"timeout_ms: 0\n", "greater than zero"},
+      {"interval_ms: 4294967296\n", "range"},
+      {"watch: \"true\"\n", "boolean"},
+  };
+  for (std::size_t i = 0; i < invalid.size(); ++i) {
+    SCOPED_TRACE(i);
+    ScopedConfigFile file(
+        "mujoco_sim_status_invalid_" + std::to_string(i) + ".yaml",
+        invalid[i].first);
+    StatusOptions options;
+    options.server_name = "unchanged";
+    const auto expected = options;
+    std::string message;
+
+    EXPECT_EQ(ParseArgs({"mujoco-sim-status", "--config", file.path()},
+                        &options, &message),
+              CommandLineResult::kError);
+    EXPECT_NE(message.find(invalid[i].second), std::string::npos) << message;
+    EXPECT_EQ(options.server_name, expected.server_name);
+    EXPECT_EQ(options.timeout_ms, expected.timeout_ms);
+    EXPECT_EQ(options.interval_ms, expected.interval_ms);
+    EXPECT_EQ(options.watch, expected.watch);
+    EXPECT_EQ(options.json, expected.json);
   }
 }
 

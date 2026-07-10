@@ -1,0 +1,31 @@
+version: 1
+namespace: mujoco_sim::server::status_tool::generated
+name: StatusConfig
+program: mujoco-sim-status
+description: Inspect a MuJoCo simulation server
+fields:
+  server_name:
+    type: string
+    description: Server namespace to inspect
+    default: default
+    cli: [--server-name]
+  timeout_ms:
+    type: uint32
+    description: Initial status and stale timeout in milliseconds
+    default: 3000
+    cli: [--timeout-ms]
+  interval_ms:
+    type: uint32
+    description: Minimum watch output interval in milliseconds
+    default: 1000
+    cli: [--interval-ms]
+  watch:
+    type: bool
+    description: Continue printing status updates
+    default: false
+    cli: [--watch]
+  json:
+    type: bool
+    description: Print JSON; watch mode emits newline-delimited JSON
+    default: false
+    cli: [--json]

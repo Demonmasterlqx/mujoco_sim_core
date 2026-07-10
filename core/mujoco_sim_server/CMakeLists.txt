@@ -4,14 +4,13 @@ project(mujoco_sim_server VERSION 0.1.0 LANGUAGES CXX)
 include(GNUInstallDirs)
 include(CMakePackageConfigHelpers)
 
-find_package(CLI11 CONFIG REQUIRED)
 find_package(eCAL REQUIRED)
 find_package(glfw3 CONFIG REQUIRED)
+find_package(mujoco_sim_config CONFIG REQUIRED)
 find_package(mujoco_sim_core CONFIG REQUIRED)
 find_package(mujoco_sim_protocol CONFIG REQUIRED)
 find_package(PNG REQUIRED)
 find_package(Threads REQUIRED)
-find_package(yaml-cpp CONFIG REQUIRED)
 
 set(MUJOCO_SIMULATE_ROOT
   "${CMAKE_CURRENT_SOURCE_DIR}/../mujoco_sim_core/mujoco/linux/x86/mujoco-3.10.0/simulate"
@@ -28,6 +27,12 @@ add_library(${PROJECT_NAME}_lib
   "${MUJOCO_SIMULATE_ROOT}/simulate.cc"
 )
 add_library(mujoco_sim::server ALIAS ${PROJECT_NAME}_lib)
+mujoco_sim_generate_config(
+  TARGET server_config_generated
+  SCHEMA config/server_config.yaml
+  OUTPUT_NAME server_config_generated
+  OWNER_TARGET ${PROJECT_NAME}_lib
+)
 target_compile_features(${PROJECT_NAME}_lib PUBLIC cxx_std_20)
 target_include_directories(${PROJECT_NAME}_lib
   PUBLIC
@@ -43,12 +48,10 @@ target_link_libraries(${PROJECT_NAME}_lib
     mujoco_sim::protocol
     eCAL::core
   PRIVATE
-    CLI11::CLI11
     glfw
     mujoco::mujoco
     PNG::PNG
     Threads::Threads
-    yaml-cpp::yaml-cpp
 )
 set_target_properties(${PROJECT_NAME}_lib PROPERTIES EXPORT_NAME server)
 

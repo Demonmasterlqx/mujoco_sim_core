@@ -7,13 +7,12 @@
   <license>Apache-2.0</license>
 
   <buildtool_depend>cmake</buildtool_depend>
-  <depend>cli11</depend>
   <depend>ecal</depend>
   <depend>libglfw3-dev</depend>
   <depend>libpng-dev</depend>
+  <depend>mujoco_sim_config</depend>
   <depend>mujoco_sim_core</depend>
   <depend>mujoco_sim_protocol</depend>
-  <depend>yaml-cpp</depend>
   <test_depend>gtest</test_depend>
   <test_depend>xvfb</test_depend>
 

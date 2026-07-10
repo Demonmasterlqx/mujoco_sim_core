@@ -1,6 +1,7 @@
 #include <mujoco_sim/adapter_sdk/sync_adapter_client.hpp>
 
 #include <chrono>
+#include <limits>
 #include <string>
 #include <thread>
 #include <utility>
@@ -19,6 +20,32 @@ eCAL::SServiceMethodInformation MethodInfo(const std::string& method) {
   eCAL::SServiceMethodInformation info;
   info.method_name = method;
   return info;
+}
+
+bool SameTickStream(const mujoco_sim::v1::Tick& lhs,
+                    const mujoco_sim::v1::Tick& rhs) {
+  return lhs.controller_id() == rhs.controller_id() &&
+         lhs.header().server_name() == rhs.header().server_name() &&
+         lhs.header().session_id() == rhs.header().session_id() &&
+         lhs.header().epoch() == rhs.header().epoch() &&
+         lhs.header().protocol_major() == rhs.header().protocol_major() &&
+         lhs.header().protocol_minor() == rhs.header().protocol_minor();
+}
+
+bool SameTickIdentity(const mujoco_sim::v1::Tick& lhs,
+                      const mujoco_sim::v1::Tick& rhs) {
+  return SameTickStream(lhs, rhs) &&
+         lhs.header().tick_id() == rhs.header().tick_id();
+}
+
+bool SameTickPayload(const mujoco_sim::v1::Tick& lhs,
+                     const mujoco_sim::v1::Tick& rhs) {
+  auto normalized_lhs = lhs;
+  auto normalized_rhs = rhs;
+  normalized_lhs.mutable_header()->set_timestamp_unix_nanos(0);
+  normalized_rhs.mutable_header()->set_timestamp_unix_nanos(0);
+  return normalized_lhs.SerializeAsString() ==
+         normalized_rhs.SerializeAsString();
 }
 
 }  // namespace
@@ -51,6 +78,10 @@ SyncAdapterClient::SyncAdapterClient(AdapterOptions options)
 
 SyncAdapterClient::~SyncAdapterClient() {
   Stop();
+  StopTickReception();
+  commit_publisher_.reset();
+  heartbeat_publisher_.reset();
+  registry_client_.reset();
   if (owns_ecal_) {
     eCAL::Finalize();
   }
@@ -123,6 +154,13 @@ bool SyncAdapterClient::Register(std::string* error_message) {
     *error_message = registration_.message();
     return false;
   }
+  {
+    std::lock_guard lock(mutex_);
+    handled_ticks_ = 0;
+    have_last_commit_ = false;
+    last_tick_.Clear();
+    last_commit_.Clear();
+  }
   return true;
 }
 
@@ -182,59 +220,158 @@ int SyncAdapterClient::Run(TickHandler handler, std::uint64_t max_ticks) {
   {
     std::lock_guard lock(mutex_);
     handler_ = std::move(handler);
+    accepting_ticks_ = !stop_requested_;
+  }
+  if (stop_requested_) {
+    StopTickReception();
+    return 0;
   }
   std::this_thread::sleep_for(std::chrono::milliseconds(100));
   std::string error;
   if (!Activate(&error)) {
+    StopTickReception();
     return 1;
   }
+  int result = 1;
   while (!stop_requested_ && eCAL::Ok()) {
     {
       std::unique_lock lock(mutex_);
       if (max_ticks > 0 && handled_ticks_ >= max_ticks) {
-        return 0;
+        result = 0;
+        break;
       }
       condition_.wait_for(lock, std::chrono::milliseconds(10));
     }
   }
-  return stop_requested_ ? 0 : 1;
+  if (stop_requested_) {
+    result = 0;
+  }
+  StopTickReception();
+  return result;
 }
 
 void SyncAdapterClient::Stop() {
   stop_requested_ = true;
+  {
+    std::lock_guard lock(mutex_);
+    accepting_ticks_ = false;
+  }
   condition_.notify_all();
 }
 
+bool SyncAdapterClient::BeginTickCallback() {
+  std::lock_guard lock(mutex_);
+  ++active_tick_callbacks_;
+  return accepting_ticks_;
+}
+
+void SyncAdapterClient::EndTickCallback() {
+  {
+    std::lock_guard lock(mutex_);
+    --active_tick_callbacks_;
+  }
+  condition_.notify_all();
+}
+
+void SyncAdapterClient::StopTickReception() {
+  {
+    std::lock_guard lock(mutex_);
+    accepting_ticks_ = false;
+  }
+  tick_subscriber_.reset();
+  std::unique_lock lock(mutex_);
+  condition_.wait(lock,
+                  [this] { return active_tick_callbacks_ == 0; });
+  handler_ = {};
+}
+
+bool SyncAdapterClient::IsExpectedTick(
+    const mujoco_sim::v1::Tick& tick) const {
+  const auto& header = tick.header();
+  return tick.controller_id() == options_.controller_id &&
+         tick.controller_state() == mujoco_sim::v1::ACTIVE &&
+         header.server_name() == options_.server_name &&
+         header.session_id() == registration_.session_id() &&
+         header.epoch() == registration_.epoch() &&
+         header.protocol_major() == registration_.effective_protocol_major() &&
+         header.protocol_minor() == registration_.effective_protocol_minor() &&
+         tick.layout().SerializeAsString() ==
+             registration_.layout().SerializeAsString();
+}
+
+SyncAdapterClient::TickCallbackGuard::TickCallbackGuard(
+    SyncAdapterClient* client)
+    : client_(client), accepted_(client_->BeginTickCallback()) {}
+
+SyncAdapterClient::TickCallbackGuard::~TickCallbackGuard() {
+  client_->EndTickCallback();
+}
+
 void SyncAdapterClient::HandleTickBytes(const void* data, std::size_t size) {
-  if (data == nullptr || size == 0) {
+  TickCallbackGuard callback(this);
+  if (!callback.accepted() || data == nullptr || size == 0 ||
+      size > static_cast<std::size_t>(std::numeric_limits<int>::max())) {
     return;
   }
   mujoco_sim::v1::Tick tick;
   if (!tick.ParseFromArray(data, static_cast<int>(size))) {
     return;
   }
-  if (tick.controller_id() != options_.controller_id) {
+  if (!IsExpectedTick(tick)) {
     return;
   }
 
+  HandleTick(
+      tick,
+      [this](const mujoco_sim::v1::Heartbeat& heartbeat) {
+        PublishHeartbeat(heartbeat);
+      },
+      [this](const mujoco_sim::v1::AdapterCommit& commit) {
+        PublishCommit(commit);
+      });
+}
+
+void SyncAdapterClient::HandleTick(
+    const mujoco_sim::v1::Tick& tick,
+    const std::function<void(const mujoco_sim::v1::Heartbeat&)>&
+        publish_heartbeat,
+    const std::function<void(const mujoco_sim::v1::AdapterCommit&)>&
+        publish_commit) {
+  std::lock_guard tick_lock(tick_mutex_);
+
   TickHandler handler;
+  mujoco_sim::v1::AdapterCommit cached_commit;
+  bool duplicate = false;
   {
     std::lock_guard lock(mutex_);
-    if (have_last_commit_ && tick.header().tick_id() == last_tick_id_) {
-      PublishHeartbeat(BuildHeartbeat(tick));
-      PublishCommit(last_commit_);
+    if (!accepting_ticks_) {
       return;
     }
-    if (have_last_commit_ && tick.header().tick_id() < last_tick_id_) {
+    if (have_last_commit_ && SameTickIdentity(tick, last_tick_)) {
+      if (!SameTickPayload(tick, last_tick_)) {
+        return;
+      }
+      cached_commit = last_commit_;
+      duplicate = true;
+    }
+    if (have_last_commit_ && SameTickStream(tick, last_tick_) &&
+        tick.header().tick_id() < last_tick_.header().tick_id()) {
       return;
     }
-    handler = handler_;
+    if (!duplicate) {
+      handler = handler_;
+    }
+  }
+  if (duplicate) {
+    publish_heartbeat(BuildHeartbeat(tick));
+    publish_commit(cached_commit);
+    return;
   }
   if (!handler) {
     return;
   }
 
-  PublishHeartbeat(BuildHeartbeat(tick));
+  publish_heartbeat(BuildHeartbeat(tick));
   auto commands = handler(tick);
   auto commit = BuildCommit(tick, commands);
   if (commands.empty()) {
@@ -244,12 +381,12 @@ void SyncAdapterClient::HandleTickBytes(const void* data, std::size_t size) {
 
   {
     std::lock_guard lock(mutex_);
-    last_tick_id_ = tick.header().tick_id();
+    last_tick_ = tick;
     last_commit_ = commit;
     have_last_commit_ = true;
     handled_ticks_++;
   }
-  PublishCommit(commit);
+  publish_commit(commit);
   condition_.notify_all();
 }
 

@@ -88,6 +88,12 @@ void SimViewer::RenderLoop() {
   }
 }
 
+void SimViewer::RequestScreenshot() {
+  if (impl_->simulate != nullptr) {
+    impl_->simulate->screenshotrequest.store(1);
+  }
+}
+
 void SimViewer::RequestClose() {
   if (impl_->simulate != nullptr) {
     impl_->simulate->exitrequest.store(1);

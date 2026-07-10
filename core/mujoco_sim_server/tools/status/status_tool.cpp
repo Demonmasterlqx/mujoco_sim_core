@@ -15,13 +15,14 @@
 #include <utility>
 #include <vector>
 
-#include <CLI/CLI.hpp>
 #include <ecal/ecal.h>
 #include <ecal/pubsub/subscriber.h>
 #include <ecal/service/client.h>
 #include <google/protobuf/util/json_util.h>
 #include <google/protobuf/wrappers.pb.h>
 #include <mujoco_sim/protocol/topics.hpp>
+
+#include "status_config_generated.hpp"
 
 namespace mujoco_sim::server::status_tool {
 namespace {
@@ -57,24 +58,6 @@ class SignalHandlerGuard {
   Handler previous_interrupt_ = SIG_DFL;
   Handler previous_terminate_ = SIG_DFL;
 };
-
-void ConfigureCommandLine(CLI::App* app, StatusOptions* options) {
-  app->add_option("--server-name", options->server_name,
-                  "Server namespace to inspect")
-      ->multi_option_policy(CLI::MultiOptionPolicy::Throw);
-  app->add_option("--timeout-ms", options->timeout_ms,
-                  "Initial status and stale timeout in milliseconds")
-      ->multi_option_policy(CLI::MultiOptionPolicy::Throw);
-  app->add_flag("--watch", options->watch,
-                "Continue printing status updates")
-      ->multi_option_policy(CLI::MultiOptionPolicy::Throw);
-  app->add_option("--interval-ms", options->interval_ms,
-                  "Minimum watch output interval in milliseconds")
-      ->multi_option_policy(CLI::MultiOptionPolicy::Throw);
-  app->add_flag("--json", options->json,
-                "Print JSON; watch mode emits newline-delimited JSON")
-      ->multi_option_policy(CLI::MultiOptionPolicy::Throw);
-}
 
 std::string ServerStateName(mujoco_sim::v1::ServerState state) {
   const std::string name = mujoco_sim::v1::ServerState_Name(state);
@@ -506,22 +489,27 @@ class StatusMonitor {
 CommandLineResult ParseCommandLine(int argc, char** argv,
                                    StatusOptions* options,
                                    std::string* message) {
-  message->clear();
-  StatusOptions parsed = *options;
-  CLI::App app{"Inspect a MuJoCo simulation server", "mujoco-sim-status"};
-  ConfigureCommandLine(&app, &parsed);
-  try {
-    app.parse(argc, argv);
-  } catch (const CLI::CallForHelp&) {
-    *message = app.help();
-    return CommandLineResult::kHelp;
-  } catch (const CLI::ParseError& error) {
-    std::ostringstream standard_output;
-    std::ostringstream standard_error;
-    app.exit(error, standard_output, standard_error);
-    *message = standard_error.str().empty() ? error.what()
-                                             : standard_error.str();
+  if (options == nullptr || message == nullptr) {
+    if (message != nullptr) {
+      *message = "options and message must not be null";
+    }
     return CommandLineResult::kError;
+  }
+  message->clear();
+  generated::StatusConfig parsed;
+  parsed.server_name = options->server_name;
+  parsed.timeout_ms = options->timeout_ms;
+  parsed.interval_ms = options->interval_ms;
+  parsed.watch = options->watch;
+  parsed.json = options->json;
+  std::vector<const char*> arguments;
+  arguments.reserve(static_cast<std::size_t>(argc));
+  for (int i = 0; i < argc; ++i) {
+    arguments.push_back(argv[i]);
+  }
+  if (!generated::Parse(argc, arguments.data(), &parsed, message)) {
+    return *message == generated::Usage() ? CommandLineResult::kHelp
+                                           : CommandLineResult::kError;
   }
   if (parsed.server_name.empty()) {
     *message = "server name is required";
@@ -535,16 +523,15 @@ CommandLineResult ParseCommandLine(int argc, char** argv,
     *message = "--interval-ms must be greater than zero";
     return CommandLineResult::kError;
   }
-  *options = std::move(parsed);
+  options->server_name = std::move(parsed.server_name);
+  options->timeout_ms = parsed.timeout_ms;
+  options->interval_ms = parsed.interval_ms;
+  options->watch = parsed.watch;
+  options->json = parsed.json;
   return CommandLineResult::kSuccess;
 }
 
-std::string Usage() {
-  StatusOptions options;
-  CLI::App app{"Inspect a MuJoCo simulation server", "mujoco-sim-status"};
-  ConfigureCommandLine(&app, &options);
-  return app.help();
-}
+std::string Usage() { return generated::Usage(); }
 
 StatusTracker::StatusTracker(std::string server_name,
                              std::chrono::milliseconds stale_after)

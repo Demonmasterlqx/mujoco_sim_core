@@ -14,6 +14,7 @@ struct ServerConfig {
   std::uint32_t startup_timeout_ms = 5000;
   std::uint32_t status_period_ms = 100;
   bool headless = false;
+  std::string initial_keyframe;
 };
 
 bool LoadConfigFile(const std::string& path, ServerConfig* config,

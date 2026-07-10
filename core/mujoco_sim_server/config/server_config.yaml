@@ -1,0 +1,47 @@
+version: 1
+namespace: mujoco_sim::server::generated
+name: ServerConfig
+program: mujoco-sim-server
+description: Run the MuJoCo lockstep simulation server
+fields:
+  server_name:
+    type: string
+    description: Server namespace
+    default: default
+    cli: [--server-name]
+  model_path:
+    type: path
+    description: MuJoCo MJCF model path
+    default: ""
+    cli: [--model]
+  initial_keyframe:
+    type: string
+    description: Named MuJoCo keyframe used as the initial state
+    default: ""
+    cli: [--initial-keyframe]
+  max_ticks:
+    type: uint64
+    description: Stop successfully after this many ticks; zero is unlimited
+    default: 0
+    cli: [--max-ticks]
+  tick_timeout_ms:
+    type: uint32
+    description: Commit barrier timeout in milliseconds
+    default: 1000
+    cli: [--tick-timeout-ms]
+  startup_timeout_ms:
+    type: uint32
+    description: Controller startup timeout in milliseconds
+    default: 5000
+    cli: [--startup-timeout-ms]
+  status_period_ms:
+    type: uint32
+    description: Server status publication period in milliseconds
+    default: 100
+  headless:
+    type: bool
+    description: Run without creating a graphical viewer
+    default: false
+    cli:
+      flags: [--headless]
+      inverse_flags: [--gui]
