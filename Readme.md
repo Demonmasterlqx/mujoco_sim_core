@@ -1,5 +1,15 @@
 # mujoco_sim_core
 
+## 包文档
+
+| 包 | 作用 | 文档 |
+|---|---|---|
+| `mujoco_sim_protocol` | 定义 V1 Protobuf 协议和 eCAL 命名规则 | [查看](core/mujoco_sim_protocol/Readme.md) |
+| `mujoco_sim_core` | 管理 MuJoCo 状态、资源所有权和 lockstep 仿真 | [查看](core/mujoco_sim_core/Readme.md) |
+| `mujoco_sim_server` | 提供 eCAL server、配置解析和图形界面 | [查看](core/mujoco_sim_server/Readme.md) |
+| `mujoco_sim_adapter_sdk` | 提供同步 controller adapter C++ SDK | [查看](core/mujoco_sim_adapter/mujoco_sim_adapter_sdk/Readme.md) |
+| `mujoco_sim_sample_adapter` | 展示固定 command adapter 和端到端联调 | [查看](core/mujoco_sim_adapter/mujoco_sim_sample_adapter/Readme.md) |
+
 ## 构建方式
 
 使用 colcon 作为构建工具。当前 V1 包均为纯 CMake 包：
@@ -52,12 +62,20 @@ GLFW/OpenGL。若 YAML 设置了 `headless: true`，可用 `--gui` 在命令行�
 
 ## V1 运行示例
 
+打开两个终端，并确保当前目录都是仓库根目录。终端 1 先启动 server：
+
 ```bash
 source install/setup.bash
 
 mujoco-sim-server \
   --model core/mujoco_sim_core/test/testdata/simple_actuator.xml \
   --max-ticks 5
+```
+
+在默认 5 秒启动超时内，于终端 2 启动 adapter：
+
+```bash
+source install/setup.bash
 
 mujoco-sim-sample-adapter \
   --ticks 5 \
@@ -69,7 +87,22 @@ mujoco-sim-sample-adapter \
 ```bash
 mujoco-sim-server \
   --headless \
-  --model core/mujoco_sim_core/test/testdata/simple_actuator.xml
+  --model core/mujoco_sim_core/test/testdata/simple_actuator.xml \
+  --max-ticks 5
 ```
+
+在 server 运行期间，可从第三个终端查询默认 server 的状态和模型资源：
+
+```bash
+source install/setup.bash
+
+mujoco-sim-status
+mujoco-sim-status --server-name default --watch --interval-ms 1000
+mujoco-sim-status --server-name default --json
+```
+
+`mujoco-sim-status` 默认收到一条有效 `ServerStatus` 后退出；`--watch` 按指定间隔持续
+输出，断线后报告 stale 并等待同名 server 恢复。`--json --watch` 输出 NDJSON，诊断信息
+始终写入 stderr。
 
 server 是唯一物理状态所有者。每个 Tick 中，adapter 接收 observation，提交完整 actuator command；server 收齐 Barrier 后写入 `data->ctrl` 并调用 `mj_step()`。

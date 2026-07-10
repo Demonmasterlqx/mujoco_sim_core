@@ -72,3 +72,35 @@ if(NOT server_run_result EQUAL 0 OR
     "Failed to run installed mujoco-sim-server: ${server_error}"
   )
 endif()
+
+set(status_executable
+  "${stage_dir}/@CMAKE_INSTALL_BINDIR@/mujoco-sim-status@CMAKE_EXECUTABLE_SUFFIX@"
+)
+execute_process(
+  COMMAND "${status_executable}" --help
+  RESULT_VARIABLE status_run_result
+  OUTPUT_VARIABLE status_help
+  ERROR_VARIABLE status_error
+)
+if(NOT status_run_result EQUAL 0 OR NOT status_help MATCHES "--watch")
+  message(FATAL_ERROR
+    "Failed to run installed mujoco-sim-status: ${status_error}"
+  )
+endif()
+
+find_program(READELF_EXECUTABLE readelf REQUIRED)
+execute_process(
+  COMMAND "${READELF_EXECUTABLE}" -d "${status_executable}"
+  RESULT_VARIABLE readelf_result
+  OUTPUT_VARIABLE status_dynamic_section
+  ERROR_VARIABLE readelf_error
+)
+if(NOT readelf_result EQUAL 0)
+  message(FATAL_ERROR "Failed to inspect mujoco-sim-status: ${readelf_error}")
+endif()
+if(status_dynamic_section MATCHES
+   "libmujoco[.]so|libmujoco_sim_core[.]so|libmujoco_sim_server|libglfw|libpng|libyaml|libGL|libOpenGL|libEGL|libGLES|libX11|libxcb|libwayland")
+  message(FATAL_ERROR
+    "mujoco-sim-status has an unexpected heavy dependency:\n${status_dynamic_section}"
+  )
+endif()

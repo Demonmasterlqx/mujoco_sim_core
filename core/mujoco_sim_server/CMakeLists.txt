@@ -91,6 +91,11 @@ install(FILES
 include(CTest)
 if(BUILD_TESTING)
   find_package(GTest REQUIRED)
+endif()
+
+add_subdirectory(tools/status)
+
+if(BUILD_TESTING)
   add_executable(server_test test/server_test.cpp)
   target_link_libraries(server_test PRIVATE ${PROJECT_NAME}_lib GTest::gtest_main)
   add_test(NAME server_test COMMAND server_test)

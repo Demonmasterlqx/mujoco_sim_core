@@ -54,6 +54,7 @@ V1 不实现 observer-only adapter、运行中动态增加 controller、异步�
 - 发布 per-controller Tick，订阅 Commit/Heartbeat，发布 ServerStatus。
 - 使用 CLI11 加载命令行、使用 yaml-cpp 加载标准 YAML 配置，处理固定 tick 数运行和错误退出。
 - 默认使用仓库自带的 MuJoCo `simulate` 官方 UI 渲染 Core 快照，并提供 `--headless` 模式。
+- 提供独立的 `mujoco-sim-status` 命令行目标，通过 status topic 和 registry service 查询 server、controller 与模型资源，支持单次、watch 和 JSON/NDJSON 输出。
 
 约束：
 
@@ -63,6 +64,7 @@ V1 不实现 observer-only adapter、运行中动态增加 controller、异步�
 - 图形界面依赖系统 GLFW 和 libpng；官方 UI 的截图调用由内部兼容层转接到 libpng，不引入不可复现的 LodePNG 运行时依赖。
 - 配置优先级固定为命令行、YAML、程序默认值；`--headless`/`--gui` 可双向覆盖 YAML；YAML 必须是单个顶层 mapping，并严格拒绝未知字段、重复字段、错误类型和整数溢出。
 - `ServerConfig`、`LoadConfigFile`、`ParseCommandLine` 和 `Usage` 保持为 server 的配置公共接口；解析失败不得修改调用方配置。
+- 状态工具源码和内部 library 位于 `tools/status`，不链接 server library、Core、MuJoCo、GUI、PNG 或 YAML；资源查询失败不得掩盖已收到的有效 ServerStatus。
 
 ### `mujoco_sim_adapter_sdk`
 
@@ -118,9 +120,22 @@ V1 不实现 observer-only adapter、运行中动态增加 controller、异步�
 - `mujoco_sim_protocol`：topic 命名、Protobuf 序列化/反序列化、Register/Tick/Commit 字段。
 - `mujoco_sim_core`：模型加载、catalog、隔离 viewer 快照及刷新、注册失败路径、actuator 冲突、Activate、Tick observation、Barrier step、非法 command、range 校验、tick/session/epoch 错误、超时。
 - `mujoco_sim_server`：CLI11 命令行解析、yaml-cpp 严格配置解析、GUI/headless、真实 GLFW viewer 生命周期、PNG 截图编码回读、CLI 覆盖优先级、解析事务性、help 退出行为、安装后 CMake consumer 与可执行文件启动、topic/service 命名。
+- 状态工具单元测试：CLI 默认值、全部参数、help、未知参数、缺失值、零值、负数和整数溢出；status payload 与 publisher 切换；资源成功/失败；controller 和资源排序；人类输出、JSON 字段/转义/uint64 精度及 NDJSON。
 - `mujoco_sim_adapter_sdk`：Commit 和 Heartbeat 构造。
 - `mujoco_sim_sample_adapter`：参数解析、默认资源、固定 command 生成。
 - 端到端：真实 eCAL server + sample adapter 分别在无 DISPLAY 的 headless 模式和真实 GUI 模式完成固定 tick 数闭环，进程均以 0 退出。
+- 状态工具端到端：查询 headless server 的状态与资源，持续输出 NDJSON，验证无 server 超时、SIGINT 正常退出、server 停止后的 stale 提示与空闲等待、同名重启后的 recovered 和资源重新查询。
+- 状态工具安装测试：staged `mujoco-sim-status --help` 可运行，ELF 不链接 server、Core、MuJoCo、GLFW、PNG、YAML 或 OpenGL/窗口系统依赖。
+
+状态工具验收示例：
+
+```bash
+mujoco-sim-status --server-name default
+mujoco-sim-status --server-name default --watch --interval-ms 1000
+mujoco-sim-status --server-name default --json
+```
+
+人类输出包含 server/state、epoch/tick、协议版本、更新时间、消息、controller 表和 observation/command 的数量、名称、维度。JSON 顶层固定为 `status`、`resources`、`resource_error`；watch JSON 是每行一个完整对象的 NDJSON，stale/recovered 诊断只写 stderr。资源查询失败时保留有效 status 并令 `resources` 为 `null`。
 
 验收命令：
 
