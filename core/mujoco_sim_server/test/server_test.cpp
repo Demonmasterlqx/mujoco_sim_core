@@ -107,6 +107,9 @@ void ExpectConfigEquals(const mujoco_sim::server::ServerConfig& actual,
   EXPECT_EQ(actual.log_file_max_size_mb, expected.log_file_max_size_mb);
   EXPECT_EQ(actual.log_file_max_files, expected.log_file_max_files);
   EXPECT_EQ(actual.log_summary_period_ms, expected.log_summary_period_ms);
+  EXPECT_EQ(actual.activation_timeout_ms, expected.activation_timeout_ms);
+  EXPECT_EQ(actual.allow_timed_out_adapter_replacement,
+            expected.allow_timed_out_adapter_replacement);
 }
 
 TEST(ServerConfigTest, ParsesCommandLine) {
@@ -125,6 +128,9 @@ TEST(ServerConfigTest, ParsesCommandLine) {
                          "50",
                          "--startup-timeout-ms",
                          "250",
+                         "--activation-timeout-ms",
+                         "750",
+                         "--deny-timed-out-adapter-replacement",
                          "--log-level",
                          "debug",
                          "--log-file",
@@ -144,6 +150,8 @@ TEST(ServerConfigTest, ParsesCommandLine) {
   EXPECT_EQ(config.max_ticks, 10);
   EXPECT_EQ(config.tick_timeout_ms, 50);
   EXPECT_EQ(config.startup_timeout_ms, 250);
+  EXPECT_EQ(config.activation_timeout_ms, 750U);
+  EXPECT_FALSE(config.allow_timed_out_adapter_replacement);
   EXPECT_EQ(config.status_period_ms, 100);
   EXPECT_TRUE(config.headless);
   EXPECT_EQ(config.log_level, "debug");
@@ -163,6 +171,8 @@ TEST(ServerConfigTest, KeepsDefaultsForUnspecifiedCommandLineOptions) {
   EXPECT_EQ(config.max_ticks, 0);
   EXPECT_EQ(config.tick_timeout_ms, 1000);
   EXPECT_EQ(config.startup_timeout_ms, 5000);
+  EXPECT_EQ(config.activation_timeout_ms, 5000U);
+  EXPECT_TRUE(config.allow_timed_out_adapter_replacement);
   EXPECT_EQ(config.status_period_ms, 100);
   EXPECT_FALSE(config.headless);
   EXPECT_EQ(config.log_level, "info");
@@ -192,6 +202,11 @@ TEST(ServerConfigTest, ReturnsGeneratedHelp) {
   EXPECT_FALSE(ParseArgs({"mujoco-sim-server", "--help"}, &config, &error));
   EXPECT_EQ(error, mujoco_sim::server::Usage());
   EXPECT_NE(error.find("--startup-timeout-ms"), std::string::npos);
+  EXPECT_NE(error.find("--activation-timeout-ms"), std::string::npos);
+  EXPECT_NE(error.find("--allow-timed-out-adapter-replacement"),
+            std::string::npos);
+  EXPECT_NE(error.find("--deny-timed-out-adapter-replacement"),
+            std::string::npos);
   EXPECT_NE(error.find("MuJoCo MJCF model path"), std::string::npos);
   EXPECT_NE(error.find("--initial-keyframe"), std::string::npos);
   EXPECT_NE(error.find("--headless"), std::string::npos);
@@ -218,6 +233,11 @@ TEST(ServerConfigTest, RejectsInvalidCommandLine) {
        "--log-file-max-size-mb", "0"},
       {"mujoco-sim-server", "--model", "robot.xml",
        "--log-file-max-files", "200001"},
+      {"mujoco-sim-server", "--model", "robot.xml",
+       "--activation-timeout-ms", "0"},
+      {"mujoco-sim-server", "--model", "robot.xml",
+       "--allow-timed-out-adapter-replacement",
+       "--deny-timed-out-adapter-replacement"},
   };
 
   for (const auto& arguments : invalid_arguments) {
@@ -263,6 +283,8 @@ TEST(ServerConfigTest, LoadsStrictYamlWithAllFields) {
       "max_ticks: 18446744073709551615\n"
       "tick_timeout_ms: 4294967295\n"
       "startup_timeout_ms: 6000\n"
+      "activation_timeout_ms: 7000\n"
+      "allow_timed_out_adapter_replacement: false\n"
       "status_period_ms: 25\n"
       "headless: true\n"
       "log_level: trace\n"
@@ -284,6 +306,8 @@ TEST(ServerConfigTest, LoadsStrictYamlWithAllFields) {
   EXPECT_EQ(config.tick_timeout_ms,
             std::numeric_limits<std::uint32_t>::max());
   EXPECT_EQ(config.startup_timeout_ms, 6000);
+  EXPECT_EQ(config.activation_timeout_ms, 7000U);
+  EXPECT_FALSE(config.allow_timed_out_adapter_replacement);
   EXPECT_EQ(config.status_period_ms, 25);
   EXPECT_TRUE(config.headless);
   EXPECT_EQ(config.log_level, "trace");
@@ -375,6 +399,11 @@ TEST(ServerConfigTest, RejectsUnknownDuplicateAndWrongTypeYamlFields) {
        "log_file_max_size_mb must be >= 1"},
       {"mujoco_sim_server_log_files.yaml", "log_file_max_files: 200001\n",
        "log_file_max_files must be <= 200000"},
+      {"mujoco_sim_server_activation_timeout.yaml",
+       "activation_timeout_ms: 0\n", "activation_timeout_ms must be >= 1"},
+      {"mujoco_sim_server_replacement_bool.yaml",
+       "allow_timed_out_adapter_replacement: \"true\"\n",
+       "allow_timed_out_adapter_replacement must be a boolean"},
   };
 
   for (const auto& test_case : cases) {
@@ -535,6 +564,21 @@ TEST(ServerRuntimeTest, ClassifiesObservableSendOutcomes) {
             SendOutcome::kRejectedWithSubscribers);
 }
 
+TEST(ServerRuntimeTest, PreservesSubMillisecondWakeDeadlines) {
+  using namespace std::chrono_literals;
+  const auto now = std::chrono::steady_clock::time_point(10s);
+  const auto next_tick = now + 250us;
+  EXPECT_EQ(mujoco_sim::server::ComputeLoopWakeDeadline(
+                now, next_tick, false, 5ms),
+            next_tick);
+  EXPECT_EQ(mujoco_sim::server::ComputeLoopWakeDeadline(
+                now, next_tick, true, 5ms),
+            now + 5ms);
+  EXPECT_EQ(mujoco_sim::server::ComputeLoopWakeDeadline(
+                now, now - 1us, false, 5ms),
+            now - 1us);
+}
+
 TEST(ServerRuntimeTest, CalculatesRatesAndSuccessfulBarrierLatency) {
   const auto rates = mujoco_sim::server::CalculateRuntimeRates(
       2.0, 10, 20, 1.0, 1.5, 4, 12.0, 5.0);
@@ -608,6 +652,22 @@ TEST(ServerRuntimeTest, AggregatesAndResetsDeterministicWindows) {
   EXPECT_EQ(third.completed_barriers, 1U);
   EXPECT_DOUBLE_EQ(third.rates.barrier_latency_avg_ms, 1000.0);
   EXPECT_DOUBLE_EQ(third.rates.barrier_latency_max_ms, 1000.0);
+}
+
+TEST(ServerRuntimeTest, RecordsBarrierCompletionWithoutACommit) {
+  using namespace std::chrono_literals;
+  using Metrics = mujoco_sim::server::RuntimeMetrics;
+  const auto start = Metrics::TimePoint(10s);
+  Metrics metrics;
+  metrics.Initialize(start, 0, 0.0);
+  metrics.RecordTickOpened(start + 100us);
+  EXPECT_DOUBLE_EQ(metrics.RecordBarrierCompleted(start + 350us), 0.25);
+
+  const auto summary = metrics.TakeSummary(start + 1s, 1, 0.001);
+  EXPECT_EQ(summary.commits, 0U);
+  EXPECT_EQ(summary.completed_barriers, 1U);
+  EXPECT_DOUBLE_EQ(summary.rates.barrier_latency_avg_ms, 0.25);
+  EXPECT_DOUBLE_EQ(summary.rates.barrier_latency_max_ms, 0.25);
 }
 
 TEST(ServerRuntimeTest, StopsNewCallbacksAndWaitsForInflightWork) {

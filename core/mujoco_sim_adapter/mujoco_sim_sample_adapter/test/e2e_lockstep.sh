@@ -23,7 +23,7 @@ trap cleanup EXIT
 server_args=(
   --server-name "${instance_name}"
   --model "${model_path}"
-  --max-ticks 5
+  --max-ticks 0
   --startup-timeout-ms 5000
   --tick-timeout-ms 5000
   --log-level trace
@@ -39,7 +39,7 @@ else
 fi
 server_pid="$!"
 
-sleep 0.5
+sleep 0.1
 
 if ! timeout 12s "${adapter_bin}" \
     --server-name "${instance_name}" \
@@ -54,15 +54,26 @@ if ! timeout 12s "${adapter_bin}" \
   exit 1
 fi
 
-if ! wait "${server_pid}"; then
-  echo "server failed" >&2
+if ! kill -0 "${server_pid}" 2>/dev/null; then
+  echo "server stopped before the adapter completed" >&2
   sed -n '1,160p' "${server_log}" >&2 || true
   sed -n '1,160p' "${adapter_log}" >&2 || true
   exit 1
 fi
-server_pid=""
 
 grep -Fq "event=tick_published" "${server_log}"
 grep -Fq "event=commit_accepted" "${server_log}"
 grep -Fq "event=barrier_completed" "${server_log}"
-grep -Fq "event=server_stopped reason=max_ticks exit_code=0" "${server_log}"
+grep -Fq "event=controller_unregistered" "${server_log}"
+
+kill "${server_pid}" 2>/dev/null || true
+set +e
+wait "${server_pid}"
+server_status="$?"
+set -e
+server_pid=""
+if [[ "${server_status}" -ne 143 ]]; then
+  echo "expected server SIGTERM exit 143, got ${server_status}" >&2
+  sed -n '1,160p' "${server_log}" >&2 || true
+  exit 1
+fi

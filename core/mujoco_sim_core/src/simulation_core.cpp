@@ -37,6 +37,7 @@ using mujoco_sim::v1::PROVISIONAL;
 using mujoco_sim::v1::RESOURCE_CONFLICT;
 using mujoco_sim::v1::RUNNING;
 using mujoco_sim::v1::TIMEOUT;
+using mujoco_sim::v1::TIMED_OUT;
 using mujoco_sim::v1::UNREGISTERED;
 using mujoco_sim::v1::VERSION_MISMATCH;
 
@@ -114,9 +115,22 @@ struct SimulationCore::Controller {
   std::uint64_t session_id = 0;
   std::uint64_t epoch = 0;
   std::uint32_t timeout_ms = 1000;
+  std::uint32_t protocol_minor = mujoco_sim::protocol::kProtocolMinor;
   mujoco_sim::v1::ControllerState state = PROVISIONAL;
   mujoco_sim::v1::ResourceLayout layout;
+  std::chrono::steady_clock::time_point registered_at =
+      std::chrono::steady_clock::now();
   std::uint64_t last_heartbeat_tick = 0;
+  std::uint64_t last_commit_tick = 0;
+  std::uint64_t last_tick_sent = 0;
+  std::uint64_t state_since_tick = 0;
+  std::uint64_t timed_out_since_tick = 0;
+  std::uint64_t last_recovery_proof_tick = 0;
+  std::uint64_t timeout_count = 0;
+  bool has_commit = false;
+  bool has_recovery_proof = false;
+  bool recovery_pending = false;
+  mujoco_sim::v1::AdapterCommit last_recovery_commit;
   std::string message;
 };
 
@@ -221,10 +235,13 @@ bool SimulationCore::LoadModel(const std::string& model_path,
   controllers_.clear();
   actuator_owner_.clear();
   pending_commits_.clear();
+  open_ticks_.clear();
+  tick_required_controllers_.clear();
+  tick_recipient_controllers_.clear();
   epoch_++;
   current_tick_id_ = 0;
   simulation_time_ = data_->time;
-  server_state_ = IDLE;
+  server_state_ = RUNNING;
   tick_open_ = false;
   status_message_.clear();
   BuildCatalogs();
@@ -386,13 +403,9 @@ SimulationCore::RegisterController(
     return ErrorResponse<mujoco_sim::v1::RegisterControllerResponse>(
         FAILED_PRECONDITION, "model is not loaded");
   }
-  if (server_state_ == ERROR_PAUSED) {
+  if (server_state_ == ERROR_PAUSED || server_state_ == mujoco_sim::v1::STOPPED) {
     return ErrorResponse<mujoco_sim::v1::RegisterControllerResponse>(
-        FAILED_PRECONDITION, "server is error-paused");
-  }
-  if (tick_open_ || current_tick_id_ != 0) {
-    return ErrorResponse<mujoco_sim::v1::RegisterControllerResponse>(
-        FAILED_PRECONDITION, "runtime controller registration is not supported");
+        FAILED_PRECONDITION, "server is not accepting registrations");
   }
   if (request.server_name() != options_.server_name) {
     return ErrorResponse<mujoco_sim::v1::RegisterControllerResponse>(
@@ -410,16 +423,23 @@ SimulationCore::RegisterController(
     return ErrorResponse<mujoco_sim::v1::RegisterControllerResponse>(
         INVALID_ARGUMENT, "at least one command actuator is required");
   }
-  if (controllers_.contains(request.controller_id())) {
-    return ErrorResponse<mujoco_sim::v1::RegisterControllerResponse>(
-        ALREADY_EXISTS, "controller_id is already registered");
-  }
-
   std::string duplicate;
   if (HasDuplicates(request.observation_names(), &duplicate) ||
       HasDuplicates(request.command_names(), &duplicate)) {
     return ErrorResponse<mujoco_sim::v1::RegisterControllerResponse>(
         INVALID_ARGUMENT, "duplicate resource name: " + duplicate);
+  }
+
+  const auto existing = controllers_.find(request.controller_id());
+  const bool replacing =
+      existing != controllers_.end() && existing->second.state == TIMED_OUT &&
+      options_.allow_timed_out_adapter_replacement;
+  if (existing != controllers_.end() && !replacing) {
+    return ErrorResponse<mujoco_sim::v1::RegisterControllerResponse>(
+        ALREADY_EXISTS,
+        existing->second.state == TIMED_OUT
+            ? "timed-out controller replacement is disabled"
+            : "controller_id is already registered");
   }
 
   Controller controller;
@@ -428,7 +448,11 @@ SimulationCore::RegisterController(
   controller.epoch = epoch_;
   controller.timeout_ms = request.timeout_ms() == 0 ? options_.default_timeout_ms
                                                     : request.timeout_ms();
+  controller.protocol_minor =
+      std::min(request.protocol_minor(), mujoco_sim::protocol::kProtocolMinor);
   controller.state = PROVISIONAL;
+  controller.registered_at = std::chrono::steady_clock::now();
+  controller.state_since_tick = current_tick_id_;
 
   for (const auto& name : request.observation_names()) {
     const auto it = observations_by_name_.find(name);
@@ -446,7 +470,8 @@ SimulationCore::RegisterController(
           NOT_FOUND, "unknown command actuator: " + name);
     }
     const auto owner = actuator_owner_.find(name);
-    if (owner != actuator_owner_.end()) {
+    if (owner != actuator_owner_.end() &&
+        (!replacing || owner->second != request.controller_id())) {
       return ErrorResponse<mujoco_sim::v1::RegisterControllerResponse>(
           RESOURCE_CONFLICT,
           "actuator already owned by controller: " + owner->second);
@@ -454,8 +479,18 @@ SimulationCore::RegisterController(
     CopyDescriptor(command->second, controller.layout.add_commands());
   }
 
+  if (replacing) {
+    ZeroControllerCommands(existing->second);
+    ReleaseControllerResources(existing->second);
+    pending_commits_.erase(existing->first);
+    open_ticks_.erase(existing->first);
+    tick_required_controllers_.erase(existing->first);
+    tick_recipient_controllers_.erase(existing->first);
+    controllers_.erase(existing);
+  }
+
   for (const auto& command : controller.layout.commands()) {
-    actuator_owner_.emplace(command.name(), controller.id);
+    actuator_owner_[command.name()] = controller.id;
   }
 
   mujoco_sim::v1::RegisterControllerResponse response;
@@ -465,8 +500,11 @@ SimulationCore::RegisterController(
   response.set_epoch(controller.epoch);
   response.set_effective_protocol_major(mujoco_sim::protocol::kProtocolMajor);
   response.set_effective_protocol_minor(
-      std::min(request.protocol_minor(), mujoco_sim::protocol::kProtocolMinor));
+      controller.protocol_minor);
   response.set_state(PROVISIONAL);
+  if (replacing) {
+    response.set_message("replaced timed-out controller session");
+  }
   *response.mutable_layout() = controller.layout;
 
   controllers_.emplace(controller.id, std::move(controller));
@@ -494,12 +532,7 @@ SimulationCore::ActivateController(
     return ErrorResponse<mujoco_sim::v1::ActivateControllerResponse>(
         FAILED_PRECONDITION, "controller is not provisional");
   }
-  if (tick_open_ || current_tick_id_ != 0) {
-    return ErrorResponse<mujoco_sim::v1::ActivateControllerResponse>(
-        FAILED_PRECONDITION, "runtime controller activation is not supported");
-  }
-
-  controller.state = ACTIVE;
+  SetControllerState(&controller, ACTIVE, {});
   mujoco_sim::v1::ActivateControllerResponse response;
   response.set_code(OK);
   response.set_state(ACTIVE);
@@ -514,10 +547,6 @@ SimulationCore::UnregisterController(
     return ErrorResponse<mujoco_sim::v1::UnregisterControllerResponse>(
         NOT_FOUND, "controller is not registered");
   }
-  if (tick_open_) {
-    return ErrorResponse<mujoco_sim::v1::UnregisterControllerResponse>(
-        FAILED_PRECONDITION, "cannot unregister while a tick is open");
-  }
   Controller& controller = it->second;
   if (request.session_id() != controller.session_id) {
     return ErrorResponse<mujoco_sim::v1::UnregisterControllerResponse>(
@@ -527,11 +556,14 @@ SimulationCore::UnregisterController(
     return ErrorResponse<mujoco_sim::v1::UnregisterControllerResponse>(
         INVALID_EPOCH, "epoch mismatch");
   }
-  for (const auto& command : controller.layout.commands()) {
-    actuator_owner_.erase(command.name());
-  }
+  ZeroControllerCommands(controller);
+  ReleaseControllerResources(controller);
   pending_commits_.erase(controller.id);
+  open_ticks_.erase(controller.id);
+  tick_required_controllers_.erase(controller.id);
+  tick_recipient_controllers_.erase(controller.id);
   controllers_.erase(it);
+  StepIfBarrierComplete();
 
   mujoco_sim::v1::UnregisterControllerResponse response;
   response.set_code(OK);
@@ -541,26 +573,54 @@ SimulationCore::UnregisterController(
 
 std::vector<mujoco_sim::v1::Tick> SimulationCore::OpenTick() {
   std::vector<mujoco_sim::v1::Tick> ticks;
-  if (!IsModelLoaded() || server_state_ == ERROR_PAUSED) {
-    return ticks;
-  }
-  for (const auto& [_, controller] : controllers_) {
-    if (controller.state == ACTIVE) {
-      ticks.push_back(BuildTickFor(controller));
-    }
-  }
-  if (ticks.empty()) {
-    server_state_ = IDLE;
-    tick_open_ = false;
+  if (!IsModelLoaded() || server_state_ == ERROR_PAUSED ||
+      server_state_ == mujoco_sim::v1::STOPPED) {
     return ticks;
   }
   if (!tick_open_) {
-    tick_started_at_ = std::chrono::steady_clock::now();
     pending_commits_.clear();
+    open_ticks_.clear();
+    tick_required_controllers_.clear();
+    tick_recipient_controllers_.clear();
+    for (auto& [controller_id, controller] : controllers_) {
+      if (controller.recovery_pending) {
+        controller.recovery_pending = false;
+        SetControllerState(&controller, ACTIVE, {});
+      }
+      if (controller.state == ACTIVE) {
+        tick_required_controllers_.emplace(controller_id, true);
+        tick_recipient_controllers_.emplace(controller_id, true);
+      } else if (controller.state == TIMED_OUT) {
+        tick_recipient_controllers_.emplace(controller_id, true);
+      }
+    }
+    for (const auto& [controller_id, _] : tick_recipient_controllers_) {
+      auto& controller = controllers_.at(controller_id);
+      controller.last_tick_sent = current_tick_id_;
+      open_ticks_.emplace(controller_id, BuildTickFor(controller));
+    }
+    tick_started_at_ = std::chrono::steady_clock::now();
     tick_open_ = true;
   }
   server_state_ = RUNNING;
+  for (const auto& [controller_id, _] : tick_recipient_controllers_) {
+    const auto it = controllers_.find(controller_id);
+    if (it == controllers_.end() ||
+        (it->second.state != ACTIVE && it->second.state != TIMED_OUT)) {
+      continue;
+    }
+    const auto tick = open_ticks_.find(controller_id);
+    if (tick != open_ticks_.end()) {
+      ticks.push_back(tick->second);
+    }
+  }
   return ticks;
+}
+
+bool SimulationCore::IsTickIssued(const mujoco_sim::v1::Tick& tick) const {
+  const auto issued = open_ticks_.find(tick.controller_id());
+  return tick_open_ && issued != open_ticks_.end() &&
+         issued->second.SerializeAsString() == tick.SerializeAsString();
 }
 
 mujoco_sim::v1::Tick SimulationCore::BuildTickFor(
@@ -568,8 +628,13 @@ mujoco_sim::v1::Tick SimulationCore::BuildTickFor(
   mujoco_sim::v1::Tick tick;
   *tick.mutable_header() = MakeHeader(controller.session_id);
   tick.set_controller_id(controller.id);
-  tick.set_controller_state(controller.state);
+  const auto wire_state =
+      controller.protocol_minor == 0 && controller.state == TIMED_OUT
+          ? ACTIVE
+          : controller.state;
+  tick.set_controller_state(wire_state);
   *tick.mutable_layout() = controller.layout;
+  tick.mutable_header()->set_protocol_minor(controller.protocol_minor);
 
   for (const auto& observation : controller.layout.observations()) {
     auto* block = tick.add_observations();
@@ -620,154 +685,16 @@ bool SimulationCore::ValidateCommonHeader(
   return true;
 }
 
-CommitResult SimulationCore::SubmitCommit(
-    const mujoco_sim::v1::AdapterCommit& commit) {
-  CommitResult result;
-  const auto controller_it = controllers_.find(commit.controller_id());
-  if (controller_it != controllers_.end()) {
-    const Controller& controller = controller_it->second;
-    if (commit.header().server_name() == options_.server_name &&
-        commit.header().session_id() == controller.session_id &&
-        commit.header().epoch() == epoch_ &&
-        commit.header().tick_id() < current_tick_id_) {
-      result.duplicate = true;
-      result.message = "stale duplicate commit ignored";
-      return result;
+bool SimulationCore::StepIfBarrierComplete() {
+  if (!tick_open_ ||
+      pending_commits_.size() != tick_required_controllers_.size()) {
+    return false;
+  }
+  for (const auto& [controller_id, _] : tick_required_controllers_) {
+    if (!pending_commits_.contains(controller_id)) {
+      return false;
     }
   }
-  if (server_state_ == ERROR_PAUSED) {
-    result.code = FAILED_PRECONDITION;
-    result.message = "server is error-paused";
-    return result;
-  }
-  if (controller_it != controllers_.end() &&
-      controller_it->second.state == ACTIVE) {
-    std::string message;
-    if (!ValidateCommonHeader(commit.header(), controller_it->second,
-                              &message)) {
-      if (message == "session mismatch") {
-        result.code = INVALID_SESSION;
-      } else if (message == "epoch mismatch") {
-        result.code = INVALID_EPOCH;
-      } else if (message == "tick mismatch") {
-        result.code = INVALID_TICK;
-      } else {
-        result.code = INVALID_ARGUMENT;
-      }
-      EnterErrorPaused(message);
-      result.message = message;
-      return result;
-    }
-  }
-  if (!tick_open_) {
-    result.code = FAILED_PRECONDITION;
-    result.message = "no tick is open";
-    return result;
-  }
-  if (controller_it == controllers_.end() ||
-      controller_it->second.state != ACTIVE) {
-    EnterErrorPaused("commit from unknown or inactive controller");
-    result.code = NOT_FOUND;
-    result.message = status_message_;
-    return result;
-  }
-  const Controller& controller = controller_it->second;
-
-  std::string message;
-  if (!ValidateCommonHeader(commit.header(), controller, &message)) {
-    if (message == "session mismatch") {
-      result.code = INVALID_SESSION;
-    } else if (message == "epoch mismatch") {
-      result.code = INVALID_EPOCH;
-    } else if (message == "tick mismatch") {
-      result.code = INVALID_TICK;
-    } else {
-      result.code = INVALID_ARGUMENT;
-    }
-    EnterErrorPaused(message);
-    result.message = message;
-    return result;
-  }
-
-  const auto pending_it = pending_commits_.find(controller.id);
-  if (pending_it != pending_commits_.end()) {
-    if (!SameCommitPayload(commit, pending_it->second)) {
-      EnterErrorPaused("duplicate commit payload mismatch");
-      result.code = INVALID_COMMAND;
-      result.message = status_message_;
-      return result;
-    }
-    result.duplicate = true;
-    result.message = "duplicate commit ignored";
-    return result;
-  }
-
-  if (commit.status() != mujoco_sim::v1::COMMIT_OK) {
-    EnterErrorPaused("controller reported commit error: " +
-                     commit.error_message());
-    result.code = INVALID_COMMAND;
-    result.message = status_message_;
-    return result;
-  }
-
-  std::set<std::string> expected;
-  for (const auto& command : controller.layout.commands()) {
-    expected.insert(command.name());
-  }
-  std::set<std::string> seen;
-  for (const auto& command : commit.commands()) {
-    if (!expected.contains(command.name())) {
-      EnterErrorPaused("controller submitted unowned actuator: " +
-                       command.name());
-      result.code = INVALID_COMMAND;
-      result.message = status_message_;
-      return result;
-    }
-    if (!seen.insert(command.name()).second) {
-      EnterErrorPaused("duplicate actuator command: " + command.name());
-      result.code = INVALID_COMMAND;
-      result.message = status_message_;
-      return result;
-    }
-    if (command.values_size() != 1) {
-      EnterErrorPaused("actuator command must contain exactly one value: " +
-                       command.name());
-      result.code = INVALID_COMMAND;
-      result.message = status_message_;
-      return result;
-    }
-    const double value = command.values(0);
-    if (!std::isfinite(value)) {
-      EnterErrorPaused("actuator command is not finite: " + command.name());
-      result.code = INVALID_COMMAND;
-      result.message = status_message_;
-      return result;
-    }
-    const auto descriptor = commands_by_name_.at(command.name());
-    if (descriptor.has_ctrl_range() &&
-        (value < descriptor.ctrl_min() || value > descriptor.ctrl_max())) {
-      std::ostringstream out;
-      out << "actuator command is outside ctrl range: " << command.name();
-      EnterErrorPaused(out.str());
-      result.code = INVALID_COMMAND;
-      result.message = status_message_;
-      return result;
-    }
-  }
-  if (seen != expected) {
-    EnterErrorPaused("commit does not include all claimed actuators");
-    result.code = INVALID_COMMAND;
-    result.message = status_message_;
-    return result;
-  }
-
-  pending_commits_.emplace(controller.id, commit);
-
-  if (pending_commits_.size() != active_controller_count()) {
-    result.message = "commit accepted";
-    return result;
-  }
-
   for (const auto& [_, pending] : pending_commits_) {
     for (const auto& command : pending.commands()) {
       const auto& descriptor = commands_by_name_.at(command.name());
@@ -776,11 +703,183 @@ CommitResult SimulationCore::SubmitCommit(
   }
   mj_step(model_.get(), data_.get());
   simulation_time_ = data_->time;
-  current_tick_id_++;
+  ++current_tick_id_;
   pending_commits_.clear();
+  open_ticks_.clear();
+  tick_required_controllers_.clear();
+  tick_recipient_controllers_.clear();
   tick_open_ = false;
-  result.stepped = true;
-  result.message = "barrier complete";
+  return true;
+}
+
+CommitResult SimulationCore::SubmitCommit(
+    const mujoco_sim::v1::AdapterCommit& commit) {
+  CommitResult result;
+  if (server_state_ == ERROR_PAUSED) {
+    result.code = FAILED_PRECONDITION;
+    result.message = "server is error-paused";
+    return result;
+  }
+  const auto controller_it = controllers_.find(commit.controller_id());
+  if (controller_it == controllers_.end()) {
+    result.code = NOT_FOUND;
+    result.message = "controller is not registered";
+    return result;
+  }
+  Controller& controller = controller_it->second;
+  result.controller_state = controller.state;
+
+  std::string message;
+  if (commit.header().server_name() != options_.server_name) {
+    result.code = INVALID_ARGUMENT;
+    result.message = "server name mismatch";
+    return result;
+  }
+  if (commit.header().session_id() != controller.session_id) {
+    result.code = INVALID_SESSION;
+    result.message = "session mismatch";
+    return result;
+  }
+  if (commit.header().epoch() != epoch_) {
+    result.code = INVALID_EPOCH;
+    result.message = "epoch mismatch";
+    return result;
+  }
+  if (commit.header().protocol_major() !=
+      mujoco_sim::protocol::kProtocolMajor) {
+    result.code = VERSION_MISMATCH;
+    result.message = "protocol major mismatch";
+    return result;
+  }
+  if (commit.header().protocol_minor() != controller.protocol_minor) {
+    result.code = VERSION_MISMATCH;
+    result.message = "protocol minor mismatch";
+    return result;
+  }
+
+  if (controller.state == TIMED_OUT) {
+    const std::uint64_t tick_id = commit.header().tick_id();
+    if (controller.has_recovery_proof &&
+        tick_id == controller.last_recovery_proof_tick) {
+      if (SameCommitPayload(commit, controller.last_recovery_commit)) {
+        result.duplicate = true;
+        result.message = "duplicate recovery commit ignored";
+        return result;
+      }
+      result.stepped = EnterControllerError(
+          &controller, "duplicate recovery commit payload mismatch");
+      result.code = INVALID_COMMAND;
+      result.message = controller.message;
+      result.controller_state_changed = true;
+      result.controller_state = ERROR;
+      return result;
+    }
+    if (tick_id < controller.timed_out_since_tick ||
+        tick_id > controller.last_tick_sent ||
+        (controller.has_recovery_proof &&
+         tick_id <= controller.last_recovery_proof_tick)) {
+      result.code = INVALID_TICK;
+      result.message = "commit does not match a new Tick issued for recovery";
+      return result;
+    }
+    if (commit.status() != mujoco_sim::v1::COMMIT_OK) {
+      result.code = INVALID_COMMAND;
+      result.message = "timed-out controller did not report a valid commit";
+      return result;
+    }
+    if (!ValidateCommands(controller, commit, &message)) {
+      result.code = INVALID_COMMAND;
+      result.message = message;
+      return result;
+    }
+    controller.last_commit_tick = tick_id;
+    controller.has_commit = true;
+    controller.last_recovery_proof_tick = tick_id;
+    controller.has_recovery_proof = true;
+    controller.recovery_pending = true;
+    controller.last_recovery_commit = commit;
+    controller.message = "valid recovery commit received; activation pending";
+    result.recovery_pending = true;
+    result.message = controller.message;
+    return result;
+  }
+
+  if (controller.state != ACTIVE) {
+    result.code = FAILED_PRECONDITION;
+    result.message = "controller is not active";
+    return result;
+  }
+  if (commit.header().tick_id() < current_tick_id_) {
+    result.duplicate = true;
+    result.message = "stale duplicate commit ignored";
+    return result;
+  }
+  if (commit.header().tick_id() > current_tick_id_) {
+    result.code = INVALID_TICK;
+    result.message = "tick mismatch";
+    return result;
+  }
+  if (!tick_open_) {
+    result.code = FAILED_PRECONDITION;
+    result.message = "no tick is open";
+    return result;
+  }
+  if (!tick_required_controllers_.contains(controller.id)) {
+    result.code = FAILED_PRECONDITION;
+    result.message = "controller joins the barrier on the next Tick";
+    return result;
+  }
+  if (!ValidateCommonHeader(commit.header(), controller, &message)) {
+    result.code = message == "tick mismatch" ? INVALID_TICK : INVALID_ARGUMENT;
+    result.message = message;
+    return result;
+  }
+
+  const auto pending_it = pending_commits_.find(controller.id);
+  if (pending_it != pending_commits_.end()) {
+    if (!SameCommitPayload(commit, pending_it->second)) {
+      result.stepped = EnterControllerError(
+          &controller, "duplicate commit payload mismatch");
+      result.code = INVALID_COMMAND;
+      result.message = controller.message;
+      result.controller_state_changed = true;
+      result.controller_state = ERROR;
+      return result;
+    }
+    result.duplicate = true;
+    result.message = "duplicate commit ignored";
+    return result;
+  }
+
+  if (commit.status() != mujoco_sim::v1::COMMIT_OK) {
+    result.stepped = EnterControllerError(
+        &controller,
+        "controller reported commit error: " + commit.error_message());
+    result.code = INVALID_COMMAND;
+    result.message = controller.message;
+    result.controller_state_changed = true;
+    result.controller_state = ERROR;
+    return result;
+  }
+
+  if (!ValidateCommands(controller, commit, &message)) {
+    result.stepped = EnterControllerError(&controller, message);
+    result.code = INVALID_COMMAND;
+    result.message = controller.message;
+    result.controller_state_changed = true;
+    result.controller_state = ERROR;
+    return result;
+  }
+
+  pending_commits_.emplace(controller.id, commit);
+  controller.last_commit_tick = current_tick_id_;
+  controller.has_commit = true;
+  if (pending_commits_.size() != tick_required_controllers_.size()) {
+    result.message = "commit accepted";
+    return result;
+  }
+  result.stepped = StepIfBarrierComplete();
+  result.message = result.stepped ? "barrier complete" : "commit accepted";
   return result;
 }
 
@@ -791,31 +890,79 @@ void SimulationCore::AcceptHeartbeat(
     return;
   }
   Controller& controller = controller_it->second;
-  std::string ignored;
-  if (ValidateCommonHeader(heartbeat.header(), controller, &ignored)) {
-    controller.last_heartbeat_tick = current_tick_id_;
+  const auto& header = heartbeat.header();
+  if (header.server_name() == options_.server_name &&
+      header.session_id() == controller.session_id &&
+      header.epoch() == epoch_ &&
+      header.protocol_major() == mujoco_sim::protocol::kProtocolMajor &&
+      header.protocol_minor() == controller.protocol_minor &&
+      header.tick_id() <= controller.last_tick_sent) {
+    controller.last_heartbeat_tick =
+        std::max(controller.last_heartbeat_tick, header.tick_id());
   }
+}
+
+DeadlineResult SimulationCore::CheckControllerDeadlines(
+    std::chrono::steady_clock::time_point now) {
+  DeadlineResult result;
+  for (auto it = controllers_.begin(); it != controllers_.end();) {
+    Controller& controller = it->second;
+    if (controller.state == PROVISIONAL &&
+        now - controller.registered_at >
+            std::chrono::milliseconds(options_.activation_timeout_ms)) {
+      result.transitions.push_back(
+          ControllerTransition{controller.id, controller.session_id,
+                               PROVISIONAL, UNREGISTERED,
+                               "controller activation timed out",
+                               current_tick_id_});
+      ReleaseControllerResources(controller);
+      it = controllers_.erase(it);
+      continue;
+    }
+    ++it;
+  }
+
+  if (tick_open_ && server_state_ != ERROR_PAUSED) {
+    for (auto& [controller_id, controller] : controllers_) {
+      if (!tick_required_controllers_.contains(controller_id) ||
+          pending_commits_.contains(controller_id)) {
+        continue;
+      }
+      const auto elapsed_ms =
+          std::chrono::duration_cast<std::chrono::milliseconds>(
+              now - tick_started_at_)
+              .count();
+      if (elapsed_ms <= controller.timeout_ms) {
+        continue;
+      }
+      const auto old_state = controller.state;
+      ++controller.timeout_count;
+      controller.timed_out_since_tick = current_tick_id_;
+      controller.has_recovery_proof = false;
+      controller.recovery_pending = false;
+      controller.last_recovery_commit.Clear();
+      SetControllerState(&controller, TIMED_OUT,
+                         "controller timed out waiting for Commit");
+      ZeroControllerCommands(controller);
+      pending_commits_.erase(controller_id);
+      tick_required_controllers_.erase(controller_id);
+      result.transitions.push_back(
+          ControllerTransition{controller.id, controller.session_id, old_state,
+                               TIMED_OUT, controller.message,
+                               current_tick_id_});
+    }
+    result.stepped = StepIfBarrierComplete();
+  }
+  return result;
 }
 
 bool SimulationCore::CheckTickTimeout(
     std::chrono::steady_clock::time_point now) {
-  if (!tick_open_ || server_state_ == ERROR_PAUSED) {
-    return false;
-  }
-  for (const auto& [controller_id, controller] : controllers_) {
-    if (controller.state != ACTIVE || pending_commits_.contains(controller_id)) {
-      continue;
-    }
-    const auto elapsed_ms =
-        std::chrono::duration_cast<std::chrono::milliseconds>(
-            now - tick_started_at_)
-            .count();
-    if (elapsed_ms > controller.timeout_ms) {
-      EnterErrorPaused("controller timed out: " + controller_id);
-      return true;
-    }
-  }
-  return false;
+  const auto result = CheckControllerDeadlines(now);
+  return std::any_of(result.transitions.begin(), result.transitions.end(),
+                     [](const auto& transition) {
+                       return transition.new_state == TIMED_OUT;
+                     });
 }
 
 mujoco_sim::v1::ServerStatus SimulationCore::MakeStatus() const {
@@ -830,8 +977,96 @@ mujoco_sim::v1::ServerStatus SimulationCore::MakeStatus() const {
     controller_status->set_last_tick_id(controller.last_heartbeat_tick);
     controller_status->set_state(controller.state);
     controller_status->set_message(controller.message);
+    if (controller.has_commit) {
+      controller_status->set_last_commit_tick_id(controller.last_commit_tick);
+    }
+    controller_status->set_state_since_tick_id(controller.state_since_tick);
+    controller_status->set_timeout_count(controller.timeout_count);
+    controller_status->set_required_for_barrier(
+        tick_required_controllers_.contains(controller.id));
   }
   return status;
+}
+
+bool SimulationCore::ValidateCommands(
+    const Controller& controller,
+    const mujoco_sim::v1::AdapterCommit& commit,
+    std::string* message) const {
+  std::set<std::string> expected;
+  for (const auto& command : controller.layout.commands()) {
+    expected.insert(command.name());
+  }
+  std::set<std::string> seen;
+  for (const auto& command : commit.commands()) {
+    if (!expected.contains(command.name())) {
+      *message = "controller submitted unowned actuator: " + command.name();
+      return false;
+    }
+    if (!seen.insert(command.name()).second) {
+      *message = "duplicate actuator command: " + command.name();
+      return false;
+    }
+    if (command.values_size() != 1) {
+      *message = "actuator command must contain exactly one value: " +
+                 command.name();
+      return false;
+    }
+    const double value = command.values(0);
+    if (!std::isfinite(value)) {
+      *message = "actuator command is not finite: " + command.name();
+      return false;
+    }
+    const auto descriptor = commands_by_name_.at(command.name());
+    if (descriptor.has_ctrl_range() &&
+        (value < descriptor.ctrl_min() || value > descriptor.ctrl_max())) {
+      *message = "actuator command is outside ctrl range: " + command.name();
+      return false;
+    }
+  }
+  if (seen != expected) {
+    *message = "commit does not include all claimed actuators";
+    return false;
+  }
+  return true;
+}
+
+void SimulationCore::ZeroControllerCommands(const Controller& controller) {
+  if (data_ == nullptr) {
+    return;
+  }
+  for (const auto& command : controller.layout.commands()) {
+    data_->ctrl[command.mujoco_id()] = 0.0;
+  }
+}
+
+void SimulationCore::SetControllerState(
+    Controller* controller, mujoco_sim::v1::ControllerState state,
+    const std::string& message) {
+  controller->state = state;
+  controller->state_since_tick = current_tick_id_;
+  controller->message = message;
+}
+
+bool SimulationCore::EnterControllerError(Controller* controller,
+                                          const std::string& message) {
+  SetControllerState(controller, ERROR, message);
+  controller->recovery_pending = false;
+  ZeroControllerCommands(*controller);
+  pending_commits_.erase(controller->id);
+  open_ticks_.erase(controller->id);
+  tick_required_controllers_.erase(controller->id);
+  tick_recipient_controllers_.erase(controller->id);
+  return StepIfBarrierComplete();
+}
+
+void SimulationCore::ReleaseControllerResources(
+    const Controller& controller) {
+  for (const auto& command : controller.layout.commands()) {
+    const auto owner = actuator_owner_.find(command.name());
+    if (owner != actuator_owner_.end() && owner->second == controller.id) {
+      actuator_owner_.erase(owner);
+    }
+  }
 }
 
 void SimulationCore::EnterErrorPaused(const std::string& message) {
@@ -839,12 +1074,28 @@ void SimulationCore::EnterErrorPaused(const std::string& message) {
   status_message_ = message;
   tick_open_ = false;
   pending_commits_.clear();
+  open_ticks_.clear();
+  tick_required_controllers_.clear();
+  tick_recipient_controllers_.clear();
   for (auto& [_, controller] : controllers_) {
     if (controller.state == ACTIVE) {
-      controller.state = ERROR;
-      controller.message = message;
+      SetControllerState(&controller, ERROR, message);
     }
   }
+}
+
+void SimulationCore::EnterFatalError(const std::string& message) {
+  EnterErrorPaused(message);
+}
+
+void SimulationCore::MarkStopped(const std::string& message) {
+  server_state_ = mujoco_sim::v1::STOPPED;
+  status_message_ = message;
+  tick_open_ = false;
+  pending_commits_.clear();
+  open_ticks_.clear();
+  tick_required_controllers_.clear();
+  tick_recipient_controllers_.clear();
 }
 
 std::uint64_t SimulationCore::epoch() const { return epoch_; }
@@ -854,6 +1105,10 @@ std::uint64_t SimulationCore::current_tick_id() const {
 }
 
 double SimulationCore::simulation_time() const { return simulation_time_; }
+
+double SimulationCore::timestep() const {
+  return model_ == nullptr ? 0.0 : model_->opt.timestep;
+}
 
 mujoco_sim::v1::ServerState SimulationCore::server_state() const {
   return server_state_;
@@ -869,6 +1124,13 @@ std::size_t SimulationCore::active_controller_count() const {
     }
   }
   return count;
+}
+
+std::size_t SimulationCore::controller_count(
+    mujoco_sim::v1::ControllerState state) const {
+  return static_cast<std::size_t>(std::count_if(
+      controllers_.begin(), controllers_.end(),
+      [state](const auto& entry) { return entry.second.state == state; }));
 }
 
 }  // namespace mujoco_sim::core

@@ -9,7 +9,7 @@
 | 包版本 | `0.1.0` |
 | colcon 构建类型 | `cmake` |
 | C++ 标准 | C++20 |
-| 协议版本 | `1.0` |
+| 协议版本 | `1.1` |
 | 许可证 | `Apache-2.0` |
 
 ## 职责与边界
@@ -100,7 +100,7 @@ target_link_libraries(protocol_consumer PRIVATE mujoco_sim::protocol)
 | --- | --- |
 | `ErrorCode` | `OK`、参数/资源/版本/session/epoch/tick/command 错误、超时和内部错误等结果 |
 | `ResourceType` | 区分 observation sensor 与 command actuator |
-| `ControllerState` | `PROVISIONAL`、`ACTIVE`、`ERROR`、`UNREGISTERED` |
+| `ControllerState` | `PROVISIONAL`、`ACTIVE`、`ERROR`、`UNREGISTERED`、`TIMED_OUT` |
 | `ServerState` | `IDLE`、`RUNNING`、`ERROR_PAUSED`、`STOPPED` |
 | `CommitStatus` | `COMMIT_OK` 或 `COMMIT_ERROR` |
 | `Header` | `server_name`、`session_id`、`epoch`、`tick_id`、时间戳和协议版本 |
@@ -115,7 +115,7 @@ target_link_libraries(protocol_consumer PRIVATE mujoco_sim::protocol)
 | `Tick` | header、controller、layout、observations 与 controller state |
 | `AdapterCommit` | header、controller、提交状态、整组 actuator commands 与错误文本 |
 | `Heartbeat` | controller 及其当前协议 header |
-| `ControllerStatus` | session、最后 heartbeat tick、状态与说明 |
+| `ControllerStatus` | session、最后 heartbeat/Commit Tick、状态起始 Tick、累计超时数、Barrier 成员标志、状态与说明 |
 | `ServerStatus` | 服务端状态及各控制器状态 |
 
 完整字段号、枚举值和 wire contract 以 [sync.proto](proto/mujoco_sim/v1/sync.proto)
@@ -123,7 +123,7 @@ target_link_libraries(protocol_consumer PRIVATE mujoco_sim::protocol)
 
 ### 命名 API
 
-版本常量为 `kProtocolMajor == 1`、`kProtocolMinor == 0`。命名函数不会访问
+版本常量为 `kProtocolMajor == 1`、`kProtocolMinor == 1`。命名函数不会访问
 传输层：
 
 | API | `server_name=default`、`controller_id=arm` 时的结果 |
@@ -200,8 +200,14 @@ int main() {
 
 - Proto3 枚举的默认值是各枚举的 `*_UNSPECIFIED == 0`；尤其
   `ErrorCode::OK == 1`，不能把未设置的 `code` 当成成功。
-- 当前协议常量是 `1.0`。协议包只声明版本；版本校验和 minor version 协商由 Core
+- 当前协议常量是 `1.1`。协议包只声明版本；版本校验和 minor version 协商由 Core
   或其他消费者实现。
+- V1.1 在保持既有枚举数值和字段号不变的基础上新增 `ControllerState::TIMED_OUT == 5`；
+  `ControllerStatus` 新增 optional `last_commit_tick_id`、`state_since_tick_id`、
+  `timeout_count` 和 `required_for_barrier`。`Tick::controller_state` 用于区分正常控制 Tick 与
+  超时恢复 Tick。
+- Core 与协议 1.0 controller 协商到 minor 0 时，超时恢复 Tick 的线上 state 降级为旧 SDK
+  可识别的 `ACTIVE`；这是宿主的兼容策略，不改变 V1.1 枚举定义。
 - `Header` 的 `server_name`、`session_id`、`epoch` 和 `tick_id` 共同标识一次
   lockstep 交互。仅成功解析 Protobuf 不代表这些字段在业务上有效。
 - `AdapterCommit` 表达一组命令，但消息类本身不保证原子性、资源所有权或 barrier；
@@ -227,8 +233,8 @@ colcon test-result \
   --verbose
 ```
 
-[protocol_test.cpp](test/protocol_test.cpp) 当前覆盖 service/topic 命名、注册响应的
-序列化往返，以及携带整组 actuator command 的 commit 序列化往返。
+[protocol_test.cpp](test/protocol_test.cpp) 当前覆盖 service/topic 命名、注册响应与整组
+actuator command 的序列化往返，以及协议 1.1 的稳定状态枚举值和动态生命周期状态字段。
 
 ## 相关包
 

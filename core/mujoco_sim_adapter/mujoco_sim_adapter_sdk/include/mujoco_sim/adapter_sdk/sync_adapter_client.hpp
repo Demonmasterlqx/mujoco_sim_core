@@ -1,6 +1,7 @@
 #pragma once
 
 #include <atomic>
+#include <chrono>
 #include <condition_variable>
 #include <cstdint>
 #include <functional>
@@ -49,6 +50,8 @@ class SyncAdapterClient {
   bool Start(std::string* error_message);
   int Run(TickHandler handler, std::uint64_t max_ticks);
   void Stop();
+  bool Unregister(std::string* error_message);
+  std::string lifecycle_warning() const;
 
   const mujoco_sim::v1::RegisterControllerResponse& registration() const {
     return registration_;
@@ -59,15 +62,27 @@ class SyncAdapterClient {
 
   template <typename Request, typename Response>
   bool CallService(const std::string& method, const Request& request,
-                   Response* response, std::string* error_message);
+                   Response* response, std::string* error_message,
+                   bool allow_after_stop = false);
 
   bool Register(std::string* error_message);
   bool Activate(std::string* error_message);
+  bool WaitBeforeActivation(std::chrono::milliseconds delay);
+  bool UnregisterWith(
+      const std::function<bool(
+          const mujoco_sim::v1::UnregisterControllerRequest&,
+          mujoco_sim::v1::UnregisterControllerResponse*, std::string*)>& call,
+      std::string* error_message);
+  bool CompleteUnregister(
+      const mujoco_sim::v1::UnregisterControllerResponse& response,
+      std::string* error_message);
+  void AddLifecycleWarning(const std::string& warning);
   bool BeginTickCallback();
   void EndTickCallback();
   void StopTickReception();
   bool IsExpectedTick(const mujoco_sim::v1::Tick& tick) const;
   void HandleTickBytes(const void* data, std::size_t size);
+  void HandleStatusBytes(const void* data, std::size_t size);
   void HandleTick(
       const mujoco_sim::v1::Tick& tick,
       const std::function<void(const mujoco_sim::v1::Heartbeat&)>&
@@ -95,18 +110,22 @@ class SyncAdapterClient {
   std::unique_ptr<eCAL::CPublisher> commit_publisher_;
   std::unique_ptr<eCAL::CPublisher> heartbeat_publisher_;
   std::unique_ptr<eCAL::CSubscriber> tick_subscriber_;
+  std::unique_ptr<eCAL::CSubscriber> status_subscriber_;
   TickHandler handler_;
   std::mutex tick_mutex_;
-  std::mutex mutex_;
+  mutable std::mutex mutex_;
   std::condition_variable condition_;
   std::atomic<bool> stop_requested_{false};
   bool owns_ecal_ = false;
   bool accepting_ticks_ = false;
+  bool registered_ = false;
   std::size_t active_tick_callbacks_ = 0;
   std::uint64_t handled_ticks_ = 0;
+  std::uint64_t max_ticks_ = 0;
   bool have_last_commit_ = false;
   mujoco_sim::v1::Tick last_tick_;
   mujoco_sim::v1::AdapterCommit last_commit_;
+  std::string lifecycle_warning_;
 };
 
 }  // namespace mujoco_sim::adapter_sdk

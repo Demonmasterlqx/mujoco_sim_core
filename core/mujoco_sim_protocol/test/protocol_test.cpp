@@ -70,4 +70,35 @@ TEST(ProtocolSerializationTest, CommitCarriesAtomicCommands) {
   EXPECT_DOUBLE_EQ(parsed.commands(0).values(0), 0.25);
 }
 
+TEST(ProtocolSerializationTest, CarriesDynamicControllerLifecycleStatus) {
+  EXPECT_EQ(mujoco_sim::protocol::kProtocolMajor, 1U);
+  EXPECT_EQ(mujoco_sim::protocol::kProtocolMinor, 1U);
+  EXPECT_EQ(static_cast<int>(mujoco_sim::v1::PROVISIONAL), 1);
+  EXPECT_EQ(static_cast<int>(mujoco_sim::v1::ACTIVE), 2);
+  EXPECT_EQ(static_cast<int>(mujoco_sim::v1::ERROR), 3);
+  EXPECT_EQ(static_cast<int>(mujoco_sim::v1::UNREGISTERED), 4);
+  EXPECT_EQ(static_cast<int>(mujoco_sim::v1::TIMED_OUT), 5);
+
+  mujoco_sim::v1::ControllerStatus status;
+  status.set_controller_id("arm");
+  status.set_session_id(12);
+  status.set_last_tick_id(20);
+  status.set_state(mujoco_sim::v1::TIMED_OUT);
+  status.set_message("controller timed out");
+  status.set_last_commit_tick_id(19);
+  status.set_state_since_tick_id(20);
+  status.set_timeout_count(2);
+  status.set_required_for_barrier(false);
+
+  const std::string bytes = status.SerializeAsString();
+  mujoco_sim::v1::ControllerStatus parsed;
+  ASSERT_TRUE(parsed.ParseFromString(bytes));
+  EXPECT_EQ(parsed.state(), mujoco_sim::v1::TIMED_OUT);
+  EXPECT_TRUE(parsed.has_last_commit_tick_id());
+  EXPECT_EQ(parsed.last_commit_tick_id(), 19U);
+  EXPECT_EQ(parsed.state_since_tick_id(), 20U);
+  EXPECT_EQ(parsed.timeout_count(), 2U);
+  EXPECT_FALSE(parsed.required_for_barrier());
+}
+
 }  // namespace

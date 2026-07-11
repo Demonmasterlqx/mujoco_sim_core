@@ -93,7 +93,9 @@ Supported adapter CLI overrides are:
 Run `mujoco-sim-wbr-lqr-adapter --help` for generated help. The shipped YAML
 also configures Mahony/FSM/PID values and half-open scripted input intervals
 `[begin_tick, end_tick)`. A Space transition must be a one-Tick pulse after
-Tick 0, with at least one released Tick between pulses.
+Tick 0, with at least one released Tick between pulses. These indices are local
+to the adapter session and start at zero on its first handled Tick; they are not
+the server-global `Tick.header.tick_id`.
 
 ## Build
 
@@ -139,19 +141,27 @@ Start the server first:
 ```bash
 mujoco-sim-server \
   --config "$demo_share/config/wbr_server.yaml" \
-  --headless
+  --headless \
+  --max-ticks 0
 ```
 
-Then start the adapter within the configured 10 second startup timeout:
+Then start the adapter while the server is running:
 
 ```bash
 mujoco-sim-wbr-lqr-adapter \
   --config "$demo_share/config/wbr_lqr.yaml"
 ```
 
-Both shipped configurations use server name `wbr` and stop after 6000
-Ticks. The adapter prints periodic FSM/clamp counters and a final summary with
-handled, nonzero-command, clamped-command, and scripted Space/E/Q effect counts.
+Both shipped configurations use server name `wbr`. The adapter's `max_ticks`
+counts 6000 newly handled `ACTIVE` Ticks. Server `max_ticks`, however, counts
+all simulation steps since model load, including autonomous steps before the
+adapter registers. The command above therefore overrides the shipped server
+value `6000` with `0`; after the adapter automatically unregisters and exits,
+stop the server separately. For a bounded server run, provide a larger total
+step budget that includes startup time.
+
+The adapter prints periodic FSM/clamp counters and a final summary with handled,
+nonzero-command, clamped-command, and scripted Space/E/Q effect counts.
 
 ## Run With GUI
 
@@ -160,7 +170,8 @@ Use the same adapter command and start the server with `--gui`:
 ```bash
 mujoco-sim-server \
   --config "$demo_share/config/wbr_server.yaml" \
-  --gui
+  --gui \
+  --max-ticks 0
 ```
 
 On a machine without a physical display, use `xvfb-run -a` to exercise the
@@ -168,7 +179,7 @@ GUI path. Use `--headless` when rendering is not required.
 
 ## Synchronous Control Loop
 
-For Tick `n`, `TickController::HandleTick` performs:
+For adapter-session Tick `n`, `TickController::HandleTick` performs:
 
 ```text
 named observation blocks
@@ -188,8 +199,21 @@ named observation blocks
 or latest-value shared-memory reads: one Tick produces one deterministic
 command set before the adapter Commit is published.
 
+The server supports registering, activating, and unregistering this adapter
+while simulation is already `RUNNING`. A per-adapter timeout clears its six
+actuators and moves only this session to `TIMED_OUT`; the server and other
+controllers continue. The SDK handles a `TIMED_OUT` Tick with a non-blocking
+try-lock. If the controller callback is free, its valid Commit is recovery
+proof only and the server restores the session to `ACTIVE` on the next Tick;
+recovery Ticks do not count toward the adapter's 6000-Tick limit.
+They do advance the stateful controller pipeline and its session-local input
+script index because the handler successfully processed them.
+
 An exception in decoding or control stops the SDK loop and makes the process
-exit with code 1. The current SDK callback has no structured handler-error
+exit with code 1. If the server marks this exact session `ERROR` because of a
+local command failure, the SDK also stops, prints `lifecycle_warning`, and
+attempts to unregister. Normal completion likewise performs best-effort
+unregistration. The current SDK callback has no structured handler-error
 Commit, which is recorded as a next-stage architecture issue in
 [MIGRATION_REPORT.md](MIGRATION_REPORT.md).
 
@@ -224,7 +248,8 @@ CTest covers:
 - installed CMake target, MJCF directory, all assets, adapter help, and a
   staged-config headless run from a different working directory
 - a nonblank PNG captured from the real WBR GLFW render loop
-- real eCAL headless and GUI/Xvfb lockstep runs
+- real eCAL headless and GUI/Xvfb lockstep runs against an unlimited server;
+  both verify automatic unregistration, then terminate the server explicitly
 
 See [MIGRATION_REPORT.md](MIGRATION_REPORT.md) for deliberate differences,
 verification counts, and prioritized architecture improvements.

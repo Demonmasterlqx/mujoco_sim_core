@@ -78,10 +78,12 @@ class EcalServer {
   std::unique_ptr<eCAL::CPublisher> status_publisher_;
   std::unordered_map<std::string, std::unique_ptr<eCAL::CPublisher>>
       tick_publishers_;
+  std::mutex publisher_mutex_;
   std::mutex mutex_;
   std::condition_variable condition_;
   std::atomic<bool> stop_requested_{false};
   std::string stop_reason_ = "external_stop";
+  bool status_dirty_ = true;
   mujoco_sim::v1::ServerState last_logged_state_ =
       mujoco_sim::v1::SERVER_STATE_UNSPECIFIED;
   bool owns_ecal_ = false;

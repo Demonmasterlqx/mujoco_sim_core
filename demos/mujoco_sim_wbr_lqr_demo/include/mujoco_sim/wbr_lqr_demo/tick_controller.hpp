@@ -36,6 +36,7 @@ class TickController {
   const std::optional<PipelineOutput>& last_output() const {
     return last_output_;
   }
+  const control::input_snapshot_t& last_input() const { return last_input_; }
   std::size_t last_clamp_count() const {
     return command_mapper_.last_clamp_count();
   }
@@ -45,6 +46,7 @@ class TickController {
   TorqueCommandMapper command_mapper_;
   ControllerPipeline pipeline_;
   InputScript input_script_;
+  control::input_snapshot_t last_input_{};
   std::optional<PipelineOutput> last_output_;
 };
 

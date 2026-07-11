@@ -20,6 +20,8 @@ struct ServerConfig {
   std::uint32_t log_file_max_size_mb = 10;
   std::uint32_t log_file_max_files = 5;
   std::uint32_t log_summary_period_ms = 5000;
+  std::uint32_t activation_timeout_ms = 5000;
+  bool allow_timed_out_adapter_replacement = true;
 };
 
 bool LoadConfigFile(const std::string& path, ServerConfig* config,

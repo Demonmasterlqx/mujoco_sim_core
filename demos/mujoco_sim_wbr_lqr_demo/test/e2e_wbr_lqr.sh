@@ -25,7 +25,7 @@ trap cleanup EXIT
 server_args=(
   --config "${server_config}"
   --server-name "${instance_name}"
-  --max-ticks "${ticks}"
+  --max-ticks 0
   --startup-timeout-ms 10000
   --tick-timeout-ms 5000
 )
@@ -40,7 +40,7 @@ else
 fi
 server_pid="$!"
 
-sleep 0.75
+sleep 0.1
 
 if ! timeout 45s "${adapter_bin}" \
     --config "${adapter_config}" \
@@ -55,28 +55,34 @@ if ! timeout 45s "${adapter_bin}" \
   exit 1
 fi
 
-if ! wait "${server_pid}"; then
-  echo "WBR server failed" >&2
+if ! kill -0 "${server_pid}" 2>/dev/null; then
+  echo "WBR server stopped before the adapter completed" >&2
   sed -n '1,200p' "${server_log}" >&2 || true
   sed -n '1,200p' "${adapter_log}" >&2 || true
   exit 1
 fi
+
+kill "${server_pid}" 2>/dev/null || true
+set +e
+wait "${server_pid}"
+server_status="$?"
+set -e
 server_pid=""
+if [[ "${server_status}" -ne 143 ]]; then
+  echo "expected WBR server SIGTERM exit 143, got ${server_status}" >&2
+  sed -n '1,200p' "${server_log}" >&2 || true
+  exit 1
+fi
 
 for event in server_starting model_loaded server_started \
-             controller_registered controller_activated tick_summary; do
+             controller_registered controller_activated \
+             controller_unregistered; do
   if ! grep -Fq "event=${event}" "${server_log}"; then
     echo "server log is missing event=${event}" >&2
     sed -n '1,240p' "${server_log}" >&2 || true
     exit 1
   fi
 done
-if ! grep -Fq "event=server_stopped reason=max_ticks exit_code=0" \
-  "${server_log}"; then
-  echo "server log is missing the max_ticks shutdown reason" >&2
-  sed -n '1,240p' "${server_log}" >&2 || true
-  exit 1
-fi
 if grep -Eq "event=(tick_published|commit_accepted)" "${server_log}"; then
   echo "info server logging contains per-Tick or per-Commit traffic" >&2
   exit 1

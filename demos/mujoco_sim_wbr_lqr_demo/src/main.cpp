@@ -80,9 +80,8 @@ int main(int argc, char** argv) {
   const int run_result = client.Run(
       [&](const mujoco_sim::v1::Tick& tick) {
         try {
-          const auto input =
-              config.input_script.InputAt(tick.header().tick_id());
-          auto commands = controller.HandleTick(tick, input);
+          auto commands = controller.HandleTick(tick);
+          const auto& input = controller.last_input();
           ++handled_ticks;
           clamp_count += controller.last_clamp_count();
           if (std::any_of(commands.begin(), commands.end(), [](const auto& command) {
@@ -121,6 +120,11 @@ int main(int argc, char** argv) {
         }
       },
       config.adapter.max_ticks);
+
+  if (!client.lifecycle_warning().empty()) {
+    std::cerr << "adapter lifecycle warning: " << client.lifecycle_warning()
+              << '\n';
+  }
 
   if (handler_failed) {
     std::lock_guard lock(error_mutex);

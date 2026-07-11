@@ -205,3 +205,30 @@ TEST(InterfaceMappingTest, BuildsFixedAdapterRegistrationOptions) {
   EXPECT_EQ(options.observation_names.size(), 21U);
   EXPECT_EQ(options.command_names.size(), 6U);
 }
+
+TEST(InterfaceMappingTest, RunsInputScriptRelativeToAdapterSession) {
+  const auto layout = test::MakeValidLayout();
+  control::input_snapshot_t toggle_move{};
+  toggle_move.space = true;
+  demo::PipelineConfig pipeline_config;
+  pipeline_config.imu_mode = control::imu_mode::bypass;
+  demo::TickController controller(
+      layout, pipeline_config,
+      demo::InputScript({{0, 1, {}}, {1, 2, toggle_move}}));
+
+  controller.HandleTick(test::MakeValidTick(layout, 500));
+  ASSERT_TRUE(controller.last_output().has_value());
+  EXPECT_FALSE(controller.last_input().space);
+  EXPECT_FALSE(controller.last_output()->command.move);
+
+  controller.HandleTick(test::MakeValidTick(layout, 501));
+  ASSERT_TRUE(controller.last_output().has_value());
+  EXPECT_TRUE(controller.last_input().space);
+  EXPECT_TRUE(controller.last_output()->command.move);
+
+  controller.Reset();
+  controller.HandleTick(test::MakeValidTick(layout, 900));
+  ASSERT_TRUE(controller.last_output().has_value());
+  EXPECT_FALSE(controller.last_input().space);
+  EXPECT_FALSE(controller.last_output()->command.move);
+}

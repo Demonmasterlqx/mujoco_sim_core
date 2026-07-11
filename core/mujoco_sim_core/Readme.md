@@ -1,8 +1,8 @@
 # mujoco_sim_core
 
-`mujoco_sim_core` 是与传输层无关的 MuJoCo V1 lockstep 仿真核心。它持有真实
-`mjModel`/`mjData`，从模型建立资源目录，并在所有 active controller 完成当前
-Tick 的 commit barrier 后执行一次 `mj_step()`。
+`mujoco_sim_core` 是与传输层无关的 MuJoCo V1.1 lockstep 仿真核心。它持有真实
+`mjModel`/`mjData`，从模型建立资源目录，并在当前 Tick 打开时固定一组 required
+controller；该组完成或被局部隔离后执行一次 `mj_step()`。
 
 | 项目 | 值 |
 | --- | --- |
@@ -21,9 +21,12 @@ Tick 的 commit barrier 后执行一次 `mj_step()`。
 - 从具名 MuJoCo sensor 和 actuator 建立 observation/command 资源目录。
 - 校验资源发现、控制器注册、激活、注销、session、epoch 与 tick。
 - 对 command actuator 实施单控制器独占所有权。
-- 生成每个 active controller 的 `Tick`，收集完整 `AdapterCommit`，完成 barrier
-  后写入 `data->ctrl` 并调用一次 `mj_step()`。
-- 检查 open tick 的 commit 超时、记录 heartbeat tick，并生成 `ServerStatus`。
+- 支持运行期注册、激活和注销；每个 Tick 的 Barrier 集合在打开时固定，新激活者从下一
+  Tick 加入。
+- 生成 `ACTIVE` 和 `TIMED_OUT` controller 的 `Tick`，收集完整 `AdapterCommit`，完成
+  Barrier 后写入有效命令并调用一次 `mj_step()`。
+- 按 controller 检查 Commit timeout，局部隔离、清零和恢复；记录 heartbeat/Commit Tick，
+  并生成包含动态生命周期字段的 `ServerStatus`。
 - 为可视化调用方创建与真实仿真状态隔离的 MuJoCo 快照。
 
 本包不负责：
@@ -110,24 +113,29 @@ API 位于 `mujoco_sim::core` 命名空间。
 
 | 类型/API | 行为 |
 | --- | --- |
-| `CoreOptions` | `server_name` 默认 `default`；`default_timeout_ms` 默认 `1000` |
+| `CoreOptions` | `server_name` 默认 `default`；Commit timeout 默认 `1000 ms`；激活 timeout 默认 `5000 ms`；默认允许替换同名 `TIMED_OUT` adapter |
 | `ModelLoadOptions` | 可选的 `initial_keyframe`；空字符串保持默认 reset 行为 |
-| `CommitResult` | 返回 `code`、说明文本、是否为重复提交及本次是否实际 step |
+| `CommitResult` | 返回错误码、说明、duplicate/stepped/recovery pending，以及局部 controller 状态转换信息 |
+| `ControllerTransition`、`DeadlineResult` | 描述 deadline 检查产生的 controller 状态转换及是否因此完成 step |
 | `SimulationSnapshot` | move-only 的隔离 MuJoCo model/data 副本，提供 `model()`、`data()` |
 | `SimulationCore(options)` | 构造 move-only Core；不自动加载模型 |
-| `LoadModel()`、`IsModelLoaded()` | 加载 MJCF XML，可选初始 keyframe，并查询模型状态 |
+| `LoadModel()`、`IsModelLoaded()` | 加载 MJCF XML，可选初始 keyframe；成功后状态为 `RUNNING` |
 | `observations()`、`commands()` | 读取当前模型建立的资源目录 |
 | `GetAvailableResources()` | 校验 server/协议版本并返回资源目录 |
 | `RegisterController()` | 校验并分配资源，返回 session、epoch、layout 和 provisional 状态 |
-| `ActivateController()` | 在首个 Tick 前将 provisional controller 设为 active |
-| `UnregisterController()` | 在 Tick 关闭时释放控制器及 actuator 所有权 |
-| `OpenTick()` | 为所有 active controller 生成当前 Tick，并开启 barrier/超时计时 |
-| `SubmitCommit()` | 校验并暂存 commit；最后一个 active controller 到达时执行一次 step |
+| `ActivateController()` | 在运行期将 provisional controller 设为 active；下一 Tick 才加入 Barrier |
+| `UnregisterController()` | 运行期清零并释放 controller/actuator；若它属于当前 Barrier，移除后可能立即完成 step |
+| `OpenTick()` | 打开 Tick 时固定 required/recipient 集合并保存 immutable Tick；重复调用返回已发出的同一 payload |
+| `IsTickIssued()` | 判断一份 Tick 是否仍是当前已发出的精确 payload，供异步传输层避免发送失效快照 |
+| `StepIfBarrierComplete()` | required 集合为空或均已有 Commit 时写命令、执行一步并关闭 Tick |
+| `SubmitCommit()` | 校验正常 Commit、局部 command 错误和 `TIMED_OUT` 恢复证明 |
 | `AcceptHeartbeat()` | 对 header 有效的已知控制器记录当前 tick，不返回错误 |
-| `CheckTickTimeout(now)` | 检查 open tick 中尚未提交的控制器是否超时 |
+| `CheckControllerDeadlines(now)` | 清理激活超时的 provisional controller，并逐个隔离 Commit 超时者 |
+| `CheckTickTimeout(now)` | 兼容包装：执行 deadline 检查并返回本次是否出现 `TIMED_OUT` 转换 |
+| `EnterFatalError()`、`MarkStopped()` | 由宿主显式进入全局 `ERROR_PAUSED` 或 `STOPPED`；adapter 局部故障不调用它们 |
 | `MakeStatus()` | 生成当前服务端和控制器状态消息 |
 | `CreateSnapshot()`、`UpdateSnapshot()` | 创建和刷新隔离的可视化副本 |
-| 状态 getter | `epoch()`、`current_tick_id()`、`simulation_time()`、`server_state()`、`tick_open()`、`active_controller_count()` |
+| 状态 getter | 另含 `timestep()` 和按状态计数的 `controller_count()` |
 
 `LoadModel()` 保留原有 `(model_path, error_message)` 签名，并新增
 `(model_path, ModelLoadOptions, error_message)` 重载。所有 `LoadModel()`、
@@ -240,13 +248,15 @@ int main() {
 }
 ```
 
-多个 controller 时，每个 `SubmitCommit()` 都可能只返回“已接收”；只有最后一个
-active controller 的有效 commit 使 `CommitResult::stepped` 为 `true`。调用方随后
-显式调用下一次 `OpenTick()`。Core 不会在后台自动推进。
+多个 controller 时，每个 `SubmitCommit()` 都可能只返回“已接收”；只有当前 Tick 固定的
+required 集合全部满足时，`CommitResult::stepped` 才为 `true`。调用方随后显式调用下一次
+`OpenTick()`。没有 controller 时，`OpenTick()` 仍会打开一个空 Barrier，调用
+`StepIfBarrierComplete()` 会立即执行一步；Core 本身不在后台调度步进频率。
 
-完整生命周期是：加载模型，发现/选择资源，注册为 `PROVISIONAL`，激活为 `ACTIVE`，
-打开 Tick，收齐 commit barrier 并 step，然后打开下一 Tick 或在 Tick 关闭时注销。
-Tick 打开期间，宿主应周期性调用 `CheckTickTimeout(std::chrono::steady_clock::now())`。
+adapter 可在模型运行期间注册为 `PROVISIONAL`、激活为 `ACTIVE`，也可在 open Tick 中注销。
+宿主应持续调用 `CheckControllerDeadlines(std::chrono::steady_clock::now())`，以清理未及时激活
+的注册并隔离未及时 Commit 的 controller。注册或激活发生在 open Tick 中时，该 controller
+不改变本 Tick 的 Barrier，从下一 Tick 才参与。
 
 ## 快照
 
@@ -287,29 +297,46 @@ if (!simulation.UpdateSnapshot(snapshot.get(), &error)) {
 
 - `LoadModel()` 只支持通过 `mj_loadXML()` 加载 XML，当前没有 MJB 加载 API。成功加载会按
   默认 reset 或指定 keyframe 初始化 data、清空 ctrl，随后清空 controllers、actuator owners
-  和 pending commits，递增 epoch 和模型 generation，将 tick 归零并回到 `IDLE`；加载失败
-  不会替换或修改当前模型状态。
+  和 Tick 状态，递增 epoch 和模型 generation，将 tick 归零并进入 `RUNNING`；加载失败不会
+  替换或修改当前模型状态。
 - 资源目录只包含具名 sensor 和具名 actuator，未命名资源会被跳过。Observation 维度
   来自 `sensor_dim`；每个 command actuator 当前固定为一个 `double`，并按模型的
   `ctrlrange` 校验。
-- controller 必须在首个 Tick 前注册和激活。注册至少要申请一个 command actuator；
+- controller 可在 `RUNNING` 期间注册、激活和注销。注册至少要申请一个 command actuator；
   同一 actuator 不能同时属于两个 controller，资源名也不能在同一请求中重复。
-- 首个 Tick 之后不支持新增注册或激活。注销只能在没有 open tick 时进行。
+- `PROVISIONAL` controller 超过 `activation_timeout_ms` 未激活时，deadline 检查将其移除并
+  释放 actuator。运行期激活不会加入已经打开的 Tick；每个 Tick 的 required Barrier 集合
+  在 `OpenTick()` 打开时固定。
+- 注销会立即清零该 controller 的 actuator、释放所有权并从当前 Tick 的 recipient/required
+  集合移除；如果剩余 required Commit 已齐，注销操作会使当前 Tick 完成一步。
 - commit 必须来自 active controller，且 server/session/epoch/tick 必须匹配；它必须将
   该 controller 获配的每个 actuator 恰好提交一次，每项恰好一个有限值，且不能超出
   control range。
-- 所有 active controller 构成 barrier。收到最后一份有效 commit 前不会写
-  `data->ctrl` 或 step；完成后统一写入命令并只调用一次 `mj_step()`。
-- 同一 open tick 的同 payload 重复 commit 会被忽略；payload 不同会进入
-  `ERROR_PAUSED`。身份字段匹配且 tick 已过期的提交按 stale duplicate 忽略。
-- header 身份不匹配、open tick 中来自未知/非 active controller 的提交、非法 command、
-  controller 主动报告 `COMMIT_ERROR` 或缺失 commit 超时，都会关闭当前 Tick、清空
-  pending commits，并将 active controllers 置为 `ERROR`。身份正确但没有 open tick 的
-  commit 只返回 `FAILED_PRECONDITION`。当前没有 resume/reset 方法；成功重载模型或
-  重建 Core 才能回到可运行状态。
-- `AcceptHeartbeat()` 只更新状态中的最后 heartbeat tick。当前
-  `CheckTickTimeout()` 判断的是 open tick 后尚未提交 commit 的耗时，不使用 heartbeat
-  年龄，也不会自行定时调用。
+- 当前 Tick 的 required controllers 构成 Barrier。收到最后一份有效 Commit 前不会批量写入
+  pending commands 或 step；集合为空时可立即 step。新注册/激活者不会扩张当前 Barrier。
+- 同一 open Tick 的相同 payload 重复 Commit 会被忽略；不同 payload、`COMMIT_ERROR`、
+  不完整/重复/越权 command、非有限值或越界值只把提交者置为 `ERROR`，清零其 actuator 并
+  从当前 Barrier 移除。其余 controller 和 server 保持 `RUNNING`。未知 controller 或
+  server/session/epoch/protocol/tick 身份不匹配只返回对应错误，不改变 controller 状态。
+- required controller 超过自己的 `timeout_ms` 未提交时，deadline 检查只将它置为
+  `TIMED_OUT`、递增 `timeout_count`、清零 actuator 并移出当前 Barrier；其他 controller
+  继续。当前 Tick 已生成的 Tick payload 不会因状态变化重建，重复发布保持字节不变。
+- `TIMED_OUT` controller 不再阻塞 Barrier，但仍是后续 Tick recipient。Core 会继续生成
+  Tick，transport 尝试发布但不保证对端收到。与 Core 已 issued、且比上次恢复证明新的 Tick
+  对应的完整合法 `COMMIT_OK` 只记录为恢复证明，不应用 command，也不参与当前 Barrier；
+  相同恢复 Commit 的重传按 duplicate success 幂等处理，到下一次 `OpenTick()` 才切回
+  `ACTIVE` 并重新成为 required member。
+- 对协商到协议 minor 0 的 controller，内部 `TIMED_OUT` Tick 在线上降级为旧 SDK 可识别的
+  `ACTIVE` 状态；header 仍为 minor 0，Commit 在 Core 中仍只作为恢复证明。
+- 同名注册仅可替换现有 `TIMED_OUT` controller，默认由
+  `allow_timed_out_adapter_replacement=true` 允许；替换会清零旧 actuator、废弃旧 session，
+  并创建新的 `PROVISIONAL` session。关闭该选项时返回 `ALREADY_EXISTS`。
+- `AcceptHeartbeat()` 只单调更新状态中的最后 heartbeat tick，乱序旧消息不会令它倒退。当前
+  deadline 判断的是 open Tick 后各 required controller 尚未提交 Commit 的耗时，不使用
+  heartbeat 年龄，也不会自行定时调用。
+- `ControllerStatus` 报告 optional 最后 Commit Tick、状态起始 Tick、累计超时数和当前
+  `required_for_barrier`。全局 `ERROR_PAUSED` 只保留给宿主显式调用 `EnterFatalError()` 等
+  server 级致命错误，不再用于 adapter timeout 或局部命令错误。
 - `SimulationCore` 没有声明为线程安全；所有方法的并发访问都应由宿主串行化或加锁。
 
 ## 测试
@@ -329,9 +356,9 @@ colcon test-result \
 ```
 
 [simulation_core_test.cpp](test/simulation_core_test.cpp) 当前覆盖默认与 keyframe 模型初始化、
-缺失 keyframe 的原子失败、模型/资源目录、资源发现、快照隔离与刷新、注册冲突、激活、
-Tick observation、barrier、重复 commit、非法值和 control range、session/epoch/tick 校验及
-超时进入 `ERROR_PAUSED`。
+空 Barrier step、资源/快照、运行期注册激活注销、协商 minor、固定 Barrier、重复 Commit、
+身份错误的非破坏性拒绝、局部 command `ERROR`、provisional 激活过期、per-controller
+timeout/清零/继续 step、immutable Tick、下一 Tick 恢复、同名 `TIMED_OUT` 替换及禁用替换。
 
 ## 相关包
 

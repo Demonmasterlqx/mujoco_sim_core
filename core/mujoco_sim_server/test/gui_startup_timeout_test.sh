@@ -16,14 +16,14 @@ timeout 10s "${server_bin}" \
 status="$?"
 set -e
 
-if [[ "${status}" -ne 2 ]]; then
-  echo "expected GUI server startup timeout exit 2, got ${status}" >&2
+if [[ "${status}" -ne 0 ]]; then
+  echo "expected GUI server max_ticks exit 0, got ${status}" >&2
   sed -n '1,160p' "${log_path}" >&2 || true
   exit 1
 fi
 
 grep -Fq "event=viewer_initialized mode=gui" "${log_path}"
-grep -Fq "event=server_stopped reason=startup_timeout exit_code=2" \
+grep -Fq "event=server_stopped reason=max_ticks exit_code=0" \
   "${log_path}"
 if grep -Fq "event=tick_summary" "${log_path}"; then
   echo "log_summary_period_ms=0 unexpectedly emitted a summary" >&2

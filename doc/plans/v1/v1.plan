@@ -6,11 +6,11 @@ V1 要把当前仓库从包骨架推进到可运行的 MuJoCo lockstep 仿真闭
 
 - `mujoco_sim_server` 加载 MuJoCo MJCF 模型，是唯一 `mjModel/mjData` 持有者、唯一 `mjData.ctrl` 写入者和唯一 `mj_step()` 调用者。
 - `mujoco_sim_sample_adapter` 通过 `mujoco_sim_adapter_sdk` 使用真实 eCAL 注册到 server，接收 Tick，提交 Commit。
-- `mujoco_sim_protocol` 使用 Protobuf 定义跨进程消息。
+- `mujoco_sim_protocol` 使用 Protobuf 定义 1.1 跨进程消息和动态 Adapter 生命周期状态。
 - `mujoco_sim_core` 不依赖 eCAL，不依赖任何具体 adapter。
 - 所有代码必须有对应测试；所有计划和代码必须交给 subagent 审查，审查发现作为验收门禁。
 
-V1 不实现 observer-only adapter、运行中动态增加 controller、异步相机/点云、动态 contact list、多 controller 叠加控制同一 actuator、优先级控制、通配符资源声明。
+V1 不实现 observer-only adapter、异步相机/点云、动态 contact list、多 controller 叠加控制同一 actuator、优先级控制、通配符资源声明。
 
 ## 2. 包职责
 
@@ -38,7 +38,9 @@ V1 不实现 observer-only adapter、运行中动态增加 controller、异步�
 职责：
 
 - 保存 V1 `.proto` 定义并生成 C++ Protobuf 绑定。
-- 定义 Header、错误码、资源描述、Register/Activate/Unregister、Tick、Commit、Heartbeat、Status。
+- 定义 Header、错误码、资源描述、Register/Activate/Unregister、Tick、Commit、Heartbeat、
+  Status；协议 1.1 增加 `TIMED_OUT` 以及最后 Commit Tick、状态起始 Tick、超时计数和
+  Barrier 成员状态。
 - 定义 eCAL service/topic 命名辅助函数。
 
 约束：
@@ -55,7 +57,8 @@ V1 不实现 observer-only adapter、运行中动态增加 controller、异步�
 - 为图形化 viewer 创建和刷新隔离的 `mjModel/mjData` 深拷贝快照。
 - 构建具名 Sensor catalog 和具名 Actuator catalog。
 - 执行 Controller 注册、资源存在性检查、Actuator 独占检查、Session/Epoch/Tick 校验。
-- 管理 Active controller 集合、Tick Barrier、Commit 幂等去重、超时 fail-stop。
+- 管理动态 controller 集合、每 Tick 固定 Barrier、Commit 幂等去重、per-controller
+  timeout/清零/恢复、局部 `ERROR` 和同名 `TIMED_OUT` session 替换。
 - 将合法 command 写入 `data->ctrl[actuator_id]` 并调用 `mj_step()`。
 
 约束：
@@ -72,8 +75,9 @@ V1 不实现 observer-only adapter、运行中动态增加 controller、异步�
 - 作为 composition root 创建 Core 和真实 eCAL 通信端。
 - 提供 registry service：`GetAvailableResources`、`RegisterController`、`ActivateController`、`UnregisterController`。
 - 发布 per-controller Tick，订阅 Commit/Heartbeat，发布 ServerStatus。
-- 使用 `mujoco_sim_config` 生成的 CLI11/yaml-cpp 配置，处理 initial keyframe、固定 tick 数
-  运行和错误退出。
+- 使用 `mujoco_sim_config` 生成的 CLI11/yaml-cpp 配置，处理 initial keyframe、从启动总
+  step 计数的 `max_ticks`、`activation_timeout_ms`、同名超时替换开关和错误退出；
+  `startup_timeout_ms` 仅为兼容保留，弃用且忽略。
 - 使用 spdlog 输出 server 生命周期、协议拒绝、状态转换、超时和窗口化仿真指标；默认
   写 stderr，可选写入有界轮转文件，逐 Tick/Commit 只在 trace 级别输出。
 - 默认使用仓库自带的 MuJoCo `simulate` 官方 UI 渲染 Core 快照，并提供 `--headless` 模式。
@@ -98,6 +102,8 @@ V1 不实现 observer-only adapter、运行中动态增加 controller、异步�
   其 stdout/JSON/NDJSON 契约不受影响。
 - Heartbeat 日志只表示 payload 已解析并转交 Core；当前 `AcceptHeartbeat()` 不返回语义
   结果，server 不得记录无法证实的 accepted/rejected 结论。
+- 模型加载成功即进入 `RUNNING`。无 adapter 时按模型 timestep 实时推进，每次完成后从
+  当前 wall time 安排下一步，不补跑追赶；`max_ticks` 统计启动以来全部 step。
 - 状态工具源码和内部 library 位于 `tools/status`，使用生成式 YAML/CLI 配置，但不链接
   server library、Core、MuJoCo、GUI 或 PNG；资源查询失败不得掩盖已收到的有效
   ServerStatus。
@@ -110,6 +116,8 @@ V1 不实现 observer-only adapter、运行中动态增加 controller、异步�
 - 提供同步 adapter runner：用户只需实现 `Tick -> commands` 回调。
 - 处理 service discovery 等待、session/epoch/tick 继承、重复 Tick 下的 Commit 重发；并发
   收到同一 Tick 时控制回调最多执行一次，其余路径重发缓存 Commit。
+- 对 `TIMED_OUT` Tick 使用 try-lock 尝试恢复且不计入 Run Tick 上限；订阅 status，在匹配
+  session 为 `ERROR` 时停止；Run/析构自动尽力注销并通过 `lifecycle_warning` 暴露诊断。
 
 约束：
 
@@ -148,35 +156,36 @@ V1 不实现 observer-only adapter、运行中动态增加 controller、异步�
 
 ## 3. 仿真循环
 
-1. Server 启动，加载 MJCF；若配置了 `initial_keyframe`，Core 在发布资源前原子应用该
-   keyframe、清零 actuator ctrl 并执行 `mj_forward()`。随后 Core 遍历具名
-   Sensor/Actuator：
-   - Sensor 进入 Observation catalog，维度来自 `model->sensor_dim`，数据来自 `data->sensordata`。
-   - Actuator 进入 Command catalog，维度固定为 1，控制值写入 `data->ctrl`。
-2. Adapter 通过 registry service 注册：
-   - 声明 observation sensor 名称和 command actuator 名称。
-   - Server 校验协议版本、资源存在性、重复声明和 actuator 独占。
-   - 注册成功进入 `PROVISIONAL`，返回 session、epoch 和 resource layout。
-3. Adapter 创建 Tick subscriber 和 Commit/Heartbeat publisher 后调用 Activate。
-4. Server 将 controller 标记为 `ACTIVE`，开始 Tick：
-   - Core 读取当前 `sensordata`，为每个 active controller 生成 Tick。
-   - Server 发布 `mujoco_sim/<server>/tick/<controller_id>`。
-5. Adapter 收到 Tick：
-   - 读取 observation values。
-   - 调用用户控制回调。
-   - 原子提交 `AdapterCommit(tick_id, commands)`。
-   - 若收到重复 Tick，则重发上一份 Commit，不重复计数；SDK 串行化 handler，确保并发
-     重复 Tick 也不会重复执行控制计算。
-6. Server 收到 Commit：
-   - 校验 controller、session、epoch、tick、actuator ownership、命令数量、finite 值和 ctrl range。
-   - 重复 Commit 幂等忽略。
-   - 收齐所有 active controller 后写入 `data->ctrl` 并调用 `mj_step()`。
-7. Core 递增 tick，Server 发布下一帧 Tick。
-8. GUI 模式下，Server 以固定刷新周期把 Core 状态复制到 viewer 快照；渲染不参与 Barrier，也不改变仿真时间。
-9. 任一 active controller 超时、提交非法命令或 session/epoch/tick 不匹配，Server 进入 `ERROR_PAUSED`，V1 默认 fail-stop。
-10. Server 在运行循环中按窗口聚合 step rate、real-time factor、Tick 发布/重传、Commit、
-    timeout、malformed payload 和成功 barrier latency；达到周期或退出时记录摘要，不让
-    日志 sink I/O 进入仿真临界区。
+1. Server 启动并加载 MJCF；若配置 `initial_keyframe`，Core 原子应用 keyframe、清零 ctrl
+   并执行 `mj_forward()`。具名 Sensor/Actuator 分别进入 Observation/Command catalog，
+   Core 随即进入 `RUNNING`。
+2. 没有 adapter 时，Server 打开空 Barrier、执行 `mj_step()`，并从完成时刻起等待一个模型
+   timestep 再开下一 Tick；延迟不通过连续补步追赶。`max_ticks` 从启动后的第一步累计。
+3. Adapter 可在运行期通过 registry 注册资源。Server 校验协议、资源和 actuator 独占，
+   返回新 session/epoch/layout，状态为 `PROVISIONAL`；超过 `activation_timeout_ms` 未激活则
+   自动移除并释放资源。
+4. Adapter 建立 Tick、Commit/Heartbeat 和 status endpoint 后 Activate。Server 将其设为
+   `ACTIVE`；若当前 Tick 已打开，则从下一 Tick 才加入 Barrier。
+5. 每次 `OpenTick()` 固定 required controllers 和 recipients，读取当前 observation 并保存
+   per-controller immutable Tick。`ACTIVE` 是 required recipient，`TIMED_OUT` 仅是恢复
+   recipient；同一 open Tick 的重传必须保持 payload 不变。Core 只保证生成 issued Tick，
+   transport 持续尝试发布但不保证对端收到；minor 0 的超时 Tick 在线上降级为 `ACTIVE`。
+6. SDK 对 `ACTIVE` Tick 串行执行 `Tick -> commands`，重复 Tick 重发缓存 Commit。对
+   `TIMED_OUT` Tick 使用 try-lock，忙时丢弃；成功处理后提交的 Commit 不计入 SDK
+   `max_ticks`，新 Tick 的 handler 调用不得越过该严格上限。
+7. Server 校验 identity、ownership、完整命令、finite 值和 ctrl range。有效 `ACTIVE`
+   Commit 加入本 Tick Barrier；required 集合完成后统一写入命令并执行一次 `mj_step()`。
+8. 单个 required adapter 超时后转为 `TIMED_OUT`、清零 actuator 并移出当前 Barrier，其他
+   controller 继续。来自 Core 已 issued 新 Tick 的合法 Commit 只作为恢复证明，不应用
+   command；相同恢复 Commit 重传幂等成功，下一 Tick 才转回 `ACTIVE`。同名新注册默认可
+   替换 `TIMED_OUT` session，也可由配置禁止；被替换的当前 SDK 从 status 发现新 session
+   后停止。
+9. 非法 command、`COMMIT_ERROR` 或不同 payload 的重复 Commit 只将来源 controller 置为
+   `ERROR`、清零并移出 Barrier；identity/version/tick 错误只拒绝消息。两者均不把 server
+   置为 `ERROR_PAUSED`。运行期 Unregister 同样清零、释放资源并移出 Barrier。
+10. GUI 按固定刷新周期复制 Core 快照；渲染不参与 Barrier。Server 聚合 step rate、
+    real-time factor、发布/重传、Commit、timeout/recovery/replacement/local error、激活过期、
+    malformed payload 和全部 Barrier completion latency；日志 sink I/O 不进入仿真临界区。
 
 ## 4. 测试与验收
 
@@ -184,19 +193,30 @@ V1 不实现 observer-only adapter、运行中动态增加 controller、异步�
 
 - `mujoco_sim_config`：schema 合法/非法输入、生成代码、严格 YAML/CLI、嵌套类型、相对
   path、优先级、事务性和安装后 consumer 生成。
-- `mujoco_sim_protocol`：topic 命名、Protobuf 序列化/反序列化、Register/Tick/Commit 字段。
+- `mujoco_sim_protocol`：topic 命名、Protobuf 序列化/反序列化、协议 1.1、`TIMED_OUT` 和新增
+  ControllerStatus 字段的稳定 wire 值。
 - `mujoco_sim_core`：模型加载、具名 keyframe 成功/失败原子性、catalog、隔离 viewer 快照
-  及刷新、注册失败路径、actuator 冲突、Activate、Tick observation、Barrier step、非法
-  command、range 校验、tick/session/epoch 错误、超时。
-- `mujoco_sim_server`：CLI11 命令行解析、yaml-cpp 严格配置解析、GUI/headless、真实 GLFW viewer 生命周期、PNG 截图编码回读、CLI 覆盖优先级、解析事务性、help 退出行为、安装后 CMake consumer 与可执行文件启动、topic/service 命名；日志级别、转义/截断、stderr/轮转文件、文件失败、并发、告警限流、运行摘要、退出原因、malformed/rejection 流量和 info 无逐 Tick 噪声。
-- 状态工具单元测试：CLI 默认值、全部参数、help、未知参数、缺失值、零值、负数和整数溢出；status payload 与 publisher 切换；资源成功/失败；controller 和资源排序；人类输出、JSON 字段/转义/uint64 精度及 NDJSON。
-- `mujoco_sim_adapter_sdk`：Commit/Heartbeat 构造、重复 Tick 缓存重发和并发 handler
-  单次执行。
+  及刷新、注册失败路径、actuator 冲突、运行期 register/activate/unregister、空/固定
+  Barrier、非法 command 局部 `ERROR`、identity 错误非破坏性拒绝、provisional 激活过期、
+  per-adapter timeout/清零、immutable Tick、恢复和同名替换开关。
+- `mujoco_sim_server`：CLI11/YAML（含 activation timeout、替换开关和弃用 startup timeout）、
+  GUI/headless、自主实时无追赶步进、启动总 step 上限、真实 GLFW/PNG、安装态 consumer、
+  endpoint、日志/限流/指标；真实生命周期 E2E 覆盖动态注册激活注销、timeout、恢复、替换和
+  局部 `ERROR` 不停止 server，以及快速 `ACTIVE` Commit 与 `TIMED_OUT` recipient 并存时的
+  整批 Tick 发布。
+- 状态工具单元测试：CLI、status publisher/epoch、资源成功/失败、排序、人类输出新增
+  Last commit/State since/Timeouts/Barrier 列，以及 JSON 中 optional Commit、状态、超时和
+  Barrier 字段、转义/uint64 精度及 NDJSON。
+- `mujoco_sim_adapter_sdk`：Commit/Heartbeat、重复 Tick 与并发 handler、`TIMED_OUT`
+  try-lock/计数、严格 Tick 上限、匹配 `ERROR`/替换 status 停止、callback 排空、注销失败重试、
+  激活前停止窗口、自动尽力注销和 lifecycle warning 合并。
 - `mujoco_sim_sample_adapter`：生成式 YAML/CLI、默认/自定义资源、固定 command 生成。
 - `mujoco_sim_wbr_lqr_demo`：上游 golden、同步 pipeline、全部资源改名/乱序映射、严格配置
   转换、输入脚本效果、真实模型 keyframe contract、GUI 非空像素截图、安装态配置闭环、
   6000 Tick headless 验收以及 GUI/Xvfb E2E。
-- 端到端：真实 eCAL server + sample adapter 分别在无 DISPLAY 的 headless 模式和真实 GUI 模式完成固定 tick 数闭环，进程均以 0 退出。
+- 端到端：真实 eCAL server + sample adapter 分别在 headless 和 GUI 模式完成固定 Adapter
+  Tick、自动注销；测试确认注销后显式终止无限 server。server 自身的启动总 step 上限由
+  server 单元/E2E 独立验证。
 - 状态工具端到端：查询 headless server 的状态与资源，持续输出 NDJSON，验证无 server 超时、SIGINT 正常退出、server 停止后的 stale 提示与空闲等待、同名重启后的 recovered 和资源重新查询。
 - 状态工具安装测试：staged `mujoco-sim-status --help` 可运行，ELF 允许生成配置所需的
   yaml-cpp，但不链接 server、Core、MuJoCo、GLFW、PNG 或 OpenGL/窗口系统依赖。
@@ -209,7 +229,9 @@ mujoco-sim-status --server-name default --watch --interval-ms 1000
 mujoco-sim-status --server-name default --json
 ```
 
-人类输出包含 server/state、epoch/tick、协议版本、更新时间、消息、controller 表和 observation/command 的数量、名称、维度。JSON 顶层固定为 `status`、`resources`、`resource_error`；watch JSON 是每行一个完整对象的 NDJSON，stale/recovered 诊断只写 stderr。资源查询失败时保留有效 status 并令 `resources` 为 `null`。
+人类输出包含 server/state、epoch/tick、协议版本、更新时间、消息、controller 动态状态表
+（含最后 Commit、状态起始 Tick、超时数、Barrier 标志）和资源。JSON 顶层固定为
+`status`、`resources`、`resource_error`；watch JSON 是 NDJSON，诊断只写 stderr。
 
 验收命令：
 
@@ -222,11 +244,22 @@ colcon test-result --verbose
 
 端到端验收：
 
+终端 1：
+
 ```bash
 source install/setup.bash
-mujoco-sim-server --model core/mujoco_sim_core/test/testdata/simple_actuator.xml --max-ticks 5
+mujoco-sim-server --model core/mujoco_sim_core/test/testdata/simple_actuator.xml --max-ticks 0
+```
+
+终端 2：
+
+```bash
+source install/setup.bash
 mujoco-sim-sample-adapter --ticks 5 --command-value 0.1
 ```
+
+adapter 完成后自动尽力注销；上述无限运行 server 由操作者结束。有限 server 验收必须为
+adapter 接入前的自主 step 单独预留总 `max_ticks` 预算。
 
 ## 5. 审查约束
 

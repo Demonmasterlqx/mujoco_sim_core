@@ -18,12 +18,12 @@ cleanup() {
 trap cleanup EXIT
 
 "${server_bin}" --headless --server-name "${instance_name}" \
-  --model "${model_path}" --max-ticks 1 --startup-timeout-ms 2500 \
+  --model "${model_path}" --max-ticks 5000 --startup-timeout-ms 2500 \
   --log-summary-period-ms 100 --log-file "${work_dir}/file/server.log" \
   >"${work_dir}/server.out" 2>"${work_dir}/server.err" &
 server_pid="$!"
 
-sleep 0.4
+sleep 0.1
 timeout 8s "${probe_bin}" "${instance_name}"
 
 set +e
@@ -31,8 +31,8 @@ wait "${server_pid}"
 server_status="$?"
 set -e
 server_pid=""
-if [[ "${server_status}" -ne 2 ]]; then
-  echo "expected startup timeout exit 2, got ${server_status}" >&2
+if [[ "${server_status}" -ne 0 ]]; then
+  echo "expected max_ticks exit 0, got ${server_status}" >&2
   sed -n '1,240p' "${work_dir}/server.err" >&2 || true
   exit 1
 fi
@@ -52,7 +52,8 @@ for log in "${work_dir}/server.err" "${work_dir}/file/server.log"; do
   grep -Fq "event=topic_payload_malformed message_type=Heartbeat" "${log}"
   grep -Fq "event=tick_summary" "${log}"
   grep -Eq "malformed_messages=[1-9][0-9]*" "${log}"
-  grep -Fq "event=server_stopped reason=startup_timeout exit_code=2" "${log}"
+  grep -Fq "event=deprecated_config field=startup_timeout_ms behavior=ignored" "${log}"
+  grep -Fq "event=server_stopped reason=max_ticks exit_code=0" "${log}"
   malformed_log_count="$(grep -c \
     "event=service_request_malformed method=RegisterController" "${log}")"
   if ((malformed_log_count >= 20)); then

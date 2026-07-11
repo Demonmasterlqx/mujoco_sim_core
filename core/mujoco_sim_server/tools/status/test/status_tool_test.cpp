@@ -69,11 +69,27 @@ StatusReport MakeReport() {
   zeta->set_session_id(9);
   zeta->set_last_tick_id(8);
   zeta->set_state(mujoco_sim::v1::ACTIVE);
+  zeta->set_last_commit_tick_id(8);
+  zeta->set_state_since_tick_id(3);
+  zeta->set_required_for_barrier(true);
   auto* alpha = report.status.add_controllers();
   alpha->set_controller_id("alpha");
   alpha->set_session_id(7);
   alpha->set_last_tick_id(6);
-  alpha->set_state(mujoco_sim::v1::PROVISIONAL);
+  alpha->set_state(mujoco_sim::v1::TIMED_OUT);
+  alpha->set_message("controller timed out");
+  alpha->set_state_since_tick_id(5);
+  alpha->set_timeout_count(2);
+  alpha->set_required_for_barrier(false);
+  auto* error = report.status.add_controllers();
+  error->set_controller_id("error");
+  error->set_session_id(8);
+  error->set_last_tick_id(7);
+  error->set_state(mujoco_sim::v1::ERROR);
+  error->set_message("invalid command");
+  error->set_last_commit_tick_id(6);
+  error->set_state_since_tick_id(7);
+  error->set_required_for_barrier(false);
   report.resources.emplace();
   report.resources->set_code(mujoco_sim::v1::OK);
   report.resources->set_epoch(1);
@@ -245,6 +261,17 @@ TEST(StatusFormattingTest, ProducesSortedHumanOutput) {
   EXPECT_NE(output.find("a_sensor[1], z_sensor[2]"), std::string::npos);
   EXPECT_LT(output.find("alpha"), output.find("zeta"));
   EXPECT_NE(output.find("motor[1]"), std::string::npos);
+  EXPECT_NE(output.find("ID\tState\tSession\tLast heartbeat\tLast commit\t"
+                        "State since\tTimeouts\tBarrier\tMessage\n"),
+            std::string::npos);
+  EXPECT_NE(output.find("alpha\tTIMED_OUT\t7\t6\t-\t5\t2\tno\t"
+                        "controller timed out\n"),
+            std::string::npos);
+  EXPECT_NE(output.find("error\tERROR\t8\t7\t6\t7\t0\tno\t"
+                        "invalid command\n"),
+            std::string::npos);
+  EXPECT_NE(output.find("zeta\tACTIVE\t9\t8\t8\t3\t0\tyes\t-\n"),
+            std::string::npos);
 }
 
 TEST(StatusFormattingTest, PreservesUint64AndEscapesJson) {
@@ -258,11 +285,29 @@ TEST(StatusFormattingTest, PreservesUint64AndEscapesJson) {
   google::protobuf::Struct root;
   ASSERT_TRUE(google::protobuf::util::JsonStringToMessage(json, &root).ok());
   const auto& fields = root.fields();
+  EXPECT_EQ(fields.size(), 3);
   const auto& status = fields.at("status").struct_value().fields();
   const auto& header = status.at("header").struct_value().fields();
   EXPECT_EQ(header.at("tick_id").string_value(), "18446744073709551615");
   EXPECT_EQ(status.at("message").string_value(),
             "quote \" slash \\ newline\n");
+  const auto& controllers = status.at("controllers").list_value();
+  ASSERT_EQ(controllers.values_size(), 3);
+  const auto& timed_out = controllers.values(0).struct_value().fields();
+  EXPECT_EQ(timed_out.at("controller_id").string_value(), "alpha");
+  EXPECT_EQ(timed_out.at("state").string_value(), "TIMED_OUT");
+  EXPECT_EQ(timed_out.count("last_commit_tick_id"), 0);
+  EXPECT_EQ(timed_out.at("state_since_tick_id").string_value(), "5");
+  EXPECT_EQ(timed_out.at("timeout_count").string_value(), "2");
+  EXPECT_FALSE(timed_out.at("required_for_barrier").bool_value());
+  const auto& controller_error =
+      controllers.values(1).struct_value().fields();
+  EXPECT_EQ(controller_error.at("controller_id").string_value(), "error");
+  EXPECT_EQ(controller_error.at("state").string_value(), "ERROR");
+  EXPECT_EQ(controller_error.at("last_commit_tick_id").string_value(), "6");
+  const auto& active = controllers.values(2).struct_value().fields();
+  EXPECT_EQ(active.at("controller_id").string_value(), "zeta");
+  EXPECT_TRUE(active.at("required_for_barrier").bool_value());
   const auto& observations = fields.at("resources")
                                  .struct_value()
                                  .fields()
@@ -293,10 +338,32 @@ TEST(StatusFormattingTest, WritesUnavailableResourcesAsNdjson) {
     google::protobuf::Struct root;
     ASSERT_TRUE(
         google::protobuf::util::JsonStringToMessage(line, &root).ok());
+    EXPECT_EQ(root.fields().size(), 3);
     EXPECT_EQ(root.fields().at("resources").kind_case(),
               google::protobuf::Value::kNullValue);
     EXPECT_EQ(root.fields().at("resource_error").string_value(),
               report.resource_error);
+    const auto& controllers = root.fields()
+                                  .at("status")
+                                  .struct_value()
+                                  .fields()
+                                  .at("controllers")
+                                  .list_value();
+    ASSERT_EQ(controllers.values_size(), 3);
+    const auto& timed_out = controllers.values(0).struct_value().fields();
+    EXPECT_EQ(timed_out.at("state").string_value(), "TIMED_OUT");
+    EXPECT_EQ(timed_out.count("last_commit_tick_id"), 0);
+    EXPECT_FALSE(timed_out.at("required_for_barrier").bool_value());
+    const auto& controller_error =
+        controllers.values(1).struct_value().fields();
+    EXPECT_EQ(controller_error.at("state").string_value(), "ERROR");
+    EXPECT_EQ(controller_error.at("last_commit_tick_id").string_value(),
+              "6");
+    EXPECT_TRUE(controllers.values(2)
+                    .struct_value()
+                    .fields()
+                    .at("required_for_barrier")
+                    .bool_value());
     ++count;
   }
   EXPECT_EQ(count, 2);

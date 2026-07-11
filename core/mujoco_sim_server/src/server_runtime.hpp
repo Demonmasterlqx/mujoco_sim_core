@@ -23,6 +23,11 @@ enum class SendOutcome {
 SendOutcome ClassifySendOutcome(bool sent, std::size_t subscribers_before,
                                 std::size_t subscribers_after);
 
+std::chrono::steady_clock::time_point ComputeLoopWakeDeadline(
+    std::chrono::steady_clock::time_point now,
+    std::chrono::steady_clock::time_point next_tick, bool tick_open,
+    std::chrono::steady_clock::duration poll_interval);
+
 struct RuntimeRates {
   double step_rate_hz = 0.0;
   double real_time_factor = 0.0;
@@ -51,6 +56,10 @@ struct RuntimeMetricsSnapshot {
   std::uint64_t duplicate_commits = 0;
   std::uint64_t rejected_commits = 0;
   std::uint64_t timeouts = 0;
+  std::uint64_t recoveries = 0;
+  std::uint64_t replacements = 0;
+  std::uint64_t local_errors = 0;
+  std::uint64_t activation_expirations = 0;
   std::uint64_t malformed_messages = 0;
   std::uint64_t suppressed_warnings = 0;
   std::uint64_t completed_barriers = 0;
@@ -75,7 +84,12 @@ class RuntimeMetrics {
                               std::uint64_t retransmissions);
   double RecordCommit(bool duplicate, bool rejected, bool stepped,
                       TimePoint now);
+  double RecordBarrierCompleted(TimePoint now);
   void RecordTimeout() { ++timeouts_; }
+  void RecordRecovery() { ++recoveries_; }
+  void RecordReplacement() { ++replacements_; }
+  void RecordLocalError() { ++local_errors_; }
+  void RecordActivationExpiration() { ++activation_expirations_; }
   void RecordMalformedMessage() { ++malformed_messages_; }
   void RecordSuppressedWarning() { ++suppressed_warnings_; }
 
@@ -100,6 +114,10 @@ class RuntimeMetrics {
   std::uint64_t duplicate_commits_ = 0;
   std::uint64_t rejected_commits_ = 0;
   std::uint64_t timeouts_ = 0;
+  std::uint64_t recoveries_ = 0;
+  std::uint64_t replacements_ = 0;
+  std::uint64_t local_errors_ = 0;
+  std::uint64_t activation_expirations_ = 0;
   std::uint64_t malformed_messages_ = 0;
   std::uint64_t suppressed_warnings_ = 0;
   std::uint64_t completed_barriers_ = 0;

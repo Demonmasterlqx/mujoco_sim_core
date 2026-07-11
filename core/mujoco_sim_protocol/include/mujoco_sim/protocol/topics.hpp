@@ -5,7 +5,7 @@
 namespace mujoco_sim::protocol {
 
 inline constexpr unsigned int kProtocolMajor = 1;
-inline constexpr unsigned int kProtocolMinor = 0;
+inline constexpr unsigned int kProtocolMinor = 1;
 
 inline std::string RegistryServiceName(const std::string& server_name) {
   return "mujoco_sim." + server_name + ".registry";

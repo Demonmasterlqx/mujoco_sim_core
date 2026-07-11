@@ -5,7 +5,7 @@
 | 包 | 作用 | 文档 |
 |---|---|---|
 | `mujoco_sim_config` | 从 schema 在构建期生成 C++ 配置类型、严格 YAML/CLI 解析器 | [查看](core/mujoco_sim_config/README.md) |
-| `mujoco_sim_protocol` | 定义 V1 Protobuf 协议和 eCAL 命名规则 | [查看](core/mujoco_sim_protocol/Readme.md) |
+| `mujoco_sim_protocol` | 定义 V1.1 Protobuf 协议和 eCAL 命名规则 | [查看](core/mujoco_sim_protocol/Readme.md) |
 | `mujoco_sim_core` | 管理 MuJoCo 状态、资源所有权和 lockstep 仿真 | [查看](core/mujoco_sim_core/Readme.md) |
 | `mujoco_sim_server` | 提供 eCAL server、配置解析和图形界面 | [查看](core/mujoco_sim_server/Readme.md) |
 | `mujoco_sim_adapter_sdk` | 提供同步 controller adapter C++ SDK | [查看](core/mujoco_sim_adapter/mujoco_sim_adapter_sdk/Readme.md) |
@@ -48,15 +48,18 @@ model_path: robot.xml
 initial_keyframe: ""
 max_ticks: 0
 tick_timeout_ms: 1000
-startup_timeout_ms: 5000
+startup_timeout_ms: 5000 # 已弃用，仅为兼容保留，server 会忽略
+activation_timeout_ms: 5000
+allow_timed_out_adapter_replacement: true
 status_period_ms: 100
 headless: false
 ```
 
 YAML 中的相对路径按配置文件所在目录解析，CLI 路径按进程当前目录解析。使用
 `mujoco-sim-server --config server.yaml` 加载配置；`--model`、`--initial-keyframe`、
-`--server-name`、`--max-ticks`、`--tick-timeout-ms` 和
-`--startup-timeout-ms` 可以覆盖对应 YAML 字段。默认启动 MuJoCo 官方
+`--server-name`、`--max-ticks`、`--tick-timeout-ms`、`--activation-timeout-ms` 和
+同名超时 adapter 替换开关可以覆盖对应 YAML 字段。`--startup-timeout-ms` 仍可解析，
+但已弃用且运行时忽略。默认启动 MuJoCo 官方
 `simulate` 图形界面；远程服务、CI 或无显示环境使用 `--headless`，该模式不会初始化
 GLFW/OpenGL。若 YAML 设置了 `headless: true`，可用 `--gui` 在命令行恢复图形模式。
 
@@ -72,11 +75,11 @@ GLFW/OpenGL。若 YAML 设置了 `headless: true`，可用 `--gui` 在命令行�
 source install/setup.bash
 
 mujoco-sim-server \
-  --model core/mujoco_sim_core/test/testdata/simple_actuator.xml \
-  --max-ticks 5
+  --model core/mujoco_sim_core/test/testdata/simple_actuator.xml
 ```
 
-在默认 5 秒启动超时内，于终端 2 启动 adapter：
+server 加载模型后立即进入 `RUNNING`，即使没有 adapter 也会按模型 timestep 实时推进。
+可以在运行期间任意时刻于终端 2 注册并启动 adapter：
 
 ```bash
 source install/setup.bash
@@ -91,9 +94,12 @@ mujoco-sim-sample-adapter \
 ```bash
 mujoco-sim-server \
   --headless \
-  --model core/mujoco_sim_core/test/testdata/simple_actuator.xml \
-  --max-ticks 5
+  --model core/mujoco_sim_core/test/testdata/simple_actuator.xml
 ```
+
+adapter 处理 5 个 Tick 后会尽力注销并退出，server 继续自主运行，使用 Ctrl-C 或关闭 GUI
+结束 server。若配置非零 `max_ticks`，它统计 server 启动以来的全部 `mj_step()`，包括 adapter
+注册前、注销后以及空 Barrier 的步进，因此不能把它当作某个 adapter 的处理 Tick 数。
 
 在 server 运行期间，可从第三个终端查询默认 server 的状态和模型资源：
 
@@ -105,11 +111,16 @@ mujoco-sim-status --server-name default --watch --interval-ms 1000
 mujoco-sim-status --server-name default --json
 ```
 
-`mujoco-sim-status` 默认收到一条有效 `ServerStatus` 后退出；`--watch` 按指定间隔持续
-输出，断线后报告 stale 并等待同名 server 恢复。`--json --watch` 输出 NDJSON，诊断信息
-始终写入 stderr。
+`mujoco-sim-status` 默认收到一条有效 `ServerStatus` 后退出；controller 表同时显示最后
+heartbeat/Commit Tick、状态起始 Tick、累计超时次数和当前 Barrier 成员标志。`--watch` 按
+指定间隔持续输出，断线后报告 stale 并等待同名 server 恢复。`--json --watch` 输出
+NDJSON，诊断信息始终写入 stderr。
 
-server 是唯一物理状态所有者。每个 Tick 中，adapter 接收 observation，提交完整 actuator command；server 收齐 Barrier 后写入 `data->ctrl` 并调用 `mj_step()`。
+server 是唯一物理状态所有者。每个 Tick 打开时固定该 Tick 的 Barrier 集合；运行期新激活的
+adapter 从下一 Tick 加入。某个 adapter 超时或提交非法命令只隔离该 controller、清零其
+actuator 并让其余 Barrier 继续，不再把整个 server 置为错误暂停。server 会继续为
+`TIMED_OUT` adapter 生成 Tick 并尝试发布；一份合法 Commit 只作为恢复证明，它从下一 Tick
+才重新成为 `ACTIVE` Barrier 成员。
 
 ## WBR LQR Demo
 
@@ -119,7 +130,8 @@ WBR demo 使用安装后的相对路径配置，server 会从命名 keyframe `ho
 source install/setup.bash
 mujoco-sim-server \
   --config install/mujoco_sim_wbr_lqr_demo/share/mujoco_sim_wbr_lqr_demo/config/wbr_server.yaml \
-  --headless
+  --headless \
+  --max-ticks 0
 ```
 
 终端 2：
@@ -130,5 +142,7 @@ mujoco-sim-wbr-lqr-adapter \
   --config install/mujoco_sim_wbr_lqr_demo/share/mujoco_sim_wbr_lqr_demo/config/wbr_lqr.yaml
 ```
 
-默认运行 6000 Tick。21 个 state resource 和 6 个 command resource 均可在 adapter YAML
-中改名；控制器仍按六个固定语义槽位执行上游 LQR/FSM 逻辑。
+adapter 默认处理 6000 个 `ACTIVE` Tick。这里把 server 的全局 `max_ticks` 覆盖为 `0`，
+避免 adapter 接入前的自主步进消耗其预算；adapter 退出后需单独结束 server。21 个 state
+resource 和 6 个 command resource 均可在 adapter YAML 中改名；控制器仍按六个固定语义
+槽位执行上游 LQR/FSM 逻辑。

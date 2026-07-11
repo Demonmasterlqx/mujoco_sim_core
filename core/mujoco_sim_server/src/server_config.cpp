@@ -62,6 +62,9 @@ generated::ServerConfig ToGenerated(const ServerConfig& config) {
   output.max_ticks = config.max_ticks;
   output.tick_timeout_ms = config.tick_timeout_ms;
   output.startup_timeout_ms = config.startup_timeout_ms;
+  output.activation_timeout_ms = config.activation_timeout_ms;
+  output.allow_timed_out_adapter_replacement =
+      config.allow_timed_out_adapter_replacement;
   output.status_period_ms = config.status_period_ms;
   output.headless = config.headless;
   output.log_level = ToGeneratedLogLevel(config.log_level);
@@ -80,6 +83,9 @@ ServerConfig ToPublic(generated::ServerConfig config) {
   output.max_ticks = config.max_ticks;
   output.tick_timeout_ms = config.tick_timeout_ms;
   output.startup_timeout_ms = config.startup_timeout_ms;
+  output.activation_timeout_ms = config.activation_timeout_ms;
+  output.allow_timed_out_adapter_replacement =
+      config.allow_timed_out_adapter_replacement;
   output.status_period_ms = config.status_period_ms;
   output.headless = config.headless;
   output.log_level = ToPublicLogLevel(config.log_level);
@@ -119,6 +125,10 @@ bool ValidateLogging(const ServerConfig& config, std::string* error_message) {
   }
   if (config.log_file_max_files > 200000) {
     *error_message = "log_file_max_files must be in range [1, 200000]";
+    return false;
+  }
+  if (config.activation_timeout_ms == 0) {
+    *error_message = "activation_timeout_ms must be >= 1";
     return false;
   }
   return true;

@@ -621,12 +621,19 @@ std::string FormatHuman(const StatusReport& report) {
     output << '\n';
   }
   output << "Controllers (" << status.controllers_size() << "):\n"
-         << "ID\tState\tSession\tLast tick\tMessage\n";
+         << "ID\tState\tSession\tLast heartbeat\tLast commit\tState since"
+            "\tTimeouts\tBarrier\tMessage\n";
   for (const auto& controller : status.controllers()) {
     output << controller.controller_id() << '\t'
            << ControllerStateName(controller.state()) << '\t'
            << controller.session_id() << '\t'
            << controller.last_tick_id() << '\t'
+           << (controller.has_last_commit_tick_id()
+                   ? std::to_string(controller.last_commit_tick_id())
+                   : "-")
+           << '\t' << controller.state_since_tick_id() << '\t'
+           << controller.timeout_count() << '\t'
+           << (controller.required_for_barrier() ? "yes" : "no") << '\t'
            << DisplayMessage(controller.message()) << '\n';
   }
   return output.str();

@@ -22,9 +22,14 @@ int main(int argc, char** argv) {
     return 1;
   }
 
-  return client.Run(
+  const int result = client.Run(
       [value = options.command_value](const mujoco_sim::v1::Tick& tick) {
         return mujoco_sim::sample_adapter::ConstantCommandsForTick(tick, value);
       },
       options.max_ticks);
+  if (!client.lifecycle_warning().empty()) {
+    std::cerr << "adapter lifecycle warning: " << client.lifecycle_warning()
+              << '\n';
+  }
+  return result;
 }

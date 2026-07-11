@@ -33,19 +33,21 @@ TickController::TickController(
 
 std::vector<mujoco_sim::adapter_sdk::CommandValue>
 TickController::HandleTick(const mujoco_sim::v1::Tick& tick) {
-  return HandleTick(tick, input_script_.InputAt(tick.header().tick_id()));
+  return HandleTick(tick, input_script_.InputAt(pipeline_.tick_count()));
 }
 
 std::vector<mujoco_sim::adapter_sdk::CommandValue>
 TickController::HandleTick(const mujoco_sim::v1::Tick& tick,
                            const control::input_snapshot_t& input) {
   const control::msg_raw_state_t raw = decoder_.Decode(tick);
+  last_input_ = input;
   last_output_ = pipeline_.Step(raw, input);
   return command_mapper_.Map(last_output_->raw_torque);
 }
 
 void TickController::Reset() {
   pipeline_.Reset();
+  last_input_ = {};
   last_output_.reset();
 }
 

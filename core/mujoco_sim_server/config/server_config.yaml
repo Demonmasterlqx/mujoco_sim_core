@@ -31,9 +31,22 @@ fields:
     cli: [--tick-timeout-ms]
   startup_timeout_ms:
     type: uint32
-    description: Controller startup timeout in milliseconds
+    description: Deprecated compatibility option; ignored
     default: 5000
     cli: [--startup-timeout-ms]
+  activation_timeout_ms:
+    type: uint32
+    description: Maximum time a provisional adapter may wait before activation
+    default: 5000
+    min: 1
+    cli: [--activation-timeout-ms]
+  allow_timed_out_adapter_replacement:
+    type: bool
+    description: Allow a new registration to replace a timed-out adapter with the same ID
+    default: true
+    cli:
+      flags: [--allow-timed-out-adapter-replacement]
+      inverse_flags: [--deny-timed-out-adapter-replacement]
   status_period_ms:
     type: uint32
     description: Server status publication period in milliseconds

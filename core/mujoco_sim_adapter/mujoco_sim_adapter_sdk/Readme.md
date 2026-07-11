@@ -11,19 +11,22 @@ eCAL registry service、Tick 订阅、Heartbeat/Commit 发布和重复 Tick 的�
 
 SDK 当前负责：
 
-- 使用 `server_name` 定位 registry service，并发送 `RegisterController` 和
-  `ActivateController` 请求。
+- 使用 `server_name` 定位 registry service，并发送 `RegisterController`、
+  `ActivateController` 和 `UnregisterController` 请求。
 - 注册调用方声明的 observation sensor 和 command actuator，保存服务端返回的 session、
   epoch 与资源布局。
-- 创建 controller 专属 Tick 订阅，以及共享的 Heartbeat、Commit 发布端。
+- 创建 controller 专属 Tick 订阅、ServerStatus 订阅，以及共享的 Heartbeat、Commit 发布端。
 - 在 `Run()` 安装控制回调后激活 controller；对每个新 Tick 先发布 Heartbeat，再发布
   包含整组 command 的 Commit。
-- 校验 Tick 的 server/controller/session/epoch/protocol/layout 与注册结果一致；串行化 Tick
-  handler，并只对 identity 与 payload 一致的重传 Tick 重发缓存 Commit。
+- 校验 Tick 的 server/controller/session/epoch/protocol/layout 与注册结果一致；接受
+  `ACTIVE` 和 `TIMED_OUT` Tick，串行化正常 handler，并只对 identity 与 payload 一致的
+  重传 Tick 重发缓存 Commit。
+- 通过 `TIMED_OUT` Tick 尝试恢复；通过匹配 session 的 `ERROR` status 停止运行，并保留
+  lifecycle warning。
 - 在进程尚未初始化 eCAL 时代为初始化，并仅在自己拥有该初始化时于析构阶段调用
   `eCAL::Finalize()`。
-- `Run()` 返回和析构前停止 Tick 接收并等待所有 in-flight callback 完成，确保 Heartbeat/
-  Commit 发布结束后再销毁 eCAL 对象。
+- `Run()` 返回和析构前停止 Tick/status 接收并等待所有 in-flight callback 完成，随后自动
+  尽力注销，确保 Heartbeat/Commit 发布结束后再销毁 eCAL 对象。
 
 边界如下：
 
@@ -35,8 +38,8 @@ SDK 当前负责：
 - SDK 仅把 handler 返回值编码为 Commit。除“结果为空”外，它不检查 command 是否完整、
   是否属于当前 controller、是否重复、是否为有限值或是否落在 actuator control range；
   这些约束由 server 校验。
-- 当前 `Stop()` 不发送 `UnregisterController`；它停止接受新 Tick 并唤醒 `Run()`，随后
-  `Run()` 或析构路径排空 callback 并销毁本地 eCAL 通道。
+- `Stop()` 本身只设置本地终止标志；`Run()` 收尾和析构路径会排空 callback 后自动尽力
+  `UnregisterController`。注销失败不覆盖主返回值，可通过 `lifecycle_warning()` 查询。
 - 本包不包含命令行解析、配置文件解析、进程信号处理或自动重连逻辑。
 
 协议消息和命名规则见
@@ -84,6 +87,8 @@ target_link_libraries(my_adapter PRIVATE mujoco_sim::adapter_sdk)
 | `SyncAdapterClient::Start()` | 校验必要选项、初始化通信、注册 controller 并创建 pub/sub。 |
 | `SyncAdapterClient::Run()` | 安装 handler、激活 controller 并阻塞处理 Tick。 |
 | `SyncAdapterClient::Stop()` | 设置终止标志并唤醒 `Run()`。 |
+| `SyncAdapterClient::Unregister()` | 幂等地尽力注销当前 session；失败保持可重试，`NOT_FOUND`/`INVALID_SESSION` 视为已完成，完成后停止本地 `Run()`。 |
+| `SyncAdapterClient::lifecycle_warning()` | 返回 server `ERROR` 原因或自动注销失败诊断的线程安全副本。 |
 | `SyncAdapterClient::registration()` | 返回最近一次成功注册得到的 `RegisterControllerResponse` 常量引用。 |
 
 `AdapterOptions` 默认值与约束：
@@ -107,23 +112,29 @@ target_link_libraries(my_adapter PRIVATE mujoco_sim::adapter_sdk)
    等待 registry service，在 `service_timeout_ms` 内注册 controller，然后创建 Commit、
    Heartbeat publisher 和 Tick subscriber。此时 controller 仍为 `PROVISIONAL`，尚未激活。
 3. 调用 `Run(handler, max_ticks)`。它先保存 handler，等待 100 ms 让 pub/sub 完成发现，再
-   调用 `ActivateController`。激活成功后阻塞，直到达到最大 Tick 数、调用 `Stop()`，或
-   eCAL 不再处于可运行状态。返回前会停止 subscriber，并等待已经进入的 Tick callback
-   完成 Commit 发布。
-4. `Stop()` 可从其他线程调用。它只请求本地 `Run()` 结束；析构函数也会调用一次
-   `Stop()`。
+   调用 `ActivateController`。server 支持运行期激活，该 adapter 从下一 Tick 加入 Barrier。
+   激活成功后阻塞，直到严格达到最大 Tick 数、调用 `Stop()`、匹配 session 的 status 进入
+   `ERROR`、同名新 session 替换当前 session，或 eCAL 不再处于可运行状态。
+   这段发现等待可被 `Stop()` 或成功注销立即唤醒，不会在本地停止后继续 Activate。
+4. 返回前 SDK 停止 Tick/status subscriber、等待已进入的 callback 完成，并自动尽力注销。
+   `Stop()` 可从其他线程调用；析构函数也会执行停止、排空和尽力注销。
 
-`max_ticks == 0` 表示不按 Tick 数自动退出；大于零时只统计首次处理的新 Tick。`Run()`
-在达到 `max_ticks` 或收到 `Stop()` 后返回 `0`，激活失败或 eCAL 非正常结束时返回 `1`。
-激活失败的详细字符串当前不会由 `Run()` 对外返回。
+`max_ticks == 0` 表示不按 Tick 数自动退出；大于零时只统计首次处理的新 `ACTIVE` Tick，
+`TIMED_OUT` 恢复 Tick 不计数。`Run()` 在达到 `max_ticks`、收到 `Stop()` 或 status 报告本
+session 为 `ERROR`/已被替换后返回 `0`；具体原因位于 `lifecycle_warning()`。回调入口会在
+计数达到上限后拒绝新的 Tick，因此 handler 不会越过 `max_ticks`。激活失败或 eCAL 非正常
+结束时返回 `1`，激活失败的详细字符串当前不会由 `Run()` 对外返回。自动注销失败同样追加
+到 `lifecycle_warning()`，不覆盖已有 controller 根因，也不改变原有返回值；后续显式调用或
+析构仍可重试注销。
 
 当前对象按单次生命周期实现：成功 `Start()` 后调用一次 `Run()`，结束后析构。`Stop()`
 标志、已处理计数和 Commit 缓存不会重置，因此不要用同一对象再次 `Start()` 或 `Run()`。
 
 ## Tick 与重复 Tick
 
-收到 Tick 后先校验 `controller_id`、server name、session、epoch、协议版本、ACTIVE 状态和
-完整 resource layout 均与注册结果一致。校验通过后按 Tick stream 与 ID 处理：
+收到 Tick 后先校验 `controller_id`、server name、session、epoch、协议版本、
+`ACTIVE`/`TIMED_OUT` 状态和完整 resource layout 均与注册结果一致。校验通过后按 Tick
+stream 与 ID 处理：
 
 - 首次收到可处理的新 Tick：发布 Heartbeat，调用 handler，构造并缓存 Tick/Commit，已处理
   计数加一，然后发布 Commit。handler 执行期间其他 Tick 回调会等待，不能并发进入 handler。
@@ -132,6 +143,9 @@ target_link_libraries(my_adapter PRIVATE mujoco_sim::adapter_sdk)
   Heartbeat 并原样重发缓存 Commit，不调用 handler，也不增加计数。
 - identity 相同但 payload 改变，或同一 stream 中收到小于缓存值的旧 Tick：直接忽略。
 - Tick 无法反序列化、超出消息大小、注册身份/layout 不匹配或 handler 尚未安装：直接忽略。
+- `TIMED_OUT` Tick 使用 `try_lock`，不会等待另一个正在执行的 handler；锁忙时直接丢弃本次
+  恢复尝试且不发 Heartbeat/Commit。取得锁后照常执行 handler 并提交恢复证明，但不增加
+  `Run(max_ticks)` 计数。server 只在后续 Tick 将 session 恢复为 `ACTIVE`。
 
 handler 返回空列表时，SDK 仍会发送 Commit，但状态为 `COMMIT_ERROR`，错误信息为
 `adapter handler returned no commands`。服务端会将该结果视为 controller 错误。因此
@@ -178,7 +192,10 @@ int main() {
         return commands;
       },
       5);
-  client.Stop();
+  if (!client.lifecycle_warning().empty()) {
+    std::cerr << "adapter lifecycle warning: " << client.lifecycle_warning()
+              << '\n';
+  }
   return result;
 }
 ```
@@ -224,26 +241,28 @@ mujoco-sim-server \
   --headless \
   --server-name default \
   --model core/mujoco_sim_core/test/testdata/simple_actuator.xml \
-  --max-ticks 5 \
-  --startup-timeout-ms 5000
+  --max-ticks 0
 ```
 
-然后在 server 的 5 秒 startup timeout 内启动终端 2 的 Adapter：
+然后在 server 运行期间启动终端 2 的 Adapter：
 
 ```bash
 source install/setup.bash
 ./adapter_example/build/minimal_mujoco_adapter
 ```
 
-联调时必须保证 `server_name` 一致，controller ID 未被占用，资源名称存在且 actuator
-尚未被其他 controller 认领。server 一旦打开第一个 Tick，就不再接受运行时注册或激活。
-示例两端都配置 5 个 Tick，因此正常完成后都会自动返回。
+联调时必须保证 `server_name` 一致，controller ID 可注册，资源名称存在且 actuator 尚未被
+其他 controller 认领。运行期注册/激活是受支持的；`PROVISIONAL` session 仍须在 server 的
+`activation_timeout_ms` 内调用 Activate。示例 Adapter 处理 5 个 Tick 后自动尽力注销并
+返回，server 因 `max_ticks=0` 继续运行，需用 Ctrl-C 结束。
 
 ## 测试
 
 SDK 当前注册一个 CTest：`adapter_sdk_test`。它验证 Commit/Heartbeat 编码、并发重复 Tick
-单次计算、timestamp 可变重传、冲突 payload/旧 Tick 拒绝、跨 epoch 缓存隔离、注册身份和
-layout 校验，以及停止接收时等待 in-flight handler 完成。
+单次计算、timestamp 可变重传、冲突 payload/旧 Tick 拒绝、注册身份/layout 校验、
+`TIMED_OUT` Tick 的恢复计数与 try-lock 丢弃、严格 `max_ticks`、匹配 `ERROR`/替换 status
+停止、激活前等待可中断、注销失败保持可重试、warning 合并，以及停止接收时等待 in-flight
+handler 完成。
 
 ```bash
 colcon test --packages-select mujoco_sim_adapter_sdk

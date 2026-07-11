@@ -31,6 +31,7 @@ enum ControllerState {
   ACTIVE = 2;
   ERROR = 3;
   UNREGISTERED = 4;
+  TIMED_OUT = 5;
 }
 
 enum ServerState {
@@ -173,6 +174,10 @@ message ControllerStatus {
   uint64 last_tick_id = 3;
   ControllerState state = 4;
   string message = 5;
+  optional uint64 last_commit_tick_id = 6;
+  uint64 state_since_tick_id = 7;
+  uint64 timeout_count = 8;
+  bool required_for_barrier = 9;
 }
 
 message ServerStatus {

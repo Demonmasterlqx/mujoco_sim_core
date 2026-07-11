@@ -72,10 +72,10 @@ source install/setup.bash
 未知/重复参数、缺少值、负无符号数、整数溢出以及 `NaN`/`Inf` command 值都会失败。
 `--ticks` 接受 `uint64`，两个 timeout 接受 `uint32`，不会发生静默截断。
 
-`--timeout-ms` 与 server 的 `--startup-timeout-ms` 含义不同：前者在 controller 注册后
-约束每个 Tick 的 Commit 等待时间；后者约束一个设置了有限 `--max-ticks` 的 server
-等待首个 active controller 的时间。`--service-timeout-ms` 只控制 Adapter 调用 registry
-service 的等待时间。
+`--timeout-ms` 在 controller 激活后约束每个 required Tick 的 Commit 等待时间；
+`--service-timeout-ms` 只控制 Adapter 调用 registry service 的等待时间。server 的
+`startup_timeout_ms` 已弃用且忽略；`activation_timeout_ms` 才约束注册后的
+`PROVISIONAL` session 必须多快完成 Activate。
 
 ## YAML 配置
 
@@ -158,12 +158,11 @@ mujoco-sim-server \
   --gui \
   --server-name gui_demo \
   --model core/mujoco_sim_core/test/testdata/simple_actuator.xml \
-  --max-ticks 5 \
-  --tick-timeout-ms 1000 \
-  --startup-timeout-ms 5000
+  --max-ticks 0 \
+  --tick-timeout-ms 1000
 ```
 
-在 5 秒 startup timeout 内启动终端 2：
+在 server 运行期间启动终端 2：
 
 ```bash
 source install/setup.bash
@@ -176,8 +175,8 @@ mujoco-sim-sample-adapter \
   --service-timeout-ms 5000
 ```
 
-Adapter 处理并提交 5 个不同 Tick 后返回 `0`；server 完成 5 次 `mj_step()` 后也返回 `0`
-并关闭 viewer。
+Adapter 处理并提交 5 个不同的 `ACTIVE` Tick 后自动尽力注销并返回 `0`；server 继续按模型
+timestep 自主运行，关闭 viewer 结束进程。
 
 ## Headless Server 双终端联调
 
@@ -189,9 +188,8 @@ mujoco-sim-server \
   --headless \
   --server-name headless_demo \
   --model core/mujoco_sim_core/test/testdata/simple_actuator.xml \
-  --max-ticks 5 \
-  --tick-timeout-ms 1000 \
-  --startup-timeout-ms 5000
+  --max-ticks 0 \
+  --tick-timeout-ms 1000
 ```
 
 再启动终端 2：
@@ -208,7 +206,7 @@ mujoco-sim-sample-adapter \
 ```
 
 GUI 与 headless 模式使用同一 registry 和 Tick/Commit 路径；差别只在 server 是否创建图形
-viewer。
+viewer。Adapter 退出后用 Ctrl-C 结束这个无限运行的 headless server。
 
 ## 自定义资源示例
 
@@ -221,8 +219,7 @@ mujoco-sim-server \
   --headless \
   --server-name force_demo \
   --model core/mujoco_sim_core/test/testdata/simple_actuator.xml \
-  --max-ticks 3 \
-  --startup-timeout-ms 5000
+  --max-ticks 0
 ```
 
 终端 2：
@@ -247,10 +244,10 @@ mujoco-sim-sample-adapter \
 成功联调需满足：
 
 - 已构建并加载 install 环境；server 先启动且两端 `server_name` 完全一致。
-- 对有限 `--max-ticks` 的 server，Adapter 必须在 `--startup-timeout-ms` 内完成注册和激活。
 - `controller_id` 非空且未注册；资源名存在、列表中无重复项，每个 command actuator
   尚未被其他 controller 认领。
-- 注册和激活必须发生在第一个 Tick 打开前；当前 server 不支持运行时新增 controller。
+- server 支持运行期注册、激活和注销；注册后必须在 server 的 `activation_timeout_ms` 内
+  调用 Activate。新激活的 Adapter 从下一 Tick 加入固定 Barrier。
 - `command_value` 必须是有限值，并处于 actuator control range 内。示例模型的
   `hinge_motor` 范围是 `[-1, 1]`。
 - handler 必须在 controller timeout 内提交完整 command。Sample 自动覆盖 Tick layout
@@ -263,10 +260,15 @@ mujoco-sim-sample-adapter \
 | `0` | `-h/--help`；或 `--ticks N` 中的 `N > 0` 且已处理 N 个不同 Tick。 |
 | `1` | CLI 解析失败、SDK `Start()` 失败、激活失败，或 eCAL 在未请求 Stop 时结束。 |
 
-`--ticks 0` 没有基于 Tick 数的成功退出条件。Sample 也不订阅 server status，server 提前
-退出不会可靠地让 Adapter 自动返回；需要自动收尾时，应像上述示例一样让 server
-`--max-ticks` 与 Adapter `--ticks` 保持一致，或由外部进程管理终止。注册/启动错误会写入
-标准错误；当前 SDK 的激活失败只体现为返回值 `1`。
+`--ticks` 只统计首次处理的 `ACTIVE` Tick；`TIMED_OUT` 恢复 Tick 使用 SDK try-lock 且不计
+入进度。Sample 订阅匹配 server status：本 session 进入 `ERROR` 时 SDK 停止，`Run()` 当前
+返回 `0`，程序会把具体原因打印为 `adapter lifecycle warning`。正常达到 Tick 数、主动停止
+或析构时 SDK 自动尽力注销；注销失败也打印该 warning，但不覆盖主返回值。
+
+`--ticks 0` 没有基于 Tick 数的成功退出条件。server 正常达到自己的全局 `max_ticks` 后发布
+`STOPPED`，SDK 只对匹配 session 的 `ERROR` 自动停止，因此仍应由进程编排管理这种终止。
+server 的 `max_ticks` 从启动后的第一步开始计数，包括 Adapter 接入前的自主 step，不能与
+Adapter `--ticks` 简单设成相同值。
 
 ## 测试
 
@@ -275,8 +277,8 @@ mujoco-sim-sample-adapter \
 | 测试 | 覆盖范围 |
 |---|---|
 | `sample_adapter_test` | 名称列表、固定 command、生成式 CLI/YAML、严格校验、优先级和事务性。 |
-| `sample_adapter_e2e` | 启动真实 headless server 和 Adapter，完成 5 个 lockstep Tick。 |
-| `sample_adapter_gui_e2e` | 启动真实 GUI server 和 Adapter，完成 5 个 lockstep Tick；无显示环境通过 `xvfb-run`。 |
+| `sample_adapter_e2e` | 启动真实无限 headless server 和 Adapter，完成 5 个 Adapter Tick、验证自动注销后终止 server。 |
+| `sample_adapter_gui_e2e` | 同一动态生命周期的 GUI 路径；确认注销后终止 server，无显示环境通过 `xvfb-run`。 |
 
 从仓库根目录运行：
 

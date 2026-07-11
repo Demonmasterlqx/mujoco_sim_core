@@ -147,6 +147,21 @@ if(BUILD_TESTING)
   )
   set_tests_properties(server_logging_e2e PROPERTIES TIMEOUT 15)
 
+  add_executable(server_lifecycle_probe test/server_lifecycle_probe.cpp)
+  target_link_libraries(server_lifecycle_probe PRIVATE
+    eCAL::core
+    mujoco_sim::protocol
+  )
+  add_test(
+    NAME server_lifecycle_e2e
+    COMMAND bash
+            "${CMAKE_CURRENT_SOURCE_DIR}/test/server_lifecycle_e2e.sh"
+            $<TARGET_FILE:mujoco-sim-server>
+            $<TARGET_FILE:server_lifecycle_probe>
+            "${CMAKE_CURRENT_SOURCE_DIR}/../mujoco_sim_core/test/testdata/dual_actuator.xml"
+  )
+  set_tests_properties(server_lifecycle_e2e PROPERTIES TIMEOUT 25)
+
   configure_file(
     test/package_consumer_test.cmake.in
     "${CMAKE_CURRENT_BINARY_DIR}/package_consumer_test.cmake"
@@ -182,7 +197,7 @@ if(BUILD_TESTING)
   set_tests_properties(sim_viewer_test PROPERTIES TIMEOUT 15)
 
   add_test(
-    NAME server_gui_startup_timeout
+    NAME server_gui_autonomous_run
     COMMAND
       ${MUJOCO_SIM_GUI_TEST_PREFIX}
       bash
@@ -190,5 +205,5 @@ if(BUILD_TESTING)
       $<TARGET_FILE:mujoco-sim-server>
       "${CMAKE_CURRENT_SOURCE_DIR}/../mujoco_sim_core/test/testdata/simple_actuator.xml"
   )
-  set_tests_properties(server_gui_startup_timeout PROPERTIES TIMEOUT 15)
+  set_tests_properties(server_gui_autonomous_run PROPERTIES TIMEOUT 15)
 endif()

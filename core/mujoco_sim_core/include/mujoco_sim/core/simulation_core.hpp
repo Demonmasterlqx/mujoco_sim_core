@@ -3,6 +3,7 @@
 #include <chrono>
 #include <cstdint>
 #include <memory>
+#include <optional>
 #include <string>
 #include <unordered_map>
 #include <vector>
@@ -17,6 +18,8 @@ namespace mujoco_sim::core {
 struct CoreOptions {
   std::string server_name = "default";
   std::uint32_t default_timeout_ms = 1000;
+  std::uint32_t activation_timeout_ms = 5000;
+  bool allow_timed_out_adapter_replacement = true;
 };
 
 struct ModelLoadOptions {
@@ -27,6 +30,26 @@ struct CommitResult {
   mujoco_sim::v1::ErrorCode code = mujoco_sim::v1::OK;
   std::string message;
   bool duplicate = false;
+  bool stepped = false;
+  bool recovery_pending = false;
+  bool controller_state_changed = false;
+  mujoco_sim::v1::ControllerState controller_state =
+      mujoco_sim::v1::CONTROLLER_STATE_UNSPECIFIED;
+};
+
+struct ControllerTransition {
+  std::string controller_id;
+  std::uint64_t session_id = 0;
+  mujoco_sim::v1::ControllerState old_state =
+      mujoco_sim::v1::CONTROLLER_STATE_UNSPECIFIED;
+  mujoco_sim::v1::ControllerState new_state =
+      mujoco_sim::v1::CONTROLLER_STATE_UNSPECIFIED;
+  std::string message;
+  std::uint64_t tick_id = 0;
+};
+
+struct DeadlineResult {
+  std::vector<ControllerTransition> transitions;
   bool stepped = false;
 };
 
@@ -84,18 +107,27 @@ class SimulationCore {
       const mujoco_sim::v1::UnregisterControllerRequest& request);
 
   std::vector<mujoco_sim::v1::Tick> OpenTick();
+  bool IsTickIssued(const mujoco_sim::v1::Tick& tick) const;
+  bool StepIfBarrierComplete();
   CommitResult SubmitCommit(const mujoco_sim::v1::AdapterCommit& commit);
   void AcceptHeartbeat(const mujoco_sim::v1::Heartbeat& heartbeat);
+  DeadlineResult CheckControllerDeadlines(
+      std::chrono::steady_clock::time_point now);
   bool CheckTickTimeout(std::chrono::steady_clock::time_point now);
+
+  void EnterFatalError(const std::string& message);
+  void MarkStopped(const std::string& message = {});
 
   mujoco_sim::v1::ServerStatus MakeStatus() const;
 
   std::uint64_t epoch() const;
   std::uint64_t current_tick_id() const;
   double simulation_time() const;
+  double timestep() const;
   mujoco_sim::v1::ServerState server_state() const;
   bool tick_open() const;
   std::size_t active_controller_count() const;
+  std::size_t controller_count(mujoco_sim::v1::ControllerState state) const;
 
  private:
   struct Controller;
@@ -110,6 +142,16 @@ class SimulationCore {
   mujoco_sim::v1::Tick BuildTickFor(const Controller& controller) const;
   mujoco_sim::v1::Header MakeHeader(std::uint64_t session_id) const;
   void EnterErrorPaused(const std::string& message);
+  bool ValidateCommands(const Controller& controller,
+                        const mujoco_sim::v1::AdapterCommit& commit,
+                        std::string* message) const;
+  void ZeroControllerCommands(const Controller& controller);
+  void SetControllerState(Controller* controller,
+                          mujoco_sim::v1::ControllerState state,
+                          const std::string& message);
+  bool EnterControllerError(Controller* controller,
+                            const std::string& message);
+  void ReleaseControllerResources(const Controller& controller);
   bool ValidateCommonHeader(const mujoco_sim::v1::Header& header,
                             const Controller& controller,
                             std::string* message) const;
@@ -127,6 +169,9 @@ class SimulationCore {
   std::unordered_map<std::string, std::string> actuator_owner_;
   std::unordered_map<std::string, mujoco_sim::v1::AdapterCommit>
       pending_commits_;
+  std::unordered_map<std::string, mujoco_sim::v1::Tick> open_ticks_;
+  std::unordered_map<std::string, bool> tick_required_controllers_;
+  std::unordered_map<std::string, bool> tick_recipient_controllers_;
   std::uint64_t epoch_ = 1;
   std::uint64_t current_tick_id_ = 0;
   std::uint64_t next_session_id_ = 1;

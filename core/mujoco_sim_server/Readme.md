@@ -3,7 +3,7 @@
 `mujoco_sim_server` 是 MuJoCo lockstep 仿真的进程入口和 eCAL 组合层。它加载
 MJCF 模型，将无传输依赖的仿真 Core 暴露为 V1 eCAL service/topic，可选运行
 MuJoCo `simulate` 图形界面，并安装只读状态查询命令 `mujoco-sim-status`。包版本为
-`0.1.0`，协议版本为 `1.0`。
+`0.1.0`，协议版本为 `1.1`。
 
 本文所有 shell 命令都假定当前目录是仓库根目录。示例统一使用仓库已有的
 [simple_actuator.xml](../mujoco_sim_core/test/testdata/simple_actuator.xml)。
@@ -15,8 +15,10 @@ MuJoCo `simulate` 图形界面，并安装只读状态查询命令 `mujoco-sim-s
 - 使用 `mujoco_sim_config` 的构建期 schema 生成器解析命令行和严格 YAML，构造
   `ServerConfig`。
 - 初始化 eCAL、加载 MJCF，并注册 controller registry service 和运行时 topic。
-- 驱动 Tick/Commit barrier：向每个 active controller 发布 Tick，收齐有效 Commit
-  后由 Core 写入 actuator command 并执行一个 `mj_step()`。
+- 模型加载后立即以 `RUNNING` 驱动仿真；无 adapter 时按模型 timestep 实时步进，有
+  adapter 时按每 Tick 固定的 Commit Barrier 推进。
+- 支持运行期 register/activate/unregister，以及 adapter timeout、恢复、替换和局部命令
+  错误隔离。
 - 周期发布 server/controller 状态，处理 Heartbeat，并把运行时错误转换为进程退出码。
 - 使用结构化键值日志记录生命周期、协议拒绝、超时和窗口化运行指标；日志默认写 stderr，
   可选写入轮转文件。
@@ -106,7 +108,7 @@ mujoco-sim-server \
 ```
 
 GUI 需要有效的 X11/OpenGL 环境。窗口关闭时 server 请求停止并正常返回；没有 active
-controller 时模型只显示而不会推进仿真。
+controller 时模型仍按 MJCF timestep 实时推进并持续刷新画面。
 
 ### Xvfb
 
@@ -134,9 +136,12 @@ Xvfb 仍会初始化并运行 GUI 渲染；如果不需要渲染，应直接使�
 | `--model PATH` | 字符串 | 空 | MuJoCo MJCF 路径；合并配置后必须非空。文件读取和 MJCF 校验在启动阶段进行。 |
 | `--initial-keyframe NAME` | 字符串 | 空 | 模型加载后原子应用具名 MuJoCo keyframe；空值使用模型默认初始状态。 |
 | `--server-name NAME` | 非空字符串 | `default` | eCAL service/topic 的命名空间。 |
-| `--max-ticks N` | `uint64`，`0..18446744073709551615` | `0` | 达到 N 个 tick 后成功退出；`0` 表示无限运行。 |
+| `--max-ticks N` | `uint64`，`0..18446744073709551615` | `0` | server 启动后累计完成 N 次 `mj_step()` 即成功退出；包含无 adapter 的 step，`0` 表示无限运行。 |
 | `--tick-timeout-ms N` | `uint32`，`0..4294967295` | `1000` | controller 注册请求未提供非零 timeout 时使用的 Commit barrier 超时。 |
-| `--startup-timeout-ms N` | `uint32`，`0..4294967295` | `5000` | 有界运行等待 active controller 的时间；仅在 `max_ticks > 0` 时触发。 |
+| `--startup-timeout-ms N` | `uint32`，`0..4294967295` | `5000` | 已弃用的兼容参数；仍解析并记录，但运行时始终忽略。 |
+| `--activation-timeout-ms N` | `uint32`，`1..4294967295` | `5000` | `PROVISIONAL` adapter 完成 Activate 的最长时间；过期后自动移除并释放资源。 |
+| `--allow-timed-out-adapter-replacement` | 无 | 启用 | 允许同 `controller_id` 的新注册替换 `TIMED_OUT` session。与 deny flag 互斥。 |
+| `--deny-timed-out-adapter-replacement` | 无 | 未启用 | 禁止同名 `TIMED_OUT` 替换；注册返回 `ALREADY_EXISTS`。与 allow flag 互斥。 |
 | `--headless` | 无 | 未启用 | 将 `headless` 设为 `true`，不创建 viewer。与 `--gui` 互斥。 |
 | `--gui` | 无 | 未启用 | 将 `headless` 设为 `false`，可覆盖 YAML。与 `--headless` 互斥。 |
 | `--log-level LEVEL` | `trace/debug/info/warn/error/critical/off` | `info` | 设置 server 最低日志级别。 |
@@ -150,7 +155,9 @@ CLI 还执行以下校验：
 - 不接受位置参数或未知参数。
 - 每个 option/flag 最多出现一次；重复参数会失败。
 - `--headless` 与 `--gui` 不能同时出现。
+- `--allow-timed-out-adapter-replacement` 与 `--deny-timed-out-adapter-replacement` 不能同时出现。
 - 无符号整数拒绝负数、非数字和溢出值。
+- `activation_timeout_ms` 必须至少为 `1`。
 - 最终 `model_path` 和 `server_name` 必须非空。
 
 相对 `--model` 路径按 server 进程的当前工作目录解析；YAML 中的相对 `model_path` 按
@@ -165,9 +172,11 @@ YAML 顶层支持且只支持以下字段：
 | `server_name` | string，最终非空 | `default` | eCAL server 命名空间 | `--server-name` |
 | `model_path` | string，最终非空 | 空 | MJCF 模型路径 | `--model` |
 | `initial_keyframe` | string | 空 | 初始具名 MuJoCo keyframe；空值不应用 keyframe | `--initial-keyframe` |
-| `max_ticks` | unsigned integer (`uint64`)，`0..18446744073709551615` | `0` | 最大 tick 数；`0` 无限 | `--max-ticks` |
+| `max_ticks` | unsigned integer (`uint64`)，`0..18446744073709551615` | `0` | 从启动开始的最大总 step 数；`0` 无限 | `--max-ticks` |
 | `tick_timeout_ms` | unsigned integer (`uint32`)，`0..4294967295` | `1000` | 默认 Commit barrier 超时 | `--tick-timeout-ms` |
-| `startup_timeout_ms` | unsigned integer (`uint32`)，`0..4294967295` | `5000` | 有界运行的 controller 启动超时 | `--startup-timeout-ms` |
+| `startup_timeout_ms` | unsigned integer (`uint32`)，`0..4294967295` | `5000` | 已弃用且忽略，仅保留配置兼容 | `--startup-timeout-ms` |
+| `activation_timeout_ms` | unsigned integer (`uint32`)，`1..4294967295` | `5000` | provisional adapter 激活期限 | `--activation-timeout-ms` |
+| `allow_timed_out_adapter_replacement` | boolean | `true` | 是否允许同名注册替换 `TIMED_OUT` session | allow/deny flags |
 | `status_period_ms` | unsigned integer (`uint32`)，`0..4294967295` | `100` | `ServerStatus` 发布周期；`0` 会在每轮 server loop 尝试发布 | 无 |
 | `headless` | boolean | `false` | `true` 不创建 viewer，`false` 创建 viewer | `--headless` / `--gui` |
 | `log_level` | enum：`trace/debug/info/warn/error/critical/off` | `info` | 最低日志级别 | `--log-level` |
@@ -184,9 +193,9 @@ YAML 顶层支持且只支持以下字段：
 - string 字段必须是 YAML 字符串，mapping、sequence、null、隐式数字或隐式布尔值
   都会失败。值本身类似数字或布尔值时应显式加引号。
 - integer 字段必须是未加引号的 YAML 无符号整数；负数、浮点数、字符串和超出目标
-  类型范围的值都会失败。实现没有额外的非零下限。
-- `headless` 必须是 yaml-cpp 可解析的 YAML boolean；例如 `true`/`false` 合法，
-  `"true"` 和 `enabled` 非法。
+  类型范围的值都会失败。表中声明非零下限的字段还会执行下限校验。
+- `headless` 和 `allow_timed_out_adapter_replacement` 必须是 yaml-cpp 可解析的 YAML
+  boolean；例如 `true`/`false` 合法，`"true"` 和 `enabled` 非法。
 - YAML 语法错误、多 document、类型错误、未知/重复字段都会中止启动。错误文本包含
   配置路径以及可用的行列号；失败的加载不会部分修改配置。
 - YAML 中的相对 path 字段按配置文件目录解析；CLI path 保持相对进程当前目录。
@@ -212,6 +221,8 @@ initial_keyframe: ""
 max_ticks: 5
 tick_timeout_ms: 1000
 startup_timeout_ms: 5000
+activation_timeout_ms: 5000
+allow_timed_out_adapter_replacement: true
 status_period_ms: 100
 headless: true
 log_level: info
@@ -238,8 +249,9 @@ mujoco-sim-server \
   --config server.yaml
 ```
 
-示例设置了 `max_ticks: 5`，因此需要在 5 秒默认启动超时内连接并激活 adapter；完整
-双终端命令见下文。
+示例设置了 `max_ticks: 5`，因此 server 会从模型加载完成开始计数并很快自主完成 5 步；
+该值不适合等待人工启动 adapter。双终端联调应使用 `max_ticks: 0`，或为启动前的自主步进
+预留足够的总 step 预算。
 
 ## 日志
 
@@ -275,8 +287,9 @@ mujoco-sim-server \
   `tick_send_rejected_with_subscribers` 统计发送前后均观察到 subscriber 但 eCAL 仍返回
   false 的次数。
 - `tick_retransmissions`：open barrier 期间重复发送的 Tick 消息数。
-- `commits`、`duplicate_commits`、`rejected_commits`、`timeouts`、`malformed_messages`：
-  对应窗口计数。
+- `commits`、`duplicate_commits`、`rejected_commits`、`timeouts`、`recoveries`、
+  `replacements`、`local_errors`、`activation_expirations` 和 `malformed_messages`：对应窗口
+  计数；摘要还分别列出 provisional/active/timed-out/error controller 数量。
 - `barrier_latency_avg_ms`、`barrier_latency_max_ms`：仅统计成功完成的 barrier。
 
 帮助仍只写 stdout；server 结构化日志不写 stdout。`mujoco-sim-status` 是独立 target，
@@ -309,8 +322,8 @@ mujoco_sim.<server_name>.registry
 |---|---|---|---|
 | `GetAvailableResources` | `GetAvailableResourcesRequest` | `GetAvailableResourcesResponse` | 查询模型中的 observation sensor 和 command actuator。 |
 | `RegisterController` | `RegisterControllerRequest` | `RegisterControllerResponse` | 申请资源、检查冲突并取得 session、epoch 和实际 layout。 |
-| `ActivateController` | `ActivateControllerRequest` | `ActivateControllerResponse` | 将 provisional controller 激活；运行开始后不支持动态激活。 |
-| `UnregisterController` | `UnregisterControllerRequest` | `UnregisterControllerResponse` | 在没有 open tick 时释放 controller 及 actuator 所有权。 |
+| `ActivateController` | `ActivateControllerRequest` | `ActivateControllerResponse` | 运行期将 provisional controller 激活；从下一 Tick 加入 Barrier。 |
+| `UnregisterController` | `UnregisterControllerRequest` | `UnregisterControllerResponse` | 运行期清零并释放 controller 及 actuator；可从 open Tick 的 Barrier 移除。 |
 
 无法反序列化的 service request 会得到对应 response 类型的 `INVALID_ARGUMENT`；业务
 校验失败通过 response 的 `ErrorCode` 返回，通常不会终止 server。
@@ -321,7 +334,7 @@ mujoco_sim.<server_name>.registry
 
 | 名称模板 | 方向 | Protobuf 消息 | 行为 |
 |---|---|---|---|
-| `mujoco_sim/<server_name>/tick/<controller_id>` | 发布 | `Tick` | 每个 active controller 独立 topic，携带其 layout 和 observation。 |
+| `mujoco_sim/<server_name>/tick/<controller_id>` | 发布 | `Tick` | 每个 `ACTIVE`/`TIMED_OUT` controller 独立 topic，携带其 layout、observation 和状态。 |
 | `mujoco_sim/<server_name>/commit` | 订阅 | `AdapterCommit` | 所有 adapter 共用；有效 Commit 参与当前 tick barrier。 |
 | `mujoco_sim/<server_name>/heartbeat` | 订阅 | `Heartbeat` | 所有 adapter 共用；更新合法 controller 的 heartbeat。 |
 | `mujoco_sim/<server_name>/status` | 发布 | `ServerStatus` | 按 `status_period_ms` 发布状态；达到 `max_ticks` 或受控运行错误退出前再发布一次。 |
@@ -333,9 +346,32 @@ false 属于正常 discovery 状态，只在 trace 记录。eCAL 不返回更具
 两次 subscriber 快照都非零但 `Send()` 返回 false 时，日志记录可证实的
 `message_send_rejected` 及前后计数，不推断底层传输原因。
 
-正常 lockstep 顺序为：查询/注册资源、激活 controller、server 发布 Tick、每个 active
-controller 提交完整且有效的 actuator command、Core 收齐 barrier 后执行一步并发布
-下一 Tick。同一 open tick 会重复发布，adapter 可幂等重发相同 Commit。
+### 运行循环与动态生命周期
+
+- 模型加载成功后 Core 立即为 `RUNNING`。没有 active adapter 时，server 打开空 Barrier、
+  执行一步，并以模型 `timestep` 为周期安排下一步。每次完成后按“当前 wall time +
+  timestep”重新安排，因此调度或 Barrier 延迟不会触发补跑追赶。
+- `max_ticks` 比较 server 启动后的全局 Tick/step ID；adapter 注册前和注销后的空 Barrier
+  step 也计入。它不是任一 adapter 的 `Run(max_ticks)` 计数。
+- 每次打开 Tick 时固定 required Barrier 集合。运行期 register/activate 不修改已打开的
+  Barrier，新 `ACTIVE` adapter 从下一 Tick 加入；运行期 unregister 会清零并移除该成员，
+  其余 Commit 已齐时可直接完成本 Tick。
+- 每个 required adapter 使用其注册的 `timeout_ms`。单个 adapter 超时后转为 `TIMED_OUT`、
+  actuator 清零并从 Barrier 移除，server 和其他 adapter 继续 `RUNNING`。当前 Core 已
+  issued 的 Tick 保持 immutable，重传不会改写其中的状态或 observation。
+- server 继续为 `TIMED_OUT` adapter 生成 Tick 并尝试发布，但 transport 不保证投递成功。
+  它提交的完整合法 `COMMIT_OK` 仅证明通信和控制路径恢复，command 不应用到物理状态；
+  相同恢复 Commit 的重传幂等成功，该 session 在下一 Tick 才转回 `ACTIVE` 并重新加入
+  Barrier。协商 minor 0 时，线上状态降级为旧 SDK 可识别的 `ACTIVE`。
+- 默认允许新注册用相同 `controller_id` 替换 `TIMED_OUT` session；旧 actuator 先清零，
+  新注册获得新 session 并处于 `PROVISIONAL`。可通过配置关闭替换。未在
+  `activation_timeout_ms` 内激活的 provisional 注册会被移除并释放资源。
+- 完整但非法的 command、`COMMIT_ERROR` 或同 Tick 不同 payload 的重复 Commit 只把来源
+  controller 置为 `ERROR`、清零并移出 Barrier；不会把整个 server 置为
+  `ERROR_PAUSED`。身份/version/tick 不匹配的消息只被拒绝，也不会改变 controller 状态。
+
+同一 open Tick 会重复发布；payload 保持不变，adapter 可幂等重发相同 Commit。全局
+`ERROR_PAUSED` 只用于 viewer 同步失败等 server 级致命错误。
 
 ## 状态查询工具
 
@@ -372,7 +408,9 @@ mujoco-sim-status --server-name demo --watch --json
 | `--json` | 关闭 | 单次输出 JSON；watch 每行输出一个完整 JSON 对象，即 NDJSON。 |
 
 人类模式显示 server state、epoch、tick、协议版本、更新时间、状态消息、controller，
-以及 observation/command 的数量、名称和维度。JSON 顶层固定为 `status`、`resources`
+以及 observation/command 的数量、名称和维度。controller 表列为 `ID`、`State`、
+`Session`、`Last heartbeat`、`Last commit`、`State since`、`Timeouts`、`Barrier` 和
+`Message`；可直接观察 `TIMED_OUT`/`ERROR`、恢复进度和当前 Barrier 成员。JSON 顶层固定为 `status`、`resources`
 和 `resource_error`；资源查询失败不会使状态查询失败，此时 `resources` 为 `null`，具体
 原因位于 `resource_error`。stdout 只包含状态结果，stale/recovered 和冲突诊断写入
 stderr。
@@ -393,9 +431,9 @@ service 响应。
 colcon build --packages-up-to mujoco_sim_sample_adapter --cmake-args -DBUILD_TESTING=ON
 ```
 
-打开两个当前目录均为仓库根目录的终端。先启动终端 1，再在 5 秒内启动终端 2。
+打开两个当前目录均为仓库根目录的终端。server 先启动并自主运行，adapter 可在运行期接入。
 
-终端 1，启动有界 headless server：
+终端 1，启动持续运行的 headless server：
 
 ```bash
 source install/setup.bash
@@ -403,8 +441,7 @@ mujoco-sim-server \
   --headless \
   --server-name demo \
   --model core/mujoco_sim_core/test/testdata/simple_actuator.xml \
-  --max-ticks 5 \
-  --startup-timeout-ms 5000 \
+  --max-ticks 0 \
   --tick-timeout-ms 1000
 ```
 
@@ -425,8 +462,8 @@ mujoco-sim-sample-adapter \
 ```
 
 `simple_actuator.xml` 确实定义了 `hinge_pos`、`hinge_vel` 和 `hinge_motor`；命令值
-`0.1` 位于 actuator 的 `[-1, 1]` control range 内。adapter 处理 5 个 Tick 后退出，
-server 达到 `--max-ticks 5` 后也应以 `0` 退出。要联调 GUI，可在终端 1 删除
+`0.1` 位于 actuator 的 `[-1, 1]` control range 内。adapter 处理 5 个 `ACTIVE` Tick 后
+尽力注销并退出；server 继续自主运行，使用 Ctrl-C 结束。要联调 GUI，可在终端 1 删除
 `--headless`（使用默认 GUI）或替换为 `--gui`；无显示器时在命令前加 `xvfb-run -a`。
 
 ## 退出码与失败模式
@@ -435,17 +472,18 @@ server 达到 `--max-ticks 5` 后也应以 `0` 退出。要联调 GUI，可在�
 |---|---|---|
 | `0` | 正常结束 | `--help`；达到非零 `max_ticks`；调用 `Stop()`；GUI 窗口关闭。 |
 | `1` | 参数/配置/启动或 eCAL 生命周期失败 | CLI/YAML 错误；缺少模型；MJCF 加载失败；eCAL 或 GLFW 初始化失败；GUI 初始加载失败；未请求 Stop 时 eCAL 不再可用。 |
-| `2` | server 已启动后的受控运行错误 | 有界运行在启动期限内没有 active controller；Core 进入 `ERROR_PAUSED`；GUI 快照同步失败。 |
+| `2` | server 已启动后的全局运行错误 | Core 因 server 级致命故障进入 `ERROR_PAUSED`；GUI 快照同步失败。 |
 
 常见运行时失败行为：
 
-- `max_ticks == 0` 时，`startup_timeout_ms` 不会让无 controller 的 server 退出；server
-  会保持 IDLE 并等待 controller。`max_ticks > 0` 时超时退出码为 `2`。
-- active controller 未在其 barrier timeout 内提交 Commit，会使 Core 进入
-  `ERROR_PAUSED`，发布最终状态并以 `2` 退出。
-- session/epoch/tick 不匹配、未知或未激活 controller 的 Commit、重复 Commit 内容不
-  一致、controller 主动报告 Commit error、遗漏/重复/越权 actuator、非有限值或超出
-  control range 的 command 都可能进入 `ERROR_PAUSED` 并以 `2` 退出。
+- `startup_timeout_ms` 无论 `max_ticks` 是否为零都被忽略；server 不等待首个 adapter，
+  而是保持 `RUNNING` 并按 timestep 自主步进。启动时会记录 deprecated warning。
+- active controller 未在自己的 Barrier timeout 内提交 Commit，只会转为 `TIMED_OUT`、
+  清零并被当前 Barrier 排除；server 不退出。
+- 合法恢复 Commit 只安排下一 Tick 恢复；也可以默认允许的同名新 session 替换超时 session。
+- 重复 Commit 内容不一致、主动 `COMMIT_ERROR`、遗漏/重复/越权 actuator、非有限值或
+  control range 越界只让该 controller 进入 `ERROR`。session/epoch/version/tick 等身份错误
+  只拒绝消息。两类错误都不会停止其他 controller 或 server。
 - registry method 的资源冲突、版本不匹配或前置条件失败会返回 Protobuf 错误响应，
   本身不等同于进程失败。
 - 默认 GUI 在没有可用 display 时通常在 GLFW 初始化阶段以 `1` 失败；使用
@@ -496,16 +534,21 @@ ctest --test-dir build/mujoco_sim_server --output-on-failure
 本包注册的测试包括：
 
 - `server_test`：生成式 CLI/YAML、日志配置、格式/转义、级别、并发、文件失败、轮转、
-  告警限流、payload/send 分类、callback 排空、确定性指标窗口和 endpoint 命名。
+  告警限流、payload/send 分类、callback 排空、亚毫秒调度 deadline、全部 Barrier 指标和
+  endpoint 命名。
 - `png_writer_test`：PNG 兼容写出路径。
 - `server_help`：帮助输出和退出码。
 - `server_logging_e2e`：真实 eCAL malformed/rejection 流量、stderr/文件双 sink、摘要、
-  告警限流、startup timeout 退出原因以及 info 无逐 Tick 噪声。
+  告警限流、弃用配置诊断、全局 `max_ticks` 退出以及 info 无逐 Tick 噪声。
+- `server_lifecycle_e2e`：运行期注册/激活/注销、局部 timeout、恢复、同名替换、局部
+  command `ERROR`，并使用双 actuator 验证快速 `ACTIVE` Commit 不会饿死 `TIMED_OUT` Tick，
+  且 adapter timeout 不停止 server。
 - `server_package_consumer`：安装、外部 `find_package`、链接、两个安装态命令和状态工具
   动态依赖检查。
 - `sim_viewer_test`：viewer 加载、快照同步和关闭。
-- `server_gui_startup_timeout`：GUI 模式下有界启动超时返回 `2`。
-- `status_tool_test`：状态工具 CLI、publisher/epoch 跟踪、payload 校验及 human/JSON 输出。
+- `server_gui_autonomous_run`：GUI 无 adapter 时自主运行到 `max_ticks` 并返回 `0`。
+- `status_tool_test`：状态工具 CLI、publisher/epoch 跟踪、payload 校验，以及包含动态
+  controller 列和字段的 human/JSON 输出。
 - `status_tool_e2e`：真实 server 的单次 human/JSON 查询、watch NDJSON、stale、恢复和
   SIGINT 退出。
 
@@ -517,5 +560,5 @@ colcon test --packages-select mujoco_sim_sample_adapter
 colcon test-result --verbose
 ```
 
-`sim_viewer_test`、`server_gui_startup_timeout` 和 sample adapter 的 GUI e2e 都需要
+`sim_viewer_test`、`server_gui_autonomous_run` 和 sample adapter 的 GUI e2e 都需要
 display；配置阶段没有 `DISPLAY` 时会自动改用 `xvfb-run -a`。

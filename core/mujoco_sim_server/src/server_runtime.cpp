@@ -21,6 +21,14 @@ SendOutcome ClassifySendOutcome(bool sent, std::size_t subscribers_before,
   return SendOutcome::kRejectedWithSubscribers;
 }
 
+std::chrono::steady_clock::time_point ComputeLoopWakeDeadline(
+    std::chrono::steady_clock::time_point now,
+    std::chrono::steady_clock::time_point next_tick, bool tick_open,
+    std::chrono::steady_clock::duration poll_interval) {
+  const auto poll_deadline = now + poll_interval;
+  return tick_open ? poll_deadline : std::min(poll_deadline, next_tick);
+}
+
 RuntimeRates CalculateRuntimeRates(
     double window_seconds, std::uint64_t start_tick, std::uint64_t end_tick,
     double start_simulation_time, double end_simulation_time,
@@ -82,6 +90,10 @@ double RuntimeMetrics::RecordCommit(bool duplicate, bool rejected,
     return 0.0;
   }
 
+  return RecordBarrierCompleted(now);
+}
+
+double RuntimeMetrics::RecordBarrierCompleted(TimePoint now) {
   double latency_ms = 0.0;
   if (barrier_started_.has_value()) {
     latency_ms = std::chrono::duration<double, std::milli>(
@@ -117,6 +129,10 @@ RuntimeMetricsSnapshot RuntimeMetrics::TakeSummary(
   snapshot.duplicate_commits = duplicate_commits_;
   snapshot.rejected_commits = rejected_commits_;
   snapshot.timeouts = timeouts_;
+  snapshot.recoveries = recoveries_;
+  snapshot.replacements = replacements_;
+  snapshot.local_errors = local_errors_;
+  snapshot.activation_expirations = activation_expirations_;
   snapshot.malformed_messages = malformed_messages_;
   snapshot.suppressed_warnings = suppressed_warnings_;
   snapshot.completed_barriers = completed_barriers_;
@@ -144,6 +160,10 @@ void RuntimeMetrics::ResetWindow(TimePoint now, std::uint64_t tick_id,
   duplicate_commits_ = 0;
   rejected_commits_ = 0;
   timeouts_ = 0;
+  recoveries_ = 0;
+  replacements_ = 0;
+  local_errors_ = 0;
+  activation_expirations_ = 0;
   malformed_messages_ = 0;
   suppressed_warnings_ = 0;
   completed_barriers_ = 0;

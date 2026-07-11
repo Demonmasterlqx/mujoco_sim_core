@@ -79,6 +79,8 @@ SyncAdapterClient::SyncAdapterClient(AdapterOptions options)
 SyncAdapterClient::~SyncAdapterClient() {
   Stop();
   StopTickReception();
+  std::string ignored;
+  Unregister(&ignored);
   commit_publisher_.reset();
   heartbeat_publisher_.reset();
   registry_client_.reset();
@@ -128,6 +130,13 @@ bool SyncAdapterClient::Start(std::string* error_message) {
              const eCAL::SReceiveCallbackData& data) {
         HandleTickBytes(data.buffer, data.buffer_size);
       });
+  status_subscriber_ = std::make_unique<eCAL::CSubscriber>(
+      mujoco_sim::protocol::StatusTopicName(options_.server_name));
+  status_subscriber_->SetReceiveCallback(
+      [this](const eCAL::STopicId&, const eCAL::SDataTypeInformation&,
+             const eCAL::SReceiveCallbackData& data) {
+        HandleStatusBytes(data.buffer, data.buffer_size);
+      });
 
   return true;
 }
@@ -160,6 +169,8 @@ bool SyncAdapterClient::Register(std::string* error_message) {
     have_last_commit_ = false;
     last_tick_.Clear();
     last_commit_.Clear();
+    registered_ = true;
+    lifecycle_warning_.clear();
   }
   return true;
 }
@@ -185,7 +196,8 @@ bool SyncAdapterClient::Activate(std::string* error_message) {
 template <typename Request, typename Response>
 bool SyncAdapterClient::CallService(const std::string& method,
                                     const Request& request, Response* response,
-                                    std::string* error_message) {
+                                    std::string* error_message,
+                                    bool allow_after_stop) {
   std::string bytes;
   if (!request.SerializeToString(&bytes)) {
     *error_message = "failed to serialize service request";
@@ -194,7 +206,8 @@ bool SyncAdapterClient::CallService(const std::string& method,
 
   const auto deadline = std::chrono::steady_clock::now() +
                         std::chrono::milliseconds(options_.service_timeout_ms);
-  while (!stop_requested_ && std::chrono::steady_clock::now() < deadline) {
+  while ((allow_after_stop || !stop_requested_) &&
+         std::chrono::steady_clock::now() < deadline) {
     if (!registry_client_->IsConnected()) {
       std::this_thread::sleep_for(std::chrono::milliseconds(50));
       continue;
@@ -220,17 +233,33 @@ int SyncAdapterClient::Run(TickHandler handler, std::uint64_t max_ticks) {
   {
     std::lock_guard lock(mutex_);
     handler_ = std::move(handler);
+    max_ticks_ = max_ticks;
     accepting_ticks_ = !stop_requested_;
   }
   if (stop_requested_) {
     StopTickReception();
+    std::string unregister_error;
+    if (!Unregister(&unregister_error)) {
+      AddLifecycleWarning("unregister failed: " + unregister_error);
+    }
     return 0;
   }
-  std::this_thread::sleep_for(std::chrono::milliseconds(100));
+  if (!WaitBeforeActivation(std::chrono::milliseconds(100))) {
+    StopTickReception();
+    std::string unregister_error;
+    if (!Unregister(&unregister_error)) {
+      AddLifecycleWarning("unregister failed: " + unregister_error);
+    }
+    return 0;
+  }
   std::string error;
   if (!Activate(&error)) {
     StopTickReception();
-    return 1;
+    std::string unregister_error;
+    if (!Unregister(&unregister_error)) {
+      AddLifecycleWarning("unregister failed: " + unregister_error);
+    }
+    return stop_requested_ ? 0 : 1;
   }
   int result = 1;
   while (!stop_requested_ && eCAL::Ok()) {
@@ -247,7 +276,18 @@ int SyncAdapterClient::Run(TickHandler handler, std::uint64_t max_ticks) {
     result = 0;
   }
   StopTickReception();
+  std::string unregister_error;
+  if (!Unregister(&unregister_error)) {
+    AddLifecycleWarning("unregister failed: " + unregister_error);
+  }
   return result;
+}
+
+bool SyncAdapterClient::WaitBeforeActivation(std::chrono::milliseconds delay) {
+  std::unique_lock lock(mutex_);
+  condition_.wait_for(lock, delay,
+                      [this] { return stop_requested_.load(); });
+  return !stop_requested_;
 }
 
 void SyncAdapterClient::Stop() {
@@ -257,6 +297,76 @@ void SyncAdapterClient::Stop() {
     accepting_ticks_ = false;
   }
   condition_.notify_all();
+}
+
+bool SyncAdapterClient::Unregister(std::string* error_message) {
+  return UnregisterWith(
+      [this](const mujoco_sim::v1::UnregisterControllerRequest& request,
+             mujoco_sim::v1::UnregisterControllerResponse* response,
+             std::string* error) {
+        return CallService(mujoco_sim::protocol::kUnregisterControllerMethod,
+                           request, response, error, true);
+      },
+      error_message);
+}
+
+bool SyncAdapterClient::UnregisterWith(
+    const std::function<bool(
+        const mujoco_sim::v1::UnregisterControllerRequest&,
+        mujoco_sim::v1::UnregisterControllerResponse*, std::string*)>& call,
+    std::string* error_message) {
+  if (error_message == nullptr) {
+    return false;
+  }
+  mujoco_sim::v1::UnregisterControllerRequest request;
+  {
+    std::lock_guard lock(mutex_);
+    if (!registered_) {
+      return true;
+    }
+    request.set_controller_id(options_.controller_id);
+    request.set_session_id(registration_.session_id());
+    request.set_epoch(registration_.epoch());
+  }
+
+  mujoco_sim::v1::UnregisterControllerResponse response;
+  if (!call(request, &response, error_message)) {
+    return false;
+  }
+  return CompleteUnregister(response, error_message);
+}
+
+bool SyncAdapterClient::CompleteUnregister(
+    const mujoco_sim::v1::UnregisterControllerResponse& response,
+    std::string* error_message) {
+  if (response.code() != OK && response.code() != mujoco_sim::v1::NOT_FOUND &&
+      response.code() != mujoco_sim::v1::INVALID_SESSION) {
+    *error_message = response.message();
+    return false;
+  }
+  {
+    std::lock_guard lock(mutex_);
+    registered_ = false;
+  }
+  Stop();
+  return true;
+}
+
+void SyncAdapterClient::AddLifecycleWarning(const std::string& warning) {
+  if (warning.empty()) {
+    return;
+  }
+  std::lock_guard lock(mutex_);
+  if (lifecycle_warning_.empty()) {
+    lifecycle_warning_ = warning;
+  } else {
+    lifecycle_warning_ += "; " + warning;
+  }
+}
+
+std::string SyncAdapterClient::lifecycle_warning() const {
+  std::lock_guard lock(mutex_);
+  return lifecycle_warning_;
 }
 
 bool SyncAdapterClient::BeginTickCallback() {
@@ -279,6 +389,7 @@ void SyncAdapterClient::StopTickReception() {
     accepting_ticks_ = false;
   }
   tick_subscriber_.reset();
+  status_subscriber_.reset();
   std::unique_lock lock(mutex_);
   condition_.wait(lock,
                   [this] { return active_tick_callbacks_ == 0; });
@@ -289,7 +400,8 @@ bool SyncAdapterClient::IsExpectedTick(
     const mujoco_sim::v1::Tick& tick) const {
   const auto& header = tick.header();
   return tick.controller_id() == options_.controller_id &&
-         tick.controller_state() == mujoco_sim::v1::ACTIVE &&
+         (tick.controller_state() == mujoco_sim::v1::ACTIVE ||
+          tick.controller_state() == mujoco_sim::v1::TIMED_OUT) &&
          header.server_name() == options_.server_name &&
          header.session_id() == registration_.session_id() &&
          header.epoch() == registration_.epoch() &&
@@ -297,6 +409,39 @@ bool SyncAdapterClient::IsExpectedTick(
          header.protocol_minor() == registration_.effective_protocol_minor() &&
          tick.layout().SerializeAsString() ==
              registration_.layout().SerializeAsString();
+}
+
+void SyncAdapterClient::HandleStatusBytes(const void* data, std::size_t size) {
+  TickCallbackGuard callback(this);
+  if (!callback.accepted() || data == nullptr || size == 0 ||
+      size > static_cast<std::size_t>(std::numeric_limits<int>::max())) {
+    return;
+  }
+  mujoco_sim::v1::ServerStatus status;
+  if (!status.ParseFromArray(data, static_cast<int>(size)) ||
+      status.header().server_name() != options_.server_name ||
+      status.header().epoch() != registration_.epoch() ||
+      status.header().protocol_major() !=
+          registration_.effective_protocol_major()) {
+    return;
+  }
+  for (const auto& controller : status.controllers()) {
+    if (controller.controller_id() != options_.controller_id) {
+      continue;
+    }
+    if (controller.session_id() != registration_.session_id()) {
+      AddLifecycleWarning("server replaced adapter session");
+      Stop();
+      return;
+    }
+    if (controller.state() == mujoco_sim::v1::ERROR) {
+      AddLifecycleWarning(controller.message().empty()
+                              ? "server marked adapter as ERROR"
+                              : controller.message());
+      Stop();
+      return;
+    }
+  }
 }
 
 SyncAdapterClient::TickCallbackGuard::TickCallbackGuard(
@@ -337,7 +482,14 @@ void SyncAdapterClient::HandleTick(
         publish_heartbeat,
     const std::function<void(const mujoco_sim::v1::AdapterCommit&)>&
         publish_commit) {
-  std::lock_guard tick_lock(tick_mutex_);
+  std::unique_lock tick_lock(tick_mutex_, std::defer_lock);
+  if (tick.controller_state() == mujoco_sim::v1::TIMED_OUT) {
+    if (!tick_lock.try_lock()) {
+      return;
+    }
+  } else {
+    tick_lock.lock();
+  }
 
   TickHandler handler;
   mujoco_sim::v1::AdapterCommit cached_commit;
@@ -356,6 +508,9 @@ void SyncAdapterClient::HandleTick(
     }
     if (have_last_commit_ && SameTickStream(tick, last_tick_) &&
         tick.header().tick_id() < last_tick_.header().tick_id()) {
+      return;
+    }
+    if (!duplicate && max_ticks_ > 0 && handled_ticks_ >= max_ticks_) {
       return;
     }
     if (!duplicate) {
@@ -384,7 +539,9 @@ void SyncAdapterClient::HandleTick(
     last_tick_ = tick;
     last_commit_ = commit;
     have_last_commit_ = true;
-    handled_ticks_++;
+    if (tick.controller_state() != mujoco_sim::v1::TIMED_OUT) {
+      handled_ticks_++;
+    }
   }
   publish_commit(commit);
   condition_.notify_all();
