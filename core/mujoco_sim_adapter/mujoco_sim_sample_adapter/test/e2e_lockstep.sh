@@ -16,6 +16,7 @@ cleanup() {
     kill "${server_pid}" 2>/dev/null || true
     wait "${server_pid}" 2>/dev/null || true
   fi
+  rm -f "${server_log}" "${adapter_log}"
 }
 trap cleanup EXIT
 
@@ -24,7 +25,8 @@ server_args=(
   --model "${model_path}"
   --max-ticks 5
   --startup-timeout-ms 5000
-  --tick-timeout-ms 1000
+  --tick-timeout-ms 5000
+  --log-level trace
 )
 if [[ "${mode}" == "headless" ]]; then
   env -u DISPLAY -u WAYLAND_DISPLAY "${server_bin}" \
@@ -59,3 +61,8 @@ if ! wait "${server_pid}"; then
   exit 1
 fi
 server_pid=""
+
+grep -Fq "event=tick_published" "${server_log}"
+grep -Fq "event=commit_accepted" "${server_log}"
+grep -Fq "event=barrier_completed" "${server_log}"
+grep -Fq "event=server_stopped reason=max_ticks exit_code=0" "${server_log}"

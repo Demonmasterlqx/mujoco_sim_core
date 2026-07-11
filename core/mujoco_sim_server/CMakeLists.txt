@@ -10,6 +10,7 @@ find_package(mujoco_sim_config CONFIG REQUIRED)
 find_package(mujoco_sim_core CONFIG REQUIRED)
 find_package(mujoco_sim_protocol CONFIG REQUIRED)
 find_package(PNG REQUIRED)
+find_package(spdlog CONFIG REQUIRED)
 find_package(Threads REQUIRED)
 
 set(MUJOCO_SIMULATE_ROOT
@@ -19,6 +20,8 @@ set(MUJOCO_SIMULATE_ROOT
 add_library(${PROJECT_NAME}_lib
   src/ecal_server.cpp
   src/lodepng_compat.cpp
+  src/server_logging.cpp
+  src/server_runtime.cpp
   src/sim_viewer.cpp
   src/server_config.cpp
   "${MUJOCO_SIMULATE_ROOT}/glfw_adapter.cc"
@@ -51,6 +54,7 @@ target_link_libraries(${PROJECT_NAME}_lib
     glfw
     mujoco::mujoco
     PNG::PNG
+    spdlog::spdlog
     Threads::Threads
 )
 set_target_properties(${PROJECT_NAME}_lib PROPERTIES EXPORT_NAME server)
@@ -100,7 +104,14 @@ add_subdirectory(tools/status)
 
 if(BUILD_TESTING)
   add_executable(server_test test/server_test.cpp)
-  target_link_libraries(server_test PRIVATE ${PROJECT_NAME}_lib GTest::gtest_main)
+  target_include_directories(server_test PRIVATE
+    "${CMAKE_CURRENT_SOURCE_DIR}/src"
+  )
+  target_link_libraries(server_test PRIVATE
+    ${PROJECT_NAME}_lib
+    GTest::gtest_main
+    spdlog::spdlog
+  )
   add_test(NAME server_test COMMAND server_test)
 
   add_executable(png_writer_test test/png_writer_test.cpp)
@@ -120,6 +131,21 @@ if(BUILD_TESTING)
             "-DSERVER_EXECUTABLE=$<TARGET_FILE:mujoco-sim-server>"
             -P "${CMAKE_CURRENT_SOURCE_DIR}/test/server_help_test.cmake"
   )
+
+  add_executable(server_logging_probe test/server_logging_probe.cpp)
+  target_link_libraries(server_logging_probe PRIVATE
+    eCAL::core
+    mujoco_sim::protocol
+  )
+  add_test(
+    NAME server_logging_e2e
+    COMMAND bash
+            "${CMAKE_CURRENT_SOURCE_DIR}/test/server_logging_e2e.sh"
+            $<TARGET_FILE:mujoco-sim-server>
+            $<TARGET_FILE:server_logging_probe>
+            "${CMAKE_CURRENT_SOURCE_DIR}/../mujoco_sim_core/test/testdata/simple_actuator.xml"
+  )
+  set_tests_properties(server_logging_e2e PROPERTIES TIMEOUT 15)
 
   configure_file(
     test/package_consumer_test.cmake.in

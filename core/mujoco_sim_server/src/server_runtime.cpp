@@ -1,0 +1,180 @@
+#include "server_runtime.hpp"
+
+#include <algorithm>
+#include <limits>
+
+namespace mujoco_sim::server {
+
+bool IsProtocolPayloadSizeAllowed(std::size_t size) {
+  return size <= kMaxProtocolPayloadBytes &&
+         size <= static_cast<std::size_t>(std::numeric_limits<int>::max());
+}
+
+SendOutcome ClassifySendOutcome(bool sent, std::size_t subscribers_before,
+                                std::size_t subscribers_after) {
+  if (sent) {
+    return SendOutcome::kSent;
+  }
+  if (subscribers_before == 0 || subscribers_after == 0) {
+    return SendOutcome::kNoSubscribers;
+  }
+  return SendOutcome::kRejectedWithSubscribers;
+}
+
+RuntimeRates CalculateRuntimeRates(
+    double window_seconds, std::uint64_t start_tick, std::uint64_t end_tick,
+    double start_simulation_time, double end_simulation_time,
+    std::uint64_t completed_barriers, double barrier_latency_total_ms,
+    double barrier_latency_max_ms) {
+  RuntimeRates rates;
+  if (window_seconds > 0.0) {
+    if (end_tick >= start_tick) {
+      rates.step_rate_hz =
+          static_cast<double>(end_tick - start_tick) / window_seconds;
+    }
+    rates.real_time_factor =
+        (end_simulation_time - start_simulation_time) / window_seconds;
+  }
+  if (completed_barriers > 0) {
+    rates.barrier_latency_avg_ms =
+        barrier_latency_total_ms / static_cast<double>(completed_barriers);
+  }
+  rates.barrier_latency_max_ms = barrier_latency_max_ms;
+  return rates;
+}
+
+void RuntimeMetrics::Initialize(TimePoint now, std::uint64_t tick_id,
+                                double simulation_time) {
+  barrier_started_.reset();
+  ResetWindow(now, tick_id, simulation_time);
+  initialized_ = true;
+}
+
+bool RuntimeMetrics::SummaryDue(TimePoint now,
+                                std::chrono::milliseconds period) const {
+  return initialized_ && now - window_started_ >= period;
+}
+
+void RuntimeMetrics::RecordTickOpened(TimePoint now) {
+  ++ticks_opened_;
+  barrier_started_ = now;
+}
+
+void RuntimeMetrics::RecordTickPublishBatch(
+    std::uint64_t attempts, std::uint64_t serialization_failures,
+    std::uint64_t sent,
+    std::uint64_t rejected_with_subscribers, std::uint64_t no_subscribers,
+    std::uint64_t retransmissions) {
+  tick_publish_attempts_ += attempts;
+  tick_serialization_failures_ += serialization_failures;
+  tick_messages_sent_ += sent;
+  tick_send_rejected_with_subscribers_ += rejected_with_subscribers;
+  tick_no_subscribers_ += no_subscribers;
+  tick_retransmissions_ += retransmissions;
+}
+
+double RuntimeMetrics::RecordCommit(bool duplicate, bool rejected,
+                                    bool stepped, TimePoint now) {
+  ++commits_;
+  duplicate_commits_ += duplicate ? 1U : 0U;
+  rejected_commits_ += rejected ? 1U : 0U;
+  if (!stepped) {
+    return 0.0;
+  }
+
+  double latency_ms = 0.0;
+  if (barrier_started_.has_value()) {
+    latency_ms = std::chrono::duration<double, std::milli>(
+                     now - *barrier_started_)
+                     .count();
+    ++completed_barriers_;
+    barrier_latency_total_ms_ += latency_ms;
+    barrier_latency_max_ms_ = std::max(barrier_latency_max_ms_, latency_ms);
+  }
+  barrier_started_.reset();
+  return latency_ms;
+}
+
+RuntimeMetricsSnapshot RuntimeMetrics::TakeSummary(
+    TimePoint now, std::uint64_t tick_id, double simulation_time) {
+  RuntimeMetricsSnapshot snapshot;
+  if (!initialized_) {
+    return snapshot;
+  }
+  snapshot.window_seconds = std::max(
+      std::chrono::duration<double>(now - window_started_).count(), 1e-9);
+  snapshot.tick_id = tick_id;
+  snapshot.simulation_time = simulation_time;
+  snapshot.ticks_opened = ticks_opened_;
+  snapshot.tick_publish_attempts = tick_publish_attempts_;
+  snapshot.tick_serialization_failures = tick_serialization_failures_;
+  snapshot.tick_messages_sent = tick_messages_sent_;
+  snapshot.tick_send_rejected_with_subscribers =
+      tick_send_rejected_with_subscribers_;
+  snapshot.tick_no_subscribers = tick_no_subscribers_;
+  snapshot.tick_retransmissions = tick_retransmissions_;
+  snapshot.commits = commits_;
+  snapshot.duplicate_commits = duplicate_commits_;
+  snapshot.rejected_commits = rejected_commits_;
+  snapshot.timeouts = timeouts_;
+  snapshot.malformed_messages = malformed_messages_;
+  snapshot.suppressed_warnings = suppressed_warnings_;
+  snapshot.completed_barriers = completed_barriers_;
+  snapshot.rates = CalculateRuntimeRates(
+      snapshot.window_seconds, window_start_tick_, tick_id,
+      window_start_simulation_time_, simulation_time, completed_barriers_,
+      barrier_latency_total_ms_, barrier_latency_max_ms_);
+  ResetWindow(now, tick_id, simulation_time);
+  return snapshot;
+}
+
+void RuntimeMetrics::ResetWindow(TimePoint now, std::uint64_t tick_id,
+                                 double simulation_time) {
+  window_started_ = now;
+  window_start_tick_ = tick_id;
+  window_start_simulation_time_ = simulation_time;
+  ticks_opened_ = 0;
+  tick_publish_attempts_ = 0;
+  tick_serialization_failures_ = 0;
+  tick_messages_sent_ = 0;
+  tick_send_rejected_with_subscribers_ = 0;
+  tick_no_subscribers_ = 0;
+  tick_retransmissions_ = 0;
+  commits_ = 0;
+  duplicate_commits_ = 0;
+  rejected_commits_ = 0;
+  timeouts_ = 0;
+  malformed_messages_ = 0;
+  suppressed_warnings_ = 0;
+  completed_barriers_ = 0;
+  barrier_latency_total_ms_ = 0.0;
+  barrier_latency_max_ms_ = 0.0;
+}
+
+bool CallbackState::Enter() {
+  std::lock_guard lock(mutex_);
+  if (!accepting_) {
+    return false;
+  }
+  ++active_;
+  return true;
+}
+
+void CallbackState::Leave() {
+  std::lock_guard lock(mutex_);
+  if (--active_ == 0) {
+    condition_.notify_all();
+  }
+}
+
+void CallbackState::StopAccepting() {
+  std::lock_guard lock(mutex_);
+  accepting_ = false;
+}
+
+void CallbackState::WaitForIdle() {
+  std::unique_lock lock(mutex_);
+  condition_.wait(lock, [this]() { return active_ == 0; });
+}
+
+}  // namespace mujoco_sim::server

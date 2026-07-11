@@ -18,6 +18,8 @@ MuJoCo `simulate` 图形界面，并安装只读状态查询命令 `mujoco-sim-s
 - 驱动 Tick/Commit barrier：向每个 active controller 发布 Tick，收齐有效 Commit
   后由 Core 写入 actuator command 并执行一个 `mj_step()`。
 - 周期发布 server/controller 状态，处理 Heartbeat，并把运行时错误转换为进程退出码。
+- 使用结构化键值日志记录生命周期、协议拒绝、超时和窗口化运行指标；日志默认写 stderr，
+  可选写入轮转文件。
 - 默认创建基于 GLFW 的 MuJoCo `simulate` 界面；界面读取 Core 的隔离快照，不持有或
   修改真实仿真 `mjModel`/`mjData`。
 - 提供 `mujoco-sim-status`，订阅 `ServerStatus`、查询模型资源，并支持单次、watch、
@@ -41,11 +43,11 @@ MuJoCo `simulate` 图形界面，并安装只读状态查询命令 `mujoco-sim-s
 |---|---|---|
 | 构建 | CMake `>= 3.22`、C++20 | 配置和编译 |
 | 仓库内 | `mujoco_sim_config`、`mujoco_sim_core`、`mujoco_sim_protocol` | 生成配置、仿真 Core、V1 Protobuf 与命名规则 |
-| 系统 | Python 3/PyYAML、CLI11、eCAL、GLFW 3、libpng、yaml-cpp、Threads | 构建期生成、CLI、IPC、GUI、PNG、YAML、线程 |
+| 系统 | Python 3/PyYAML、CLI11、eCAL、GLFW 3、libpng、yaml-cpp、spdlog、Threads | 构建期生成、CLI、IPC、GUI、PNG、YAML、日志、线程 |
 | 测试 | GTest、Xvfb、`readelf` | 单元/包消费测试、状态工具依赖检查和无物理显示器的 GUI 测试 |
 
 CLI11、yaml-cpp、Python 和 PyYAML 由 `mujoco_sim_config` 传递；本包直接声明 eCAL、
-GLFW 和 libpng，测试还需要 GTest 和 Xvfb。即使运行时始终使用 `--headless`，当前
+GLFW、libpng 和 spdlog，测试还需要 GTest 和 Xvfb。即使运行时始终使用 `--headless`，当前
 构建仍会编译 GUI，因此 GLFW 和 libpng 仍是构建依赖。MuJoCo 3.10.0 库及
 `simulate` 源码来自 `mujoco_sim_core` 中现有的 Linux/x86 vendored 目录。
 安装态 package consumer 使用 `readelf` 检查状态工具没有引入 MuJoCo/GUI 等重依赖；
@@ -137,6 +139,11 @@ Xvfb 仍会初始化并运行 GUI 渲染；如果不需要渲染，应直接使�
 | `--startup-timeout-ms N` | `uint32`，`0..4294967295` | `5000` | 有界运行等待 active controller 的时间；仅在 `max_ticks > 0` 时触发。 |
 | `--headless` | 无 | 未启用 | 将 `headless` 设为 `true`，不创建 viewer。与 `--gui` 互斥。 |
 | `--gui` | 无 | 未启用 | 将 `headless` 设为 `false`，可覆盖 YAML。与 `--headless` 互斥。 |
+| `--log-level LEVEL` | `trace/debug/info/warn/error/critical/off` | `info` | 设置 server 最低日志级别。 |
+| `--log-file PATH` | path | 空 | 非空时在 stderr 之外写轮转文件；自动创建父目录。 |
+| `--log-file-max-size-mb N` | `uint32`，`>= 1` | `10` | 单个日志文件的 MiB 上限。 |
+| `--log-file-max-files N` | `uint32`，`1..200000` | `5` | 包含当前文件在内的日志文件总数。 |
+| `--log-summary-period-ms N` | `uint32` | `5000` | 运行摘要周期；`0` 关闭周期和退出前摘要。 |
 
 CLI 还执行以下校验：
 
@@ -163,6 +170,11 @@ YAML 顶层支持且只支持以下字段：
 | `startup_timeout_ms` | unsigned integer (`uint32`)，`0..4294967295` | `5000` | 有界运行的 controller 启动超时 | `--startup-timeout-ms` |
 | `status_period_ms` | unsigned integer (`uint32`)，`0..4294967295` | `100` | `ServerStatus` 发布周期；`0` 会在每轮 server loop 尝试发布 | 无 |
 | `headless` | boolean | `false` | `true` 不创建 viewer，`false` 创建 viewer | `--headless` / `--gui` |
+| `log_level` | enum：`trace/debug/info/warn/error/critical/off` | `info` | 最低日志级别 | `--log-level` |
+| `log_file` | path | 空 | 可选轮转日志文件 | `--log-file` |
+| `log_file_max_size_mb` | unsigned integer (`uint32`)，`1..4294967295` | `10` | 单文件 MiB 上限 | `--log-file-max-size-mb` |
+| `log_file_max_files` | unsigned integer (`uint32`)，`1..200000` | `5` | 当前文件和历史文件总数 | `--log-file-max-files` |
+| `log_summary_period_ms` | unsigned integer (`uint32`) | `5000` | 摘要周期，`0` 关闭 | `--log-summary-period-ms` |
 
 ### 严格校验
 
@@ -202,6 +214,11 @@ tick_timeout_ms: 1000
 startup_timeout_ms: 5000
 status_period_ms: 100
 headless: true
+log_level: info
+log_file: logs/server.log
+log_file_max_size_mb: 10
+log_file_max_files: 5
+log_summary_period_ms: 5000
 ```
 
 加载配置：
@@ -224,12 +241,59 @@ mujoco-sim-server \
 示例设置了 `max_ticks: 5`，因此需要在 5 秒默认启动超时内连接并激活 adapter；完整
 双终端命令见下文。
 
+## 日志
+
+日志采用一行一个事件的键值文本，包含 ISO 时间、level、thread、`component=server` 和
+稳定的 `event` 名称。默认彩色输出到 stderr；`log_file` 非空时，同一事件同时写入无
+颜色的轮转文件。默认 `10 MiB`、总共 5 个文件，因此最多约占用 50 MiB。显式配置的
+文件或父目录无法创建会使 server 启动失败，不会静默退回仅终端输出。
+运行期磁盘写入或 flush 失败时，logger 会在 stderr 输出
+`event=log_sink_error`，用于监控文件日志健康状态。
+
+```bash
+mujoco-sim-server \
+  --headless \
+  --model core/mujoco_sim_core/test/testdata/simple_actuator.xml \
+  --log-level debug \
+  --log-file logs/server.log
+```
+
+级别约定：`error` 是启动或运行失败；`warn` 是请求/Commit 拒绝、非法 payload、超时或
+发布失败；`info` 是启动、模型、endpoint、controller、状态转换、摘要和退出；`debug`
+是资源/发布细节；`trace` 才记录每条 Tick、Commit 和 Heartbeat。外部输入引发的同类
+重复告警按固定类别最多每秒输出一次，下一条日志的 `suppressed` 字段给出被抑制数量；
+用户字符串会转义并截断，协议 payload 和 actuator 数值不会写入日志。
+
+`event=tick_summary` 默认每 5 秒以及退出前输出一次，字段口径为：
+
+- `step_rate_hz`：窗口内完成的 `mj_step` 数除以 wall time。
+- `real_time_factor`：窗口仿真时间增量除以 wall time。
+- `ticks_opened`：barrier 从关闭变为打开的次数。
+- `tick_publish_attempts`、`tick_serialization_failures`、`tick_messages_sent`：Tick
+  发布尝试、序列化失败和成功发送消息数；
+  `tick_no_subscribers` 统计发送前后至少一次未观察到 subscriber 的 `Send()==false`；
+  `tick_send_rejected_with_subscribers` 统计发送前后均观察到 subscriber 但 eCAL 仍返回
+  false 的次数。
+- `tick_retransmissions`：open barrier 期间重复发送的 Tick 消息数。
+- `commits`、`duplicate_commits`、`rejected_commits`、`timeouts`、`malformed_messages`：
+  对应窗口计数。
+- `barrier_latency_avg_ms`、`barrier_latency_max_ms`：仅统计成功完成的 barrier。
+
+帮助仍只写 stdout；server 结构化日志不写 stdout。`mujoco-sim-status` 是独立 target，
+不链接 server logger，其 human/JSON/NDJSON stdout 契约不受影响。eCAL 自身可能输出其
+配置加载提示。Heartbeat 的 `trace` 表示 payload 已解析并交给 Core；当前 Core API 不
+返回 Heartbeat 语义拒绝原因，因此日志不会声称其已被接受。
+
 ## eCAL service 与 topic
 
 endpoint 名称由 `server_name` 和 controller ID 构造，定义见
 [`topics.hpp`](../mujoco_sim_protocol/include/mujoco_sim/protocol/topics.hpp)。载荷是
 [`sync.proto`](../mujoco_sim_protocol/proto/mujoco_sim/v1/sync.proto) 中消息的序列化
 Protobuf bytes。
+
+所有入站 service/topic payload 的 transport 上限为 4 MiB；大于上限的 payload 在
+Protobuf 解析前拒绝并进入 malformed 诊断。空的 Commit/Heartbeat topic payload 也按
+malformed 处理；service 的空 payload 可作为 protobuf 默认消息进入正常业务校验。
 
 ### Registry service
 
@@ -263,8 +327,11 @@ mujoco_sim.<server_name>.registry
 | `mujoco_sim/<server_name>/status` | 发布 | `ServerStatus` | 按 `status_period_ms` 发布状态；达到 `max_ticks` 或受控运行错误退出前再发布一次。 |
 
 server 启动 eCAL 时的进程名为 `mujoco-sim-server`。空或无法解析的 Commit/Heartbeat
-topic payload 会被忽略。server 与 adapter 的 `server_name` 必须一致，否则它们使用
-不同 endpoint。
+topic payload 会记录限流后的 malformed 告警。server 与 adapter 的 `server_name` 必须
+一致，否则它们使用不同 endpoint。publisher 尚未发现 subscriber 时 `Send()` 返回
+false 属于正常 discovery 状态，只在 trace 记录。eCAL 不返回更具体的失败原因，因此
+两次 subscriber 快照都非零但 `Send()` 返回 false 时，日志记录可证实的
+`message_send_rejected` 及前后计数，不推断底层传输原因。
 
 正常 lockstep 顺序为：查询/注册资源、激活 controller、server 发布 Tick、每个 active
 controller 提交完整且有效的 actuator command、Core 收齐 barrier 后执行一步并发布
@@ -406,7 +473,7 @@ target_link_libraries(my_server PRIVATE mujoco_sim::server)
 [`ecal_server.hpp`](include/mujoco_sim/server/ecal_server.hpp)，提供配置解析以及
 `EcalServer::Start/Run/Stop`。可执行 target 用于 `$<TARGET_FILE:...>`、测试或部署，
 不作为链接库使用。安装态 package config 会继续查找 `mujoco_sim_config`、eCAL、GLFW、
-`mujoco_sim_core`、`mujoco_sim_protocol`、PNG 和 Threads；配置包再传递 CLI11 与
+`mujoco_sim_core`、`mujoco_sim_protocol`、PNG、spdlog 和 Threads；配置包再传递 CLI11 与
 yaml-cpp。
 状态工具内部静态库 `mujoco_sim_status_lib` 仅供本包构建和测试，不安装、不导出。
 
@@ -428,10 +495,12 @@ ctest --test-dir build/mujoco_sim_server --output-on-failure
 
 本包注册的测试包括：
 
-- `server_test`：生成式 CLI、默认值、严格 YAML、相对 path、initial keyframe、优先级和
-  endpoint 命名。
+- `server_test`：生成式 CLI/YAML、日志配置、格式/转义、级别、并发、文件失败、轮转、
+  告警限流、payload/send 分类、callback 排空、确定性指标窗口和 endpoint 命名。
 - `png_writer_test`：PNG 兼容写出路径。
 - `server_help`：帮助输出和退出码。
+- `server_logging_e2e`：真实 eCAL malformed/rejection 流量、stderr/文件双 sink、摘要、
+  告警限流、startup timeout 退出原因以及 info 无逐 Tick 噪声。
 - `server_package_consumer`：安装、外部 `find_package`、链接、两个安装态命令和状态工具
   动态依赖检查。
 - `sim_viewer_test`：viewer 加载、快照同步和关闭。

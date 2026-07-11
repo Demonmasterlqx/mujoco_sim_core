@@ -10,6 +10,7 @@
   <depend>ecal</depend>
   <depend>libglfw3-dev</depend>
   <depend>libpng-dev</depend>
+  <depend>spdlog</depend>
   <depend>mujoco_sim_config</depend>
   <depend>mujoco_sim_core</depend>
   <depend>mujoco_sim_protocol</depend>

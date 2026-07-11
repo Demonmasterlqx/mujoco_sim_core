@@ -74,6 +74,8 @@ V1 不实现 observer-only adapter、运行中动态增加 controller、异步�
 - 发布 per-controller Tick，订阅 Commit/Heartbeat，发布 ServerStatus。
 - 使用 `mujoco_sim_config` 生成的 CLI11/yaml-cpp 配置，处理 initial keyframe、固定 tick 数
   运行和错误退出。
+- 使用 spdlog 输出 server 生命周期、协议拒绝、状态转换、超时和窗口化仿真指标；默认
+  写 stderr，可选写入有界轮转文件，逐 Tick/Commit 只在 trace 级别输出。
 - 默认使用仓库自带的 MuJoCo `simulate` 官方 UI 渲染 Core 快照，并提供 `--headless` 模式。
 - 提供独立的 `mujoco-sim-status` 命令行目标，通过 status topic 和 registry service 查询 server、controller 与模型资源，支持单次、watch 和 JSON/NDJSON 输出。
 
@@ -85,6 +87,17 @@ V1 不实现 observer-only adapter、运行中动态增加 controller、异步�
 - 图形界面依赖系统 GLFW 和 libpng；官方 UI 的截图调用由内部兼容层转接到 libpng，不引入不可复现的 LodePNG 运行时依赖。
 - 配置优先级固定为命令行、YAML、程序默认值；`--headless`/`--gui` 可双向覆盖 YAML；YAML 必须是单个顶层 mapping，并严格拒绝未知字段、重复字段、错误类型和整数溢出。
 - `ServerConfig`、`LoadConfigFile`、`ParseCommandLine` 和 `Usage` 保持为 server 的配置公共接口；解析失败不得修改调用方配置。
+- 日志配置继续服从“CLI > YAML > 默认值”；同步 sink 写入必须在 Core mutex 外执行，
+  外部输入触发的重复告警必须使用低基数限流 key，协议 payload 和 command 数值不得
+  写入日志。
+- server transport 在 Protobuf 解析前拒绝超过 4 MiB 的入站 service/topic payload；
+  无 subscriber 是 discovery 状态，不得误报为发送失败。eCAL `Send()` 返回 false 时
+  记录发送前后的 subscriber 快照并按可观察结果分类，不推断底层传输原因。
+- eCAL callback 必须在 endpoint teardown 时停止接收并排空，随后才能销毁 transport、
+  调用 `eCAL::Finalize()` 和 flush logger；`mujoco-sim-status` 不链接 server logger，
+  其 stdout/JSON/NDJSON 契约不受影响。
+- Heartbeat 日志只表示 payload 已解析并转交 Core；当前 `AcceptHeartbeat()` 不返回语义
+  结果，server 不得记录无法证实的 accepted/rejected 结论。
 - 状态工具源码和内部 library 位于 `tools/status`，使用生成式 YAML/CLI 配置，但不链接
   server library、Core、MuJoCo、GUI 或 PNG；资源查询失败不得掩盖已收到的有效
   ServerStatus。
@@ -161,6 +174,9 @@ V1 不实现 observer-only adapter、运行中动态增加 controller、异步�
 7. Core 递增 tick，Server 发布下一帧 Tick。
 8. GUI 模式下，Server 以固定刷新周期把 Core 状态复制到 viewer 快照；渲染不参与 Barrier，也不改变仿真时间。
 9. 任一 active controller 超时、提交非法命令或 session/epoch/tick 不匹配，Server 进入 `ERROR_PAUSED`，V1 默认 fail-stop。
+10. Server 在运行循环中按窗口聚合 step rate、real-time factor、Tick 发布/重传、Commit、
+    timeout、malformed payload 和成功 barrier latency；达到周期或退出时记录摘要，不让
+    日志 sink I/O 进入仿真临界区。
 
 ## 4. 测试与验收
 
@@ -172,7 +188,7 @@ V1 不实现 observer-only adapter、运行中动态增加 controller、异步�
 - `mujoco_sim_core`：模型加载、具名 keyframe 成功/失败原子性、catalog、隔离 viewer 快照
   及刷新、注册失败路径、actuator 冲突、Activate、Tick observation、Barrier step、非法
   command、range 校验、tick/session/epoch 错误、超时。
-- `mujoco_sim_server`：CLI11 命令行解析、yaml-cpp 严格配置解析、GUI/headless、真实 GLFW viewer 生命周期、PNG 截图编码回读、CLI 覆盖优先级、解析事务性、help 退出行为、安装后 CMake consumer 与可执行文件启动、topic/service 命名。
+- `mujoco_sim_server`：CLI11 命令行解析、yaml-cpp 严格配置解析、GUI/headless、真实 GLFW viewer 生命周期、PNG 截图编码回读、CLI 覆盖优先级、解析事务性、help 退出行为、安装后 CMake consumer 与可执行文件启动、topic/service 命名；日志级别、转义/截断、stderr/轮转文件、文件失败、并发、告警限流、运行摘要、退出原因、malformed/rejection 流量和 info 无逐 Tick 噪声。
 - 状态工具单元测试：CLI 默认值、全部参数、help、未知参数、缺失值、零值、负数和整数溢出；status payload 与 publisher 切换；资源成功/失败；controller 和资源排序；人类输出、JSON 字段/转义/uint64 精度及 NDJSON。
 - `mujoco_sim_adapter_sdk`：Commit/Heartbeat 构造、重复 Tick 缓存重发和并发 handler
   单次执行。

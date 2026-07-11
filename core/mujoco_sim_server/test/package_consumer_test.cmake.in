@@ -37,6 +37,8 @@ execute_process(
           "-Dglfw3_DIR=@glfw3_DIR@"
           "-Dmujoco_sim_core_DIR=@mujoco_sim_core_DIR@"
           "-Dmujoco_sim_protocol_DIR=@mujoco_sim_protocol_DIR@"
+          "-Dspdlog_DIR=@spdlog_DIR@"
+          "-Dfmt_DIR=@fmt_DIR@"
           "-Dyaml-cpp_DIR=@yaml-cpp_DIR@"
   RESULT_VARIABLE configure_result
 )
@@ -100,7 +102,7 @@ if(NOT readelf_result EQUAL 0)
   message(FATAL_ERROR "Failed to inspect mujoco-sim-status: ${readelf_error}")
 endif()
 if(status_dynamic_section MATCHES
-   "libmujoco[.]so|libmujoco_sim_core[.]so|libmujoco_sim_server|libglfw|libpng|libGL|libOpenGL|libEGL|libGLES|libX11|libxcb|libwayland")
+   "libmujoco[.]so|libmujoco_sim_core[.]so|libmujoco_sim_server|libglfw|libpng|libspdlog|libfmt|libGL|libOpenGL|libEGL|libGLES|libX11|libxcb|libwayland")
   message(FATAL_ERROR
     "mujoco-sim-status has an unexpected heavy dependency:\n${status_dynamic_section}"
   )

@@ -18,7 +18,6 @@ int main(int argc, char** argv) {
 
   mujoco_sim::server::EcalServer server(config);
   if (!server.Start(&error)) {
-    std::cerr << error << '\n';
     return 1;
   }
   return server.Run();

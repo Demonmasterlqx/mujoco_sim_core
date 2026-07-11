@@ -15,6 +15,11 @@ struct ServerConfig {
   std::uint32_t status_period_ms = 100;
   bool headless = false;
   std::string initial_keyframe;
+  std::string log_level = "info";
+  std::string log_file;
+  std::uint32_t log_file_max_size_mb = 10;
+  std::uint32_t log_file_max_files = 5;
+  std::uint32_t log_summary_period_ms = 5000;
 };
 
 bool LoadConfigFile(const std::string& path, ServerConfig* config,

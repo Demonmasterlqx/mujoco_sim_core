@@ -63,6 +63,29 @@ if ! wait "${server_pid}"; then
 fi
 server_pid=""
 
+for event in server_starting model_loaded server_started \
+             controller_registered controller_activated tick_summary; do
+  if ! grep -Fq "event=${event}" "${server_log}"; then
+    echo "server log is missing event=${event}" >&2
+    sed -n '1,240p' "${server_log}" >&2 || true
+    exit 1
+  fi
+done
+if ! grep -Fq "event=server_stopped reason=max_ticks exit_code=0" \
+  "${server_log}"; then
+  echo "server log is missing the max_ticks shutdown reason" >&2
+  sed -n '1,240p' "${server_log}" >&2 || true
+  exit 1
+fi
+if grep -Eq "event=(tick_published|commit_accepted)" "${server_log}"; then
+  echo "info server logging contains per-Tick or per-Commit traffic" >&2
+  exit 1
+fi
+if grep -Fq "event=commit_duplicate" "${server_log}"; then
+  echo "normal idempotent Commit replay leaked into info logs" >&2
+  exit 1
+fi
+
 if ! grep -Eq "wbr-lqr summary ticks=${ticks} .*nonzero_ticks=[1-9][0-9]*" \
     "${adapter_log}"; then
   echo "WBR adapter summary did not prove closed-loop control" >&2

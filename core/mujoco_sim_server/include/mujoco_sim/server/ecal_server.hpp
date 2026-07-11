@@ -1,7 +1,8 @@
 #pragma once
 
-#include <condition_variable>
 #include <atomic>
+#include <chrono>
+#include <condition_variable>
 #include <cstdint>
 #include <memory>
 #include <mutex>
@@ -17,6 +18,10 @@
 namespace mujoco_sim::server {
 
 class SimViewer;
+class CallbackState;
+class ServerLogger;
+class WarningLimiter;
+struct RuntimeMetrics;
 
 class EcalServer {
  public:
@@ -35,11 +40,18 @@ class EcalServer {
  private:
   int RunLoop();
   int RunGraphical();
-  void RegisterServices();
+  bool RegisterServices(std::string* error_message);
   void RegisterSubscribersAndPublishers();
-  void PublishTicks(const std::vector<mujoco_sim::v1::Tick>& ticks);
+  void ShutdownTransport();
+  void PublishTicks(const std::vector<mujoco_sim::v1::Tick>& ticks,
+                    bool retransmission);
   void PublishStatus();
   std::vector<mujoco_sim::v1::Tick> OpenTickLocked();
+  void MaybeLogSummary(std::chrono::steady_clock::time_point now, bool final);
+  int FinishRun(int exit_code, const std::string& reason);
+  void StopWithReason(const std::string& reason);
+  bool ShouldLogWarning(const char* key, std::uint64_t* suppressed);
+  void RecordMalformedMessage();
 
   int HandleGetAvailableResources(const std::string& request,
                                   std::string* response);
@@ -53,6 +65,10 @@ class EcalServer {
   void HandleHeartbeatBytes(const void* data, std::size_t size);
 
   ServerConfig config_;
+  std::unique_ptr<ServerLogger> logger_;
+  std::unique_ptr<WarningLimiter> warning_limiter_;
+  std::unique_ptr<RuntimeMetrics> metrics_;
+  std::shared_ptr<CallbackState> callback_state_;
   mujoco_sim::core::SimulationCore core_;
   std::unique_ptr<mujoco_sim::core::SimulationSnapshot> viewer_snapshot_;
   std::unique_ptr<SimViewer> viewer_;
@@ -65,6 +81,9 @@ class EcalServer {
   std::mutex mutex_;
   std::condition_variable condition_;
   std::atomic<bool> stop_requested_{false};
+  std::string stop_reason_ = "external_stop";
+  mujoco_sim::v1::ServerState last_logged_state_ =
+      mujoco_sim::v1::SERVER_STATE_UNSPECIFIED;
   bool owns_ecal_ = false;
 };
 

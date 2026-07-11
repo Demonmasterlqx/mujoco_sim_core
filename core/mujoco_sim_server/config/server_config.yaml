@@ -45,3 +45,32 @@ fields:
     cli:
       flags: [--headless]
       inverse_flags: [--gui]
+  log_level:
+    type: enum
+    description: Minimum server log level
+    values: [trace, debug, info, warn, error, critical, "off"]
+    default: info
+    cli: [--log-level]
+  log_file:
+    type: path
+    description: Optional rotating server log file
+    default: ""
+    cli: [--log-file]
+  log_file_max_size_mb:
+    type: uint32
+    description: Maximum size of each rotating log file in MiB
+    default: 10
+    min: 1
+    cli: [--log-file-max-size-mb]
+  log_file_max_files:
+    type: uint32
+    description: Total number of rotating log files, including the active file
+    default: 5
+    min: 1
+    max: 200000
+    cli: [--log-file-max-files]
+  log_summary_period_ms:
+    type: uint32
+    description: Runtime summary period in milliseconds; zero disables summaries
+    default: 5000
+    cli: [--log-summary-period-ms]
