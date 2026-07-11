@@ -113,16 +113,25 @@ V1 不实现 observer-only adapter、异步相机/点云、动态 contact list�
 职责：
 
 - 封装 eCAL 初始化、registry service 调用、Tick 订阅、Commit/Heartbeat 发布。
-- 提供同步 adapter runner：用户只需实现 `Tick -> commands` 回调。
-- 处理 service discovery 等待、session/epoch/tick 继承、重复 Tick 下的 Commit 重发；并发
-  收到同一 Tick 时控制回调最多执行一次，其余路径重发缓存 Commit。
-- 对 `TIMED_OUT` Tick 使用 try-lock 尝试恢复且不计入 Run Tick 上限；订阅 status，在匹配
-  session 为 `ERROR` 时停止；Run/析构自动尽力注销并通过 `lifecycle_warning` 暴露诊断。
+- 提供显式 `Start -> Activate -> WaitForTick -> Commit -> Unregister` 同步 API；eCAL callback
+  只负责 transport，用户控制代码始终运行在调用方业务线程。
+- 管理 queued/outstanding/committed 三阶段状态；同一时间只交付一个未提交 Tick，相同 Tick
+  不重复交付，已提交 Tick 重传时自动重发不可变 Commit。
+- 对 `TIMED_OUT` 后续 Tick 使用单元素 latest-value mailbox；订阅 status，在匹配 session
+  为 `ERROR` 或被替换时唤醒等待方并通过 `lifecycle_warning` 暴露诊断。
+- 根据 registration layout 本地校验 command 完整性、唯一性、标量维度、有限值和 ctrlrange，
+  并按布局顺序规范化 wire payload；校验失败保留 outstanding Tick 供调用方修正。
+- 使用共享 callback lease state 隔离 eCAL 延迟回调与 Client 生命周期；endpoint teardown
+  先断开 owner 再排空 lease。生命周期 service/Commit 操作和 publisher 写入分别串行化，
+  `Stop()` 可无阻塞取消正在进行的 Start/Activate。
 
 约束：
 
 - 不直接访问 MuJoCo。
 - 不写共享内存中的 `mjData`。
+- Commit 使用 pub/sub 且没有同步业务回执；本地成功只表示已缓存并尝试发送，可靠性依靠
+  Server 重发 Tick 后 SDK 幂等重发缓存 Commit。
+- 不提供 `Run(handler, max_ticks)` 或 `CommitError()`；Tick 上限和控制错误处理属于应用层。
 
 ### `mujoco_sim_sample_adapter`
 
@@ -140,7 +149,8 @@ V1 不实现 observer-only adapter、异步相机/点云、动态 contact list�
 
 - 迁移 `CosmosMount/wbr_mujoco` 的 WBR LQR 运行时控制头文件、MJCF 和 mesh，记录固定的
   upstream commit 与迁移差异。
-- 将原四线程/latest-value 控制流程改写为每个 V1 Tick 执行一次的确定性同步 pipeline，
+- 将原四线程/latest-value 控制流程改写为每个 SDK 交付 Tick 执行一次的确定性同步
+  pipeline；正常 `ACTIVE` lockstep 对应每个 V1 Tick，超时恢复允许 mailbox 合并中间值。
   尽可能保持 IMU、融合、双腿解算、里程计、FSM、VMC/LQR 和六电机力矩逻辑不变。
 - 提供可执行 adapter、server/adapter YAML、headless 与 GUI 闭环示例。
 - 将 IMU 以及六个语义电机的全部 position/velocity/effort state 和 effort command 名称
@@ -170,9 +180,10 @@ V1 不实现 observer-only adapter、异步相机/点云、动态 contact list�
    per-controller immutable Tick。`ACTIVE` 是 required recipient，`TIMED_OUT` 仅是恢复
    recipient；同一 open Tick 的重传必须保持 payload 不变。Core 只保证生成 issued Tick，
    transport 持续尝试发布但不保证对端收到；minor 0 的超时 Tick 在线上降级为 `ACTIVE`。
-6. SDK 对 `ACTIVE` Tick 串行执行 `Tick -> commands`，重复 Tick 重发缓存 Commit。对
-   `TIMED_OUT` Tick 使用 try-lock，忙时丢弃；成功处理后提交的 Commit 不计入 SDK
-   `max_ticks`，新 Tick 的 handler 调用不得越过该严格上限。
+6. SDK callback 校验 Tick 后发送 Heartbeat，并把最新 Tick 放入有界 mailbox；业务线程通过
+   `WaitForTick()` 取出一个 outstanding Tick，完成计算后显式 `Commit()`。未提交时不能再次
+   Wait；重复 Tick 不重复执行控制逻辑，已有 Commit 时自动原样重发。`TIMED_OUT` 期间只
+   保留最大 tick ID，应用层决定恢复 Tick 是否计入自身进度，SDK 不再管理 `max_ticks`。
 7. Server 校验 identity、ownership、完整命令、finite 值和 ctrl range。有效 `ACTIVE`
    Commit 加入本 Tick Barrier；required 集合完成后统一写入命令并执行一次 `mj_step()`。
 8. 单个 required adapter 超时后转为 `TIMED_OUT`、清零 actuator 并移出当前 Barrier，其他
@@ -207,15 +218,18 @@ V1 不实现 observer-only adapter、异步相机/点云、动态 contact list�
 - 状态工具单元测试：CLI、status publisher/epoch、资源成功/失败、排序、人类输出新增
   Last commit/State since/Timeouts/Barrier 列，以及 JSON 中 optional Commit、状态、超时和
   Barrier 字段、转义/uint64 精度及 NDJSON。
-- `mujoco_sim_adapter_sdk`：Commit/Heartbeat、重复 Tick 与并发 handler、`TIMED_OUT`
-  try-lock/计数、严格 Tick 上限、匹配 `ERROR`/替换 status 停止、callback 排空、注销失败重试、
-  激活前停止窗口、自动尽力注销和 lifecycle warning 合并。
+- `mujoco_sim_adapter_sdk`：显式 Activate/Wait/Commit、Wait 超时/停止/错误、单 outstanding、
+  并发 Wait 拒绝、latest-value mailbox、重复 Tick 自动重发、command 规范化和严格本地校验、
+  发布失败缓存、匹配 `ERROR`/替换 status 唤醒、冲突 Tick 诊断、Start/Activate/Commit/
+  Unregister 与 Stop 交错、publisher 串行化、延迟 callback 隔离与排空、注销失败重试和
+  lifecycle warning；真实 eCAL E2E
+  必须覆盖持有 Tick 超时后的 `TIMED_OUT -> recovery pending -> ACTIVE`。
 - `mujoco_sim_sample_adapter`：生成式 YAML/CLI、默认/自定义资源、固定 command 生成。
 - `mujoco_sim_wbr_lqr_demo`：上游 golden、同步 pipeline、全部资源改名/乱序映射、严格配置
   转换、输入脚本效果、真实模型 keyframe contract、GUI 非空像素截图、安装态配置闭环、
   6000 Tick headless 验收以及 GUI/Xvfb E2E。
 - 端到端：真实 eCAL server + sample adapter 分别在 headless 和 GUI 模式完成固定 Adapter
-  Tick、自动注销；测试确认注销后显式终止无限 server。server 自身的启动总 step 上限由
+  Tick、显式注销；测试确认注销后显式终止无限 server。server 自身的启动总 step 上限由
   server 单元/E2E 独立验证。
 - 状态工具端到端：查询 headless server 的状态与资源，持续输出 NDJSON，验证无 server 超时、SIGINT 正常退出、server 停止后的 stale 提示与空闲等待、同名重启后的 recovered 和资源重新查询。
 - 状态工具安装测试：staged `mujoco-sim-status --help` 可运行，ELF 允许生成配置所需的
@@ -258,7 +272,7 @@ source install/setup.bash
 mujoco-sim-sample-adapter --ticks 5 --command-value 0.1
 ```
 
-adapter 完成后自动尽力注销；上述无限运行 server 由操作者结束。有限 server 验收必须为
+adapter 完成后显式注销；上述无限运行 server 由操作者结束。有限 server 验收必须为
 adapter 接入前的自主 step 单独预留总 `max_ticks` 预算。
 
 ## 5. 审查约束

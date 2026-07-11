@@ -9,8 +9,8 @@
 
 本包当前提供：
 
-- 可执行程序 `mujoco-sim-sample-adapter`，负责解析参数并驱动 SDK 的
-  `Start()`/`Run()` 生命周期。
+- 可执行程序 `mujoco-sim-sample-adapter`，负责解析参数并驱动 SDK 的显式
+  `Start()`/`Activate()`/`WaitForTick()`/`Commit()` 生命周期。
 - 可复用的参数解析和固定 command 辅助库。
 - headless 与 GUI server 的五 Tick 端到端测试。
 
@@ -64,7 +64,7 @@ source install/setup.bash
 | `--controller-id ID` | `sample_controller` | controller 唯一 ID；不能为空。 |
 | `--observations a,b` | `hinge_pos,hinge_vel` | 逗号分隔的唯一 observation 名称；空列表允许。 |
 | `--commands a,b` | `hinge_motor` | 逗号分隔的唯一 actuator 名称；最终必须至少有一个名称。 |
-| `--ticks N` | `0` | 处理 N 个不同的新 Tick 后成功退出；`0` 表示无限等待。 |
+| `--ticks N` | `0` | 对 N 个已交付 `ACTIVE` Tick 完成本地 Commit 后退出；`0` 表示无限等待。 |
 | `--command-value VALUE` | `0.0` | 为 Tick layout 中每个 command 提交的 `double` 标量。 |
 | `--timeout-ms N` | `1000` | 注册给 server 的每 Tick Commit 等待上限；`0` 表示使用 server 默认 timeout。 |
 | `--service-timeout-ms N` | `5000` | 注册和激活各自等待 registry service 的总上限，单位毫秒。 |
@@ -175,7 +175,7 @@ mujoco-sim-sample-adapter \
   --service-timeout-ms 5000
 ```
 
-Adapter 处理并提交 5 个不同的 `ACTIVE` Tick 后自动尽力注销并返回 `0`；server 继续按模型
+Adapter 处理并提交 5 个不同的 `ACTIVE` Tick 后显式注销并返回 `0`；server 继续按模型
 timestep 自主运行，关闭 viewer 结束进程。
 
 ## Headless Server 双终端联调
@@ -250,20 +250,21 @@ mujoco-sim-sample-adapter \
   调用 Activate。新激活的 Adapter 从下一 Tick 加入固定 Barrier。
 - `command_value` 必须是有限值，并处于 actuator control range 内。示例模型的
   `hinge_motor` 范围是 `[-1, 1]`。
-- handler 必须在 controller timeout 内提交完整 command。Sample 自动覆盖 Tick layout
-  中的全部 command，但 server timeout 仍应留出通信和调度余量。
+- 业务循环必须在 controller timeout 内计算并提交完整 command。Sample 自动覆盖 Tick
+  layout 中的全部 command，但 server timeout 仍应留出通信和调度余量。
 
 可执行程序的退出行为：
 
 | 返回值 | 条件 |
 |---:|---|
-| `0` | `-h/--help`；或 `--ticks N` 中的 `N > 0` 且已处理 N 个不同 Tick。 |
+| `0` | `-h/--help`；或 `--ticks N` 中的 `N > 0` 且已在本地 Commit N 个 `ACTIVE` Tick。 |
 | `1` | CLI 解析失败、SDK `Start()` 失败、激活失败，或 eCAL 在未请求 Stop 时结束。 |
 
-`--ticks` 只统计首次处理的 `ACTIVE` Tick；`TIMED_OUT` 恢复 Tick 使用 SDK try-lock 且不计
-入进度。Sample 订阅匹配 server status：本 session 进入 `ERROR` 时 SDK 停止，`Run()` 当前
-返回 `0`，程序会把具体原因打印为 `adapter lifecycle warning`。正常达到 Tick 数、主动停止
-或析构时 SDK 自动尽力注销；注销失败也打印该 warning，但不覆盖主返回值。
+`--ticks` 只统计 SDK 本地接受 Commit 的 `ACTIVE` Tick；这表示 payload 已校验、缓存并尝试
+发布，不是 Server 同步确认。`TIMED_OUT` 恢复 Tick 仍会由显式业务循环处理并提交，但不计
+入进度。Sample 通过 `WaitForTick()` 接收匹配 session 的 `ERROR` 或
+replacement 诊断并以 `1` 退出。正常达到 Tick 数后程序显式注销；析构仍提供尽力注销后备。
+注销失败单独打印，但不覆盖已经确定的主返回值。
 
 `--ticks 0` 没有基于 Tick 数的成功退出条件。server 正常达到自己的全局 `max_ticks` 后发布
 `STOPPED`，SDK 只对匹配 session 的 `ERROR` 自动停止，因此仍应由进程编排管理这种终止。
@@ -277,7 +278,7 @@ Adapter `--ticks` 简单设成相同值。
 | 测试 | 覆盖范围 |
 |---|---|
 | `sample_adapter_test` | 名称列表、固定 command、生成式 CLI/YAML、严格校验、优先级和事务性。 |
-| `sample_adapter_e2e` | 启动真实无限 headless server 和 Adapter，完成 5 个 Adapter Tick、验证自动注销后终止 server。 |
+| `sample_adapter_e2e` | 启动真实无限 headless server 和 Adapter，完成 5 个 Adapter Tick、验证显式注销后终止 server。 |
 | `sample_adapter_gui_e2e` | 同一动态生命周期的 GUI 路径；确认注销后终止 server，无显示环境通过 `xvfb-run`。 |
 
 从仓库根目录运行：

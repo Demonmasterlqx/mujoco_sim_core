@@ -10,7 +10,9 @@
 - Made the model timestep explicit at `0.001` seconds.
 - Added Core named-keyframe loading and start the WBR model from `home`.
 - Replaced the upstream four-thread/shared-memory topology with one
-  deterministic `ControllerPipeline::Step` per protocol Tick.
+  deterministic `ControllerPipeline::Step` per SDK-delivered Tick. Normal
+  `ACTIVE` lockstep delivers every protocol Tick; timeout recovery may coalesce
+  intermediate Tick values in the SDK mailbox.
 - Preserved upstream IMU, command fusion, dual leg solve, odometry, FSM,
   VMC/LQR, motor ordering, signs, gains, and coefficient tables.
 - Added a generated YAML/CLI configuration and the executable
@@ -49,7 +51,8 @@ the staged adapter/config/model from a different working directory.
 
 1. Upstream used independent threads and latest-value message reads. The port
    processes exactly one observation snapshot and produces one command set per
-   simulator Tick.
+   SDK-delivered Tick. During normal `ACTIVE` lockstep this is every simulator
+   Tick; during timeout recovery the SDK may coalesce intermediate Tick values.
 2. Upstream optional IMU noise injection lived in shared-memory I/O and was not
    migrated. Mahony and ground-truth quaternion bypass modes remain
    configurable.
@@ -64,16 +67,18 @@ the staged adapter/config/model from a different working directory.
 
 ## Migration Friction And Next-Stage Goals
 
-### P0: Structured Adapter Handler Failure
+### Resolved: Adapter Callback Coupling
 
-The SDK callback can only return a command vector. A decoder/controller
-exception currently requires `client.Stop()` plus an empty return value, and
-the adapter reports the real error only at process exit.
+The initial port ran decoder/controller code inside the SDK's eCAL Tick
+callback and forced command creation and Commit publication into one return
+path. That made thread ownership, delayed Commit, and controller exceptions
+awkward.
 
-Target improvement: let a Tick handler return either commands or a structured
-error. Publish an error Commit when protocol state permits, preserve the
-diagnostic in server status, and define whether the server pauses or removes
-that controller.
+The SDK now exposes explicit `Activate()`, `WaitForTick()`, and `Commit()`
+operations. The WBR pipeline runs only on its business thread, and failures
+stop and unregister the local session without publishing an empty error
+Commit. Tick retransmission and latest-value timeout recovery remain SDK
+transport responsibilities.
 
 ### P0: Typed Semantic Interface Binding
 

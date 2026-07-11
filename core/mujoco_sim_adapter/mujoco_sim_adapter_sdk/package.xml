@@ -10,6 +10,7 @@
   <depend>ecal</depend>
   <depend>mujoco_sim_protocol</depend>
   <test_depend>gtest</test_depend>
+  <test_depend>mujoco_sim_server</test_depend>
 
   <export>
     <build_type>cmake</build_type>

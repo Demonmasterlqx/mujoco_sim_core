@@ -1,12 +1,11 @@
 #include <algorithm>
-#include <atomic>
+#include <chrono>
 #include <cmath>
 #include <cstdint>
 #include <iostream>
-#include <mutex>
 #include <string>
-#include <vector>
 #include <utility>
+#include <vector>
 
 #include <mujoco_sim/adapter_sdk/sync_adapter_client.hpp>
 #include <mujoco_sim/wbr_lqr_demo/tick_controller.hpp>
@@ -67,8 +66,6 @@ int main(int argc, char** argv) {
   mujoco_sim::wbr_lqr_demo::TickController controller(
       client.registration().layout(), config.adapter.interfaces,
       config.pipeline, config.input_script);
-  std::atomic<bool> handler_failed{false};
-  std::mutex error_mutex;
   std::string handler_error;
   std::uint64_t handled_ticks = 0;
   std::uint64_t nonzero_ticks = 0;
@@ -77,57 +74,86 @@ int main(int argc, char** argv) {
   std::uint64_t e_effects = 0;
   std::uint64_t q_effects = 0;
 
-  const int run_result = client.Run(
-      [&](const mujoco_sim::v1::Tick& tick) {
-        try {
-          auto commands = controller.HandleTick(tick);
-          const auto& input = controller.last_input();
-          ++handled_ticks;
-          clamp_count += controller.last_clamp_count();
-          if (std::any_of(commands.begin(), commands.end(), [](const auto& command) {
-                return std::fabs(command.value) > 1e-8;
-              })) {
-            ++nonzero_ticks;
-          }
-          if (config.log_every_ticks > 0 &&
-              handled_ticks % config.log_every_ticks == 0 &&
-              controller.last_output().has_value()) {
-            std::cout << "wbr-lqr tick=" << handled_ticks
-                      << " fsm=" << FsmName(controller.last_output()->fsm_state)
-                      << " clamps=" << clamp_count << '\n';
-          }
-          if (controller.last_output().has_value()) {
-            const auto& command = controller.last_output()->command;
-            if (input.space && command.move) ++space_effects;
-            if (input.e &&
-                std::fabs(command.len - config.pipeline.chassis.lmid) < 1e-6F) {
-              ++e_effects;
-            }
-            if (input.q &&
-                std::fabs(command.len - config.pipeline.chassis.lmin) < 1e-6F) {
-              ++q_effects;
-            }
-          }
-          return commands;
-        } catch (const std::exception& exception) {
-          {
-            std::lock_guard lock(error_mutex);
-            handler_error = exception.what();
-          }
-          handler_failed = true;
-          client.Stop();
-          return std::vector<mujoco_sim::adapter_sdk::CommandValue>{};
+  int run_result = 0;
+  if (!client.Activate(&error)) {
+    handler_error = error;
+    run_result = 1;
+  }
+  while (run_result == 0 &&
+         (config.adapter.max_ticks == 0 ||
+          handled_ticks < config.adapter.max_ticks)) {
+    mujoco_sim::v1::Tick tick;
+    const auto wait_result = client.WaitForTick(
+        std::chrono::milliseconds(100), &tick, &error);
+    if (wait_result == mujoco_sim::adapter_sdk::TickWaitResult::kTimeout) {
+      continue;
+    }
+    if (wait_result != mujoco_sim::adapter_sdk::TickWaitResult::kReceived) {
+      handler_error = error.empty() ? "adapter stopped while waiting for Tick"
+                                    : error;
+      run_result = 1;
+      break;
+    }
+
+    try {
+      auto commands = controller.HandleTick(tick);
+      const auto& input = controller.last_input();
+      if (!client.Commit(tick, commands, &error)) {
+        handler_error = "failed to Commit Tick: " + error;
+        run_result = 1;
+        break;
+      }
+      if (tick.controller_state() == mujoco_sim::v1::ACTIVE) {
+        ++handled_ticks;
+      }
+      clamp_count += controller.last_clamp_count();
+      if (tick.controller_state() == mujoco_sim::v1::ACTIVE &&
+          std::any_of(commands.begin(), commands.end(),
+                      [](const auto& command) {
+                        return std::fabs(command.value) > 1e-8;
+                      })) {
+        ++nonzero_ticks;
+      }
+      if (tick.controller_state() == mujoco_sim::v1::ACTIVE &&
+          config.log_every_ticks > 0 &&
+          handled_ticks % config.log_every_ticks == 0 &&
+          controller.last_output().has_value()) {
+        std::cout << "wbr-lqr tick=" << handled_ticks
+                  << " fsm=" << FsmName(controller.last_output()->fsm_state)
+                  << " clamps=" << clamp_count << '\n';
+      }
+      if (tick.controller_state() == mujoco_sim::v1::ACTIVE &&
+          controller.last_output().has_value()) {
+        const auto& command = controller.last_output()->command;
+        if (input.space && command.move) ++space_effects;
+        if (input.e &&
+            std::fabs(command.len - config.pipeline.chassis.lmid) < 1e-6F) {
+          ++e_effects;
         }
-      },
-      config.adapter.max_ticks);
+        if (input.q &&
+            std::fabs(command.len - config.pipeline.chassis.lmin) < 1e-6F) {
+          ++q_effects;
+        }
+      }
+    } catch (const std::exception& exception) {
+      handler_error = exception.what();
+      run_result = 1;
+      client.Stop();
+      break;
+    }
+  }
+
+  std::string unregister_error;
+  if (!client.Unregister(&unregister_error)) {
+    std::cerr << "adapter unregister failed: " << unregister_error << '\n';
+  }
 
   if (!client.lifecycle_warning().empty()) {
     std::cerr << "adapter lifecycle warning: " << client.lifecycle_warning()
               << '\n';
   }
 
-  if (handler_failed) {
-    std::lock_guard lock(error_mutex);
+  if (!handler_error.empty()) {
     std::cerr << handler_error << '\n';
     return 1;
   }

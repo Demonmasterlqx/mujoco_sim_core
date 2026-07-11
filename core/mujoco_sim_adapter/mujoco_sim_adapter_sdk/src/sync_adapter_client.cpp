@@ -1,9 +1,11 @@
 #include <mujoco_sim/adapter_sdk/sync_adapter_client.hpp>
 
-#include <chrono>
+#include <algorithm>
+#include <cmath>
 #include <limits>
 #include <string>
 #include <thread>
+#include <unordered_map>
 #include <utility>
 
 #include <ecal/ecal.h>
@@ -12,7 +14,6 @@
 namespace mujoco_sim::adapter_sdk {
 namespace {
 
-using mujoco_sim::v1::COMMIT_ERROR;
 using mujoco_sim::v1::COMMIT_OK;
 using mujoco_sim::v1::OK;
 
@@ -48,23 +49,6 @@ bool SameTickPayload(const mujoco_sim::v1::Tick& lhs,
          normalized_rhs.SerializeAsString();
 }
 
-}  // namespace
-
-mujoco_sim::v1::AdapterCommit BuildCommit(
-    const mujoco_sim::v1::Tick& tick,
-    const std::vector<CommandValue>& commands) {
-  mujoco_sim::v1::AdapterCommit commit;
-  *commit.mutable_header() = tick.header();
-  commit.set_controller_id(tick.controller_id());
-  commit.set_status(COMMIT_OK);
-  for (const auto& command : commands) {
-    auto* block = commit.add_commands();
-    block->set_name(command.name);
-    block->add_values(command.value);
-  }
-  return commit;
-}
-
 mujoco_sim::v1::Heartbeat BuildHeartbeat(
     const mujoco_sim::v1::Tick& tick) {
   mujoco_sim::v1::Heartbeat heartbeat;
@@ -73,16 +57,24 @@ mujoco_sim::v1::Heartbeat BuildHeartbeat(
   return heartbeat;
 }
 
+}  // namespace
+
 SyncAdapterClient::SyncAdapterClient(AdapterOptions options)
-    : options_(std::move(options)) {}
+    : options_(std::move(options)),
+      callback_state_(std::make_shared<CallbackState>()) {
+  callback_state_->client = this;
+}
 
 SyncAdapterClient::~SyncAdapterClient() {
   Stop();
   StopTickReception();
   std::string ignored;
   Unregister(&ignored);
-  commit_publisher_.reset();
-  heartbeat_publisher_.reset();
+  {
+    std::lock_guard publish_lock(publisher_mutex_);
+    commit_publisher_.reset();
+    heartbeat_publisher_.reset();
+  }
   registry_client_.reset();
   if (owns_ecal_) {
     eCAL::Finalize();
@@ -90,6 +82,22 @@ SyncAdapterClient::~SyncAdapterClient() {
 }
 
 bool SyncAdapterClient::Start(std::string* error_message) {
+  if (error_message == nullptr) {
+    return false;
+  }
+  std::lock_guard lifecycle_lock(lifecycle_mutex_);
+  error_message->clear();
+  {
+    std::lock_guard lock(mutex_);
+    if (started_) {
+      *error_message = "adapter client has already been started";
+      return false;
+    }
+  }
+  if (stop_requested_) {
+    *error_message = "adapter client has been stopped";
+    return false;
+  }
   if (options_.controller_id.empty()) {
     *error_message = "controller_id is required";
     return false;
@@ -122,22 +130,71 @@ bool SyncAdapterClient::Start(std::string* error_message) {
       mujoco_sim::protocol::CommitTopicName(options_.server_name));
   heartbeat_publisher_ = std::make_unique<eCAL::CPublisher>(
       mujoco_sim::protocol::HeartbeatTopicName(options_.server_name));
+  {
+    std::lock_guard callback_lock(callback_state_->mutex);
+    callback_state_->client = this;
+    callback_state_->enabled = true;
+  }
+  const auto callback_state = callback_state_;
   tick_subscriber_ = std::make_unique<eCAL::CSubscriber>(
       mujoco_sim::protocol::TickTopicName(options_.server_name,
                                           options_.controller_id));
   tick_subscriber_->SetReceiveCallback(
-      [this](const eCAL::STopicId&, const eCAL::SDataTypeInformation&,
-             const eCAL::SReceiveCallbackData& data) {
-        HandleTickBytes(data.buffer, data.buffer_size);
+      [callback_state](const eCAL::STopicId&,
+                       const eCAL::SDataTypeInformation&,
+                       const eCAL::SReceiveCallbackData& data) {
+        CallbackLease callback(callback_state);
+        if (callback.client() != nullptr) {
+          callback.client()->HandleTickBytes(data.buffer, data.buffer_size);
+        }
       });
   status_subscriber_ = std::make_unique<eCAL::CSubscriber>(
       mujoco_sim::protocol::StatusTopicName(options_.server_name));
   status_subscriber_->SetReceiveCallback(
-      [this](const eCAL::STopicId&, const eCAL::SDataTypeInformation&,
-             const eCAL::SReceiveCallbackData& data) {
-        HandleStatusBytes(data.buffer, data.buffer_size);
+      [callback_state](const eCAL::STopicId&,
+                       const eCAL::SDataTypeInformation&,
+                       const eCAL::SReceiveCallbackData& data) {
+        CallbackLease callback(callback_state);
+        if (callback.client() != nullptr) {
+          callback.client()->HandleStatusBytes(data.buffer, data.buffer_size);
+        }
       });
 
+  return FinishStart(
+      [this] {
+        std::string ignored;
+        UnregisterWith(
+            [this](
+                const mujoco_sim::v1::UnregisterControllerRequest& request,
+                mujoco_sim::v1::UnregisterControllerResponse* response,
+                std::string* unregister_error) {
+              return CallService(
+                  mujoco_sim::protocol::kUnregisterControllerMethod, request,
+                  response, unregister_error, true);
+            },
+            &ignored);
+      },
+      error_message);
+}
+
+bool SyncAdapterClient::FinishStart(
+    const std::function<void()>& unregister,
+    std::string* error_message) {
+  bool cancelled = false;
+  {
+    std::lock_guard lock(mutex_);
+    cancelled = stop_requested_;
+    if (!cancelled) {
+      monitor_ecal_ = true;
+      started_ = true;
+    }
+  }
+  if (cancelled) {
+    StopTickReception();
+    unregister();
+    *error_message = "adapter start was cancelled";
+    return false;
+  }
   return true;
 }
 
@@ -165,31 +222,94 @@ bool SyncAdapterClient::Register(std::string* error_message) {
   }
   {
     std::lock_guard lock(mutex_);
-    handled_ticks_ = 0;
-    have_last_commit_ = false;
-    last_tick_.Clear();
-    last_commit_.Clear();
-    registered_ = true;
+    queued_tick_.reset();
+    outstanding_tick_.reset();
+    committed_tick_.reset();
+    cached_commit_.reset();
+    terminal_error_.clear();
     lifecycle_warning_.clear();
+    registered_ = true;
   }
   return true;
 }
 
 bool SyncAdapterClient::Activate(std::string* error_message) {
+  std::lock_guard lifecycle_lock(lifecycle_mutex_);
+  return ActivateWith(
+      [this](const mujoco_sim::v1::ActivateControllerRequest& request,
+             mujoco_sim::v1::ActivateControllerResponse* response,
+             std::string* error) {
+        return CallService(mujoco_sim::protocol::kActivateControllerMethod,
+                           request, response, error);
+      },
+      std::chrono::milliseconds(100), error_message);
+}
+
+bool SyncAdapterClient::ActivateWith(
+    const std::function<bool(
+        const mujoco_sim::v1::ActivateControllerRequest&,
+        mujoco_sim::v1::ActivateControllerResponse*, std::string*)>& call,
+    std::chrono::milliseconds discovery_delay,
+    std::string* error_message) {
+  if (error_message == nullptr) {
+    return false;
+  }
+  error_message->clear();
+  {
+    std::lock_guard lock(mutex_);
+    if (!started_ || !registered_) {
+      *error_message = "adapter client must be started before activation";
+      return false;
+    }
+    if (activated_) {
+      *error_message = "adapter client has already been activated";
+      return false;
+    }
+    if (stop_requested_) {
+      *error_message = "adapter client has been stopped";
+      return false;
+    }
+  }
+  if (!WaitBeforeActivation(discovery_delay)) {
+    *error_message = "adapter activation was cancelled";
+    return false;
+  }
+
   mujoco_sim::v1::ActivateControllerRequest request;
   request.set_controller_id(options_.controller_id);
   request.set_session_id(registration_.session_id());
   request.set_epoch(registration_.epoch());
 
+  {
+    std::lock_guard lock(mutex_);
+    if (stop_requested_) {
+      *error_message = "adapter activation was cancelled";
+      return false;
+    }
+    accepting_ticks_ = true;
+  }
   mujoco_sim::v1::ActivateControllerResponse response;
-  if (!CallService(mujoco_sim::protocol::kActivateControllerMethod, request,
-                   &response, error_message)) {
+  const bool called = call(request, &response, error_message);
+  if (!called || response.code() != OK) {
+    if (called) {
+      *error_message = response.message();
+    }
+    std::lock_guard lock(mutex_);
+    accepting_ticks_ = false;
+    queued_tick_.reset();
     return false;
   }
-  if (response.code() != OK) {
-    *error_message = response.message();
-    return false;
+  {
+    std::lock_guard lock(mutex_);
+    if (stop_requested_) {
+      accepting_ticks_ = false;
+      queued_tick_.reset();
+      *error_message = "adapter activation was cancelled";
+      return false;
+    }
+    activated_ = true;
   }
+  condition_.notify_all();
   return true;
 }
 
@@ -198,6 +318,13 @@ bool SyncAdapterClient::CallService(const std::string& method,
                                     const Request& request, Response* response,
                                     std::string* error_message,
                                     bool allow_after_stop) {
+  if (response == nullptr || error_message == nullptr) {
+    return false;
+  }
+  if (!registry_client_) {
+    *error_message = "registry client is not initialized";
+    return false;
+  }
   std::string bytes;
   if (!request.SerializeToString(&bytes)) {
     *error_message = "failed to serialize service request";
@@ -225,62 +352,228 @@ bool SyncAdapterClient::CallService(const std::string& method,
     }
     std::this_thread::sleep_for(std::chrono::milliseconds(50));
   }
-  *error_message = "service call timed out: " + method;
+  *error_message = stop_requested_ && !allow_after_stop
+                       ? "service call cancelled: " + method
+                       : "service call timed out: " + method;
   return false;
 }
 
-int SyncAdapterClient::Run(TickHandler handler, std::uint64_t max_ticks) {
+TickWaitResult SyncAdapterClient::WaitForTick(
+    std::chrono::milliseconds timeout, mujoco_sim::v1::Tick* tick,
+    std::string* error_message) {
+  if (tick == nullptr || error_message == nullptr) {
+    if (error_message != nullptr) {
+      *error_message = "tick and error_message must not be null";
+    }
+    return TickWaitResult::kError;
+  }
+  error_message->clear();
+  if (timeout.count() < 0) {
+    *error_message = "tick wait timeout must not be negative";
+    return TickWaitResult::kError;
+  }
+
+  std::unique_lock lock(mutex_);
+  if (!started_ || !activated_) {
+    *error_message = "adapter client must be activated before waiting";
+    return TickWaitResult::kError;
+  }
+  if (wait_in_progress_) {
+    *error_message = "another thread is already waiting for a Tick";
+    return TickWaitResult::kError;
+  }
+  if (outstanding_tick_.has_value()) {
+    *error_message = "the previously received Tick has not been committed";
+    return TickWaitResult::kError;
+  }
+  wait_in_progress_ = true;
+  const auto finish = [this] { wait_in_progress_ = false; };
+  const auto ready = [this] {
+    return queued_tick_.has_value() || !terminal_error_.empty() ||
+           stop_requested_.load() || (monitor_ecal_ && !eCAL::Ok());
+  };
+
+  bool signaled = ready();
+  if (!signaled && timeout == std::chrono::milliseconds::max()) {
+    while (!(signaled = ready())) {
+      condition_.wait_for(lock, std::chrono::milliseconds(50));
+    }
+  } else if (!signaled) {
+    signaled = condition_.wait_for(lock, timeout, ready);
+  }
+  if (!signaled) {
+    finish();
+    return TickWaitResult::kTimeout;
+  }
+  if (!terminal_error_.empty()) {
+    *error_message = terminal_error_;
+    finish();
+    return TickWaitResult::kError;
+  }
+  if (stop_requested_ || (monitor_ecal_ && !eCAL::Ok())) {
+    finish();
+    return TickWaitResult::kStopped;
+  }
+
+  outstanding_tick_ = std::move(queued_tick_);
+  queued_tick_.reset();
+  *tick = *outstanding_tick_;
+  finish();
+  return TickWaitResult::kReceived;
+}
+
+bool SyncAdapterClient::BuildValidatedCommit(
+    const mujoco_sim::v1::Tick& tick,
+    const std::vector<CommandValue>& commands,
+    mujoco_sim::v1::AdapterCommit* commit,
+    std::string* error_message) const {
+  if (commit == nullptr || error_message == nullptr) {
+    return false;
+  }
+  std::unordered_map<std::string, double> values;
+  values.reserve(commands.size());
+  for (const auto& command : commands) {
+    if (command.name.empty()) {
+      *error_message = "command name must not be empty";
+      return false;
+    }
+    if (!std::isfinite(command.value)) {
+      *error_message = "command value must be finite: " + command.name;
+      return false;
+    }
+    if (!values.emplace(command.name, command.value).second) {
+      *error_message = "duplicate actuator command: " + command.name;
+      return false;
+    }
+  }
+
+  mujoco_sim::v1::AdapterCommit output;
+  *output.mutable_header() = tick.header();
+  output.set_controller_id(tick.controller_id());
+  output.set_status(COMMIT_OK);
+  for (const auto& descriptor : registration_.layout().commands()) {
+    if (descriptor.dimension() != 1) {
+      *error_message = "unsupported non-scalar actuator command: " +
+                       descriptor.name();
+      return false;
+    }
+    const auto value = values.find(descriptor.name());
+    if (value == values.end()) {
+      *error_message = "missing actuator command: " + descriptor.name();
+      return false;
+    }
+    if (descriptor.has_ctrl_range() &&
+        (value->second < descriptor.ctrl_min() ||
+         value->second > descriptor.ctrl_max())) {
+      *error_message = "actuator command is outside ctrlrange: " +
+                       descriptor.name();
+      return false;
+    }
+    auto* block = output.add_commands();
+    block->set_name(descriptor.name());
+    block->add_values(value->second);
+  }
+  if (values.size() !=
+      static_cast<std::size_t>(registration_.layout().commands_size())) {
+    for (const auto& [name, _] : values) {
+      const auto known = std::find_if(
+          registration_.layout().commands().begin(),
+          registration_.layout().commands().end(),
+          [&name](const auto& descriptor) {
+            return descriptor.name() == name;
+          });
+      if (known == registration_.layout().commands().end()) {
+        *error_message = "unknown actuator command: " + name;
+        return false;
+      }
+    }
+    *error_message = "command set does not match the registered layout";
+    return false;
+  }
+  *commit = std::move(output);
+  return true;
+}
+
+bool SyncAdapterClient::Commit(
+    const mujoco_sim::v1::Tick& tick,
+    const std::vector<CommandValue>& commands,
+    std::string* error_message) {
+  std::lock_guard lifecycle_lock(lifecycle_mutex_);
+  return CommitWith(
+      tick, commands,
+      [this](const mujoco_sim::v1::AdapterCommit& commit) {
+        return PublishCommit(commit);
+      },
+      error_message);
+}
+
+bool SyncAdapterClient::CommitWith(
+    const mujoco_sim::v1::Tick& tick,
+    const std::vector<CommandValue>& commands,
+    const std::function<bool(const mujoco_sim::v1::AdapterCommit&)>& publish,
+    std::string* error_message) {
+  if (error_message == nullptr) {
+    return false;
+  }
+  error_message->clear();
+
+  mujoco_sim::v1::Tick canonical_tick;
   {
     std::lock_guard lock(mutex_);
-    handler_ = std::move(handler);
-    max_ticks_ = max_ticks;
-    accepting_ticks_ = !stop_requested_;
-  }
-  if (stop_requested_) {
-    StopTickReception();
-    std::string unregister_error;
-    if (!Unregister(&unregister_error)) {
-      AddLifecycleWarning("unregister failed: " + unregister_error);
+    if (!started_ || !activated_ || stop_requested_) {
+      *error_message = "adapter client is not active";
+      return false;
     }
-    return 0;
-  }
-  if (!WaitBeforeActivation(std::chrono::milliseconds(100))) {
-    StopTickReception();
-    std::string unregister_error;
-    if (!Unregister(&unregister_error)) {
-      AddLifecycleWarning("unregister failed: " + unregister_error);
+    if (outstanding_tick_.has_value() &&
+        SameTickIdentity(tick, *outstanding_tick_) &&
+        SameTickPayload(tick, *outstanding_tick_)) {
+      canonical_tick = *outstanding_tick_;
+    } else if (committed_tick_.has_value() &&
+               SameTickIdentity(tick, *committed_tick_) &&
+               SameTickPayload(tick, *committed_tick_)) {
+      canonical_tick = *committed_tick_;
+    } else {
+      *error_message = "Tick is not the current outstanding or committed Tick";
+      return false;
     }
-    return 0;
   }
-  std::string error;
-  if (!Activate(&error)) {
-    StopTickReception();
-    std::string unregister_error;
-    if (!Unregister(&unregister_error)) {
-      AddLifecycleWarning("unregister failed: " + unregister_error);
+
+  mujoco_sim::v1::AdapterCommit commit;
+  if (!BuildValidatedCommit(canonical_tick, commands, &commit,
+                            error_message)) {
+    return false;
+  }
+
+  {
+    std::lock_guard lock(mutex_);
+    if (stop_requested_ || !activated_) {
+      *error_message = "adapter client stopped before Commit";
+      return false;
     }
-    return stop_requested_ ? 0 : 1;
-  }
-  int result = 1;
-  while (!stop_requested_ && eCAL::Ok()) {
-    {
-      std::unique_lock lock(mutex_);
-      if (max_ticks > 0 && handled_ticks_ >= max_ticks) {
-        result = 0;
-        break;
+    if (outstanding_tick_.has_value() &&
+        SameTickIdentity(canonical_tick, *outstanding_tick_) &&
+        SameTickPayload(canonical_tick, *outstanding_tick_)) {
+      committed_tick_ = *outstanding_tick_;
+      cached_commit_ = commit;
+      outstanding_tick_.reset();
+    } else if (committed_tick_.has_value() && cached_commit_.has_value() &&
+               SameTickIdentity(canonical_tick, *committed_tick_) &&
+               SameTickPayload(canonical_tick, *committed_tick_)) {
+      if (commit.SerializeAsString() != cached_commit_->SerializeAsString()) {
+        *error_message = "a different Commit was already sent for this Tick";
+        return false;
       }
-      condition_.wait_for(lock, std::chrono::milliseconds(10));
+      commit = *cached_commit_;
+    } else {
+      *error_message = "Tick is no longer available for Commit";
+      return false;
     }
   }
-  if (stop_requested_) {
-    result = 0;
-  }
-  StopTickReception();
-  std::string unregister_error;
-  if (!Unregister(&unregister_error)) {
-    AddLifecycleWarning("unregister failed: " + unregister_error);
-  }
-  return result;
+
+  const bool published = publish(commit);
+  (void)published;
+  condition_.notify_all();
+  return true;
 }
 
 bool SyncAdapterClient::WaitBeforeActivation(std::chrono::milliseconds delay) {
@@ -300,6 +593,7 @@ void SyncAdapterClient::Stop() {
 }
 
 bool SyncAdapterClient::Unregister(std::string* error_message) {
+  std::lock_guard lifecycle_lock(lifecycle_mutex_);
   return UnregisterWith(
       [this](const mujoco_sim::v1::UnregisterControllerRequest& request,
              mujoco_sim::v1::UnregisterControllerResponse* response,
@@ -318,6 +612,7 @@ bool SyncAdapterClient::UnregisterWith(
   if (error_message == nullptr) {
     return false;
   }
+  error_message->clear();
   mujoco_sim::v1::UnregisterControllerRequest request;
   {
     std::lock_guard lock(mutex_);
@@ -347,6 +642,10 @@ bool SyncAdapterClient::CompleteUnregister(
   {
     std::lock_guard lock(mutex_);
     registered_ = false;
+    activated_ = false;
+    accepting_ticks_ = false;
+    queued_tick_.reset();
+    outstanding_tick_.reset();
   }
   Stop();
   return true;
@@ -359,9 +658,26 @@ void SyncAdapterClient::AddLifecycleWarning(const std::string& warning) {
   std::lock_guard lock(mutex_);
   if (lifecycle_warning_.empty()) {
     lifecycle_warning_ = warning;
-  } else {
+  } else if (lifecycle_warning_.find(warning) == std::string::npos) {
     lifecycle_warning_ += "; " + warning;
   }
+}
+
+void SyncAdapterClient::SetTerminalError(const std::string& error) {
+  {
+    std::lock_guard lock(mutex_);
+    if (terminal_error_.empty()) {
+      terminal_error_ = error;
+    }
+    if (lifecycle_warning_.empty()) {
+      lifecycle_warning_ = error;
+    } else if (lifecycle_warning_.find(error) == std::string::npos) {
+      lifecycle_warning_ += "; " + error;
+    }
+    accepting_ticks_ = false;
+  }
+  stop_requested_ = true;
+  condition_.notify_all();
 }
 
 std::string SyncAdapterClient::lifecycle_warning() const {
@@ -369,31 +685,49 @@ std::string SyncAdapterClient::lifecycle_warning() const {
   return lifecycle_warning_;
 }
 
-bool SyncAdapterClient::BeginTickCallback() {
-  std::lock_guard lock(mutex_);
-  ++active_tick_callbacks_;
-  return accepting_ticks_;
+SyncAdapterClient::CallbackLease::CallbackLease(
+    std::shared_ptr<CallbackState> state)
+    : state_(std::move(state)) {
+  std::lock_guard lock(state_->mutex);
+  if (state_->enabled && state_->client != nullptr) {
+    ++state_->active_callbacks;
+    client_ = state_->client;
+  }
 }
 
-void SyncAdapterClient::EndTickCallback() {
-  {
-    std::lock_guard lock(mutex_);
-    --active_tick_callbacks_;
+SyncAdapterClient::CallbackLease::~CallbackLease() {
+  if (client_ == nullptr) {
+    return;
   }
-  condition_.notify_all();
+  {
+    std::lock_guard lock(state_->mutex);
+    --state_->active_callbacks;
+  }
+  state_->condition.notify_all();
 }
 
 void SyncAdapterClient::StopTickReception() {
   {
+    std::lock_guard callback_lock(callback_state_->mutex);
+    callback_state_->enabled = false;
+    callback_state_->client = nullptr;
+  }
+  {
     std::lock_guard lock(mutex_);
     accepting_ticks_ = false;
   }
+  if (tick_subscriber_) {
+    tick_subscriber_->RemoveReceiveCallback();
+  }
+  if (status_subscriber_) {
+    status_subscriber_->RemoveReceiveCallback();
+  }
   tick_subscriber_.reset();
   status_subscriber_.reset();
-  std::unique_lock lock(mutex_);
-  condition_.wait(lock,
-                  [this] { return active_tick_callbacks_ == 0; });
-  handler_ = {};
+  std::unique_lock callback_lock(callback_state_->mutex);
+  callback_state_->condition.wait(
+      callback_lock,
+      [this] { return callback_state_->active_callbacks == 0; });
 }
 
 bool SyncAdapterClient::IsExpectedTick(
@@ -412,8 +746,7 @@ bool SyncAdapterClient::IsExpectedTick(
 }
 
 void SyncAdapterClient::HandleStatusBytes(const void* data, std::size_t size) {
-  TickCallbackGuard callback(this);
-  if (!callback.accepted() || data == nullptr || size == 0 ||
+  if (data == nullptr || size == 0 ||
       size > static_cast<std::size_t>(std::numeric_limits<int>::max())) {
     return;
   }
@@ -430,49 +763,35 @@ void SyncAdapterClient::HandleStatusBytes(const void* data, std::size_t size) {
       continue;
     }
     if (controller.session_id() != registration_.session_id()) {
-      AddLifecycleWarning("server replaced adapter session");
-      Stop();
+      SetTerminalError("server replaced adapter session");
       return;
     }
     if (controller.state() == mujoco_sim::v1::ERROR) {
-      AddLifecycleWarning(controller.message().empty()
-                              ? "server marked adapter as ERROR"
-                              : controller.message());
-      Stop();
+      SetTerminalError(controller.message().empty()
+                           ? "server marked adapter as ERROR"
+                           : controller.message());
       return;
     }
   }
 }
 
-SyncAdapterClient::TickCallbackGuard::TickCallbackGuard(
-    SyncAdapterClient* client)
-    : client_(client), accepted_(client_->BeginTickCallback()) {}
-
-SyncAdapterClient::TickCallbackGuard::~TickCallbackGuard() {
-  client_->EndTickCallback();
-}
-
 void SyncAdapterClient::HandleTickBytes(const void* data, std::size_t size) {
-  TickCallbackGuard callback(this);
-  if (!callback.accepted() || data == nullptr || size == 0 ||
+  if (data == nullptr || size == 0 ||
       size > static_cast<std::size_t>(std::numeric_limits<int>::max())) {
     return;
   }
   mujoco_sim::v1::Tick tick;
-  if (!tick.ParseFromArray(data, static_cast<int>(size))) {
+  if (!tick.ParseFromArray(data, static_cast<int>(size)) ||
+      !IsExpectedTick(tick)) {
     return;
   }
-  if (!IsExpectedTick(tick)) {
-    return;
-  }
-
   HandleTick(
       tick,
       [this](const mujoco_sim::v1::Heartbeat& heartbeat) {
         PublishHeartbeat(heartbeat);
       },
       [this](const mujoco_sim::v1::AdapterCommit& commit) {
-        PublishCommit(commit);
+        (void)PublishCommit(commit);
       });
 }
 
@@ -482,91 +801,108 @@ void SyncAdapterClient::HandleTick(
         publish_heartbeat,
     const std::function<void(const mujoco_sim::v1::AdapterCommit&)>&
         publish_commit) {
-  std::unique_lock tick_lock(tick_mutex_, std::defer_lock);
-  if (tick.controller_state() == mujoco_sim::v1::TIMED_OUT) {
-    if (!tick_lock.try_lock()) {
-      return;
-    }
-  } else {
-    tick_lock.lock();
-  }
-
-  TickHandler handler;
-  mujoco_sim::v1::AdapterCommit cached_commit;
-  bool duplicate = false;
+  std::optional<mujoco_sim::v1::AdapterCommit> retry_commit;
+  bool accepted = false;
+  bool queued = false;
   {
     std::lock_guard lock(mutex_);
-    if (!accepting_ticks_) {
+    if (!accepting_ticks_ || stop_requested_) {
       return;
     }
-    if (have_last_commit_ && SameTickIdentity(tick, last_tick_)) {
-      if (!SameTickPayload(tick, last_tick_)) {
+
+    const auto record_conflict = [&] {
+      const std::string warning =
+          "conflicting payload for Tick " +
+          std::to_string(tick.header().tick_id());
+      if (lifecycle_warning_.empty()) {
+        lifecycle_warning_ = warning;
+      } else if (lifecycle_warning_.find(warning) == std::string::npos) {
+        lifecycle_warning_ += "; " + warning;
+      }
+    };
+
+    const auto inspect_known = [&](const auto& known) {
+      return known.has_value() && SameTickIdentity(tick, *known);
+    };
+    if (inspect_known(committed_tick_)) {
+      if (!SameTickPayload(tick, *committed_tick_)) {
+        record_conflict();
         return;
       }
-      cached_commit = last_commit_;
-      duplicate = true;
+      retry_commit = cached_commit_;
+      accepted = true;
+    } else if (inspect_known(outstanding_tick_)) {
+      if (!SameTickPayload(tick, *outstanding_tick_)) {
+        record_conflict();
+        return;
+      }
+      accepted = true;
+    } else if (inspect_known(queued_tick_)) {
+      if (!SameTickPayload(tick, *queued_tick_)) {
+        record_conflict();
+        return;
+      }
+      accepted = true;
+    } else {
+      std::uint64_t newest_tick_id = 0;
+      bool have_known_tick = false;
+      const auto include = [&](const auto& known) {
+        if (known.has_value() && SameTickStream(tick, *known)) {
+          newest_tick_id = std::max(newest_tick_id,
+                                    known->header().tick_id());
+          have_known_tick = true;
+        }
+      };
+      include(committed_tick_);
+      include(outstanding_tick_);
+      include(queued_tick_);
+      if (have_known_tick && tick.header().tick_id() < newest_tick_id) {
+        return;
+      }
+      queued_tick_ = tick;
+      accepted = true;
+      queued = true;
     }
-    if (have_last_commit_ && SameTickStream(tick, last_tick_) &&
-        tick.header().tick_id() < last_tick_.header().tick_id()) {
-      return;
-    }
-    if (!duplicate && max_ticks_ > 0 && handled_ticks_ >= max_ticks_) {
-      return;
-    }
-    if (!duplicate) {
-      handler = handler_;
-    }
-  }
-  if (duplicate) {
-    publish_heartbeat(BuildHeartbeat(tick));
-    publish_commit(cached_commit);
-    return;
-  }
-  if (!handler) {
-    return;
   }
 
+  if (!accepted) {
+    return;
+  }
   publish_heartbeat(BuildHeartbeat(tick));
-  auto commands = handler(tick);
-  auto commit = BuildCommit(tick, commands);
-  if (commands.empty()) {
-    commit.set_status(COMMIT_ERROR);
-    commit.set_error_message("adapter handler returned no commands");
+  if (retry_commit.has_value()) {
+    publish_commit(*retry_commit);
   }
-
-  {
-    std::lock_guard lock(mutex_);
-    last_tick_ = tick;
-    last_commit_ = commit;
-    have_last_commit_ = true;
-    if (tick.controller_state() != mujoco_sim::v1::TIMED_OUT) {
-      handled_ticks_++;
-    }
+  if (queued) {
+    condition_.notify_all();
   }
-  publish_commit(commit);
-  condition_.notify_all();
 }
 
-void SyncAdapterClient::PublishCommit(
+bool SyncAdapterClient::PublishCommit(
     const mujoco_sim::v1::AdapterCommit& commit) {
-  if (!commit_publisher_) {
-    return;
-  }
   std::string bytes;
-  if (commit.SerializeToString(&bytes)) {
-    commit_publisher_->Send(bytes);
+  if (!commit.SerializeToString(&bytes)) {
+    return false;
   }
+  return PublishSerialized([this, &bytes] {
+    return commit_publisher_ != nullptr && commit_publisher_->Send(bytes);
+  });
 }
 
 void SyncAdapterClient::PublishHeartbeat(
     const mujoco_sim::v1::Heartbeat& heartbeat) {
-  if (!heartbeat_publisher_) {
-    return;
-  }
   std::string bytes;
   if (heartbeat.SerializeToString(&bytes)) {
-    heartbeat_publisher_->Send(bytes);
+    (void)PublishSerialized([this, &bytes] {
+      return heartbeat_publisher_ != nullptr &&
+             heartbeat_publisher_->Send(bytes);
+    });
   }
+}
+
+bool SyncAdapterClient::PublishSerialized(
+    const std::function<bool()>& publish) {
+  std::lock_guard publish_lock(publisher_mutex_);
+  return publish();
 }
 
 }  // namespace mujoco_sim::adapter_sdk

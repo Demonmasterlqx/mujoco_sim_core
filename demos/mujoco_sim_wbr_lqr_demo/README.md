@@ -16,7 +16,8 @@ scripted input, configuration, and actuator commands around that control logic.
 - Decode named Tick blocks into the upstream `msg_raw_state_t` motor/IMU
   structure.
 - Execute the upstream IMU, command fusion, leg solve, odometry, FSM, VMC, and
-  LQR stages once per simulator Tick.
+  LQR stages once per Tick delivered by the SDK. In normal `ACTIVE` lockstep,
+  this is once per simulator Tick.
 - Map six raw torques back to configured actuator resources and clamp them to
   the ranges returned by server registration.
 - Load strict generated YAML/CLI configuration for connection settings,
@@ -153,10 +154,11 @@ mujoco-sim-wbr-lqr-adapter \
 ```
 
 Both shipped configurations use server name `wbr`. The adapter's `max_ticks`
-counts 6000 newly handled `ACTIVE` Ticks. Server `max_ticks`, however, counts
+counts 6000 locally accepted Commits for delivered `ACTIVE` Ticks; Commit has
+no synchronous server acknowledgement. Server `max_ticks`, however, counts
 all simulation steps since model load, including autonomous steps before the
 adapter registers. The command above therefore overrides the shipped server
-value `6000` with `0`; after the adapter automatically unregisters and exits,
+value `6000` with `0`; after the adapter explicitly unregisters and exits,
 stop the server separately. For a bounded server run, provide a larger total
 step budget that includes startup time.
 
@@ -203,19 +205,20 @@ The server supports registering, activating, and unregistering this adapter
 while simulation is already `RUNNING`. A per-adapter timeout clears its six
 actuators and moves only this session to `TIMED_OUT`; the server and other
 controllers continue. The SDK handles a `TIMED_OUT` Tick with a non-blocking
-try-lock. If the controller callback is free, its valid Commit is recovery
-proof only and the server restores the session to `ACTIVE` on the next Tick;
-recovery Ticks do not count toward the adapter's 6000-Tick limit.
-They do advance the stateful controller pipeline and its session-local input
-script index because the handler successfully processed them.
+latest-value mailbox. The adapter business thread explicitly receives the
+latest available Tick and submits its valid Commit as recovery proof; the
+server restores the session to `ACTIVE` on the next Tick. Delivered recovery
+Ticks do not count toward the adapter's 6000-Tick limit, but they advance the
+stateful controller pipeline and its session-local input script index. If
+timeout Tick production outruns the adapter, overwritten mailbox entries are
+not processed and do not advance controller state.
 
-An exception in decoding or control stops the SDK loop and makes the process
-exit with code 1. If the server marks this exact session `ERROR` because of a
-local command failure, the SDK also stops, prints `lifecycle_warning`, and
-attempts to unregister. Normal completion likewise performs best-effort
-unregistration. The current SDK callback has no structured handler-error
-Commit, which is recorded as a next-stage architecture issue in
-[MIGRATION_REPORT.md](MIGRATION_REPORT.md).
+Tick reception and Commit are separate SDK calls; eCAL callbacks never run the
+WBR decoder or controller. An exception in decoding or control stops and
+unregisters the session and makes the process exit with code 1, without sending
+an empty `COMMIT_ERROR`. If the server marks this exact session `ERROR` or
+replaces it, `WaitForTick()` returns the lifecycle reason. Normal completion
+also explicitly unregisters.
 
 ## Library API
 
@@ -249,7 +252,7 @@ CTest covers:
   staged-config headless run from a different working directory
 - a nonblank PNG captured from the real WBR GLFW render loop
 - real eCAL headless and GUI/Xvfb lockstep runs against an unlimited server;
-  both verify automatic unregistration, then terminate the server explicitly
+  both verify explicit unregistration, then terminate the server explicitly
 
 See [MIGRATION_REPORT.md](MIGRATION_REPORT.md) for deliberate differences,
 verification counts, and prioritized architecture improvements.

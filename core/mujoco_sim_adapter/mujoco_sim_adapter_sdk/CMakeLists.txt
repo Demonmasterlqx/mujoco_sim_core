@@ -58,4 +58,23 @@ if(BUILD_TESTING)
   add_executable(adapter_sdk_test test/sync_adapter_client_test.cpp)
   target_link_libraries(adapter_sdk_test PRIVATE ${PROJECT_NAME} GTest::gtest_main)
   add_test(NAME adapter_sdk_test COMMAND adapter_sdk_test)
+
+  find_package(mujoco_sim_server CONFIG REQUIRED)
+  if(NOT TARGET mujoco_sim::mujoco-sim-server)
+    message(FATAL_ERROR "mujoco_sim_server package did not export mujoco-sim-server")
+  endif()
+  add_executable(adapter_sdk_lifecycle_probe
+    test/adapter_sdk_lifecycle_probe.cpp
+  )
+  target_link_libraries(adapter_sdk_lifecycle_probe PRIVATE ${PROJECT_NAME})
+  add_test(
+    NAME adapter_sdk_lifecycle_e2e
+    COMMAND
+      bash
+      "${CMAKE_CURRENT_SOURCE_DIR}/test/adapter_sdk_lifecycle_e2e.sh"
+      "$<TARGET_FILE:mujoco_sim::mujoco-sim-server>"
+      "$<TARGET_FILE:adapter_sdk_lifecycle_probe>"
+      "${CMAKE_CURRENT_SOURCE_DIR}/../../mujoco_sim_core/test/testdata/simple_actuator.xml"
+  )
+  set_tests_properties(adapter_sdk_lifecycle_e2e PROPERTIES TIMEOUT 20)
 endif()
