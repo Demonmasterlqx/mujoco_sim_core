@@ -98,6 +98,16 @@ mujoco_sim::v1::ServerStatus NormalizeStatus(
             [](const auto& lhs, const auto& rhs) {
               return lhs.controller_id() < rhs.controller_id();
             });
+  std::sort(output.mutable_adapters()->begin(),
+            output.mutable_adapters()->end(),
+            [](const auto& lhs, const auto& rhs) {
+              if (lhs.role() != rhs.role()) return lhs.role() < rhs.role();
+              return lhs.adapter_id() < rhs.adapter_id();
+            });
+  std::sort(output.mutable_streams()->begin(), output.mutable_streams()->end(),
+            [](const auto& lhs, const auto& rhs) {
+              return lhs.name() < rhs.name();
+            });
   return output;
 }
 
@@ -620,21 +630,108 @@ std::string FormatHuman(const StatusReport& report) {
     }
     output << '\n';
   }
-  output << "Controllers (" << status.controllers_size() << "):\n"
-         << "ID\tState\tSession\tLast heartbeat\tLast commit\tState since"
-            "\tTimeouts\tBarrier\tMessage\n";
+  const auto controller_for = [&status](const auto& adapter) {
+    const auto found = std::find_if(
+        status.controllers().begin(), status.controllers().end(),
+        [&adapter](const auto& controller) {
+          return adapter.role() == mujoco_sim::v1::CONTROLLER &&
+                 adapter.adapter_id() == controller.controller_id() &&
+                 adapter.session_id() == controller.session_id();
+        });
+    return found == status.controllers().end() ? nullptr : &*found;
+  };
+  const auto has_adapter_for = [&status](const auto& controller) {
+    return std::any_of(
+        status.adapters().begin(), status.adapters().end(),
+        [&controller](const auto& adapter) {
+          return adapter.role() == mujoco_sim::v1::CONTROLLER &&
+                 adapter.adapter_id() == controller.controller_id() &&
+                 adapter.session_id() == controller.session_id();
+        });
+  };
+  struct AdapterRow {
+    const mujoco_sim::v1::AdapterStatus* adapter = nullptr;
+    const mujoco_sim::v1::ControllerStatus* controller = nullptr;
+  };
+  std::vector<AdapterRow> adapter_rows;
+  adapter_rows.reserve(status.adapters_size() + status.controllers_size());
+  for (const auto& adapter : status.adapters()) {
+    adapter_rows.push_back({&adapter, controller_for(adapter)});
+  }
   for (const auto& controller : status.controllers()) {
-    output << controller.controller_id() << '\t'
-           << ControllerStateName(controller.state()) << '\t'
-           << controller.session_id() << '\t'
-           << controller.last_tick_id() << '\t'
-           << (controller.has_last_commit_tick_id()
-                   ? std::to_string(controller.last_commit_tick_id())
+    if (!has_adapter_for(controller)) {
+      adapter_rows.push_back({nullptr, &controller});
+    }
+  }
+  std::sort(adapter_rows.begin(), adapter_rows.end(),
+            [](const AdapterRow& lhs, const AdapterRow& rhs) {
+              const auto lhs_role = lhs.adapter == nullptr
+                                        ? mujoco_sim::v1::CONTROLLER
+                                        : lhs.adapter->role();
+              const auto rhs_role = rhs.adapter == nullptr
+                                        ? mujoco_sim::v1::CONTROLLER
+                                        : rhs.adapter->role();
+              if (lhs_role != rhs_role) return lhs_role < rhs_role;
+              const auto& lhs_id = lhs.adapter == nullptr
+                                       ? lhs.controller->controller_id()
+                                       : lhs.adapter->adapter_id();
+              const auto& rhs_id = rhs.adapter == nullptr
+                                       ? rhs.controller->controller_id()
+                                       : rhs.adapter->adapter_id();
+              return lhs_id < rhs_id;
+            });
+  output << "Adapters (" << adapter_rows.size() << "):\n"
+         << "ID\tRole\tState\tSession\tLast delivery\tLast commit"
+            "\tSequence\tState since\tTimeouts\tBarrier\tMessage\n";
+  for (const auto& row : adapter_rows) {
+    if (row.adapter == nullptr) {
+      const auto& controller = *row.controller;
+      output << controller.controller_id() << "\tCONTROLLER\t"
+             << ControllerStateName(controller.state()) << '\t'
+             << controller.session_id() << "\t-\t"
+             << (controller.has_last_commit_tick_id()
+                     ? std::to_string(controller.last_commit_tick_id())
+                     : "-")
+             << "\t-\t" << controller.state_since_tick_id() << '\t'
+             << controller.timeout_count() << '\t'
+             << (controller.required_for_barrier() ? "yes" : "no") << '\t'
+             << DisplayMessage(controller.message()) << '\n';
+      continue;
+    }
+    const auto& adapter = *row.adapter;
+    output << adapter.adapter_id() << '\t'
+           << mujoco_sim::v1::AdapterRole_Name(adapter.role()) << '\t'
+           << ControllerStateName(adapter.state()) << '\t'
+           << adapter.session_id() << '\t'
+           << (adapter.has_last_delivery_tick_id()
+                   ? std::to_string(adapter.last_delivery_tick_id())
                    : "-")
-           << '\t' << controller.state_since_tick_id() << '\t'
-           << controller.timeout_count() << '\t'
-           << (controller.required_for_barrier() ? "yes" : "no") << '\t'
-           << DisplayMessage(controller.message()) << '\n';
+           << '\t'
+           << (row.controller != nullptr &&
+                       row.controller->has_last_commit_tick_id()
+                   ? std::to_string(row.controller->last_commit_tick_id())
+                   : "-")
+           << '\t'
+           << (adapter.role() == mujoco_sim::v1::OBSERVER
+                   ? std::to_string(adapter.last_observation_sequence())
+                   : "-")
+           << '\t' << adapter.state_since_tick_id() << '\t'
+           << adapter.timeout_count() << '\t'
+           << (row.controller == nullptr
+                   ? "-"
+                   : (row.controller->required_for_barrier() ? "yes" : "no"))
+           << '\t' << DisplayMessage(adapter.message()) << '\n';
+  }
+  output << "Sensor streams (" << status.streams_size() << "):\n"
+         << "Name\tState\tSubscribers\tCaptures\tPublished\tDropped"
+            "\tErrors\tBlocked ms\tMessage\n";
+  for (const auto& stream : status.streams()) {
+    output << stream.name() << '\t'
+           << mujoco_sim::v1::StreamState_Name(stream.state()) << '\t'
+           << stream.subscriber_count() << '\t' << stream.captures() << '\t'
+           << stream.published() << '\t' << stream.dropped() << '\t'
+           << stream.publish_errors() << '\t' << stream.blocked_time_ms()
+           << '\t' << DisplayMessage(stream.message()) << '\n';
   }
   return output.str();
 }

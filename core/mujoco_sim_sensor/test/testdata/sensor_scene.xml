@@ -1,0 +1,40 @@
+<mujoco model="mujoco_sim_sensor_test">
+  <compiler angle="degree"/>
+  <option gravity="0 0 0"/>
+  <statistic center="0 0 1" extent="10"/>
+  <visual>
+    <global offwidth="64" offheight="48"/>
+    <map znear="0.01" zfar="2"/>
+    <headlight ambient="0.35 0.35 0.35" diffuse="0.65 0.65 0.65"/>
+  </visual>
+
+  <worldbody>
+    <light name="key" pos="0 -3 5" dir="0 0 -1"/>
+    <geom name="floor" type="plane" pos="0 0 0" size="12 12 0.1"
+          rgba="0.25 0.30 0.35 1"/>
+    <geom name="camera_target" type="box" pos="3 0 1" size="0.5 0.7 0.7"
+          rgba="0.85 0.12 0.08 1"/>
+    <geom name="far_camera_wall" type="box" pos="19 0 1"
+          size="0.1 15 15" rgba="0.20 0.45 0.80 1"/>
+    <geom name="lidar_left_wall" type="box" pos="0 3.1 1"
+          size="6 0.1 1" rgba="0.10 0.65 0.20 1"/>
+    <geom name="lidar_back_wall" type="box" pos="-2.1 0 1"
+          size="0.1 6 1" rgba="0.15 0.25 0.75 1"/>
+    <geom name="lidar_right_wall" type="box" pos="0 -5.1 1"
+          size="6 0.1 1" rgba="0.75 0.70 0.12 1"/>
+
+    <body name="sensor_rig" pos="0 0 0">
+      <site name="lidar_site" pos="0 0 1" size="0.01"/>
+      <camera name="test_camera" pos="0 0 1"
+              xyaxes="0 -1 0 0 0 1" fovy="55"/>
+      <camera name="wide_ipd_camera" pos="0 0 1"
+              xyaxes="0 -1 0 0 0 1" fovy="55" ipd="0.4"/>
+      <camera name="intrinsic_camera" pos="0 0 1"
+              xyaxes="0 -1 0 0 0 1" resolution="80 60"
+              sensorsize="0.008 0.006" focalpixel="80 90"
+              principalpixel="4 -3"/>
+      <camera name="ortho_camera" pos="0 0 1"
+              xyaxes="0 -1 0 0 0 1" projection="orthographic" fovy="2"/>
+    </body>
+  </worldbody>
+</mujoco>

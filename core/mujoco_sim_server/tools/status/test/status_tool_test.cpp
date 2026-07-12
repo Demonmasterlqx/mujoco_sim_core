@@ -90,6 +90,27 @@ StatusReport MakeReport() {
   error->set_last_commit_tick_id(6);
   error->set_state_since_tick_id(7);
   error->set_required_for_barrier(false);
+  auto* controller_adapter = report.status.add_adapters();
+  controller_adapter->set_adapter_id("zeta");
+  controller_adapter->set_role(mujoco_sim::v1::CONTROLLER);
+  controller_adapter->set_session_id(9);
+  controller_adapter->set_state(mujoco_sim::v1::ACTIVE);
+  controller_adapter->set_last_delivery_tick_id(8);
+  controller_adapter->set_state_since_tick_id(3);
+  auto* observer = report.status.add_adapters();
+  observer->set_adapter_id("observer");
+  observer->set_role(mujoco_sim::v1::OBSERVER);
+  observer->set_session_id(10);
+  observer->set_state(mujoco_sim::v1::ACTIVE);
+  observer->set_last_delivery_tick_id(8);
+  observer->set_last_observation_sequence(4);
+  auto* stream = report.status.add_streams();
+  stream->set_name("front_rgb");
+  stream->set_state(mujoco_sim::v1::STREAM_RUNNING);
+  stream->set_subscriber_count(1);
+  stream->set_captures(5);
+  stream->set_published(4);
+  stream->set_dropped(1);
   report.resources.emplace();
   report.resources->set_code(mujoco_sim::v1::OK);
   report.resources->set_epoch(1);
@@ -258,19 +279,25 @@ TEST(StatusFormattingTest, ProducesSortedHumanOutput) {
   const std::string output = FormatHuman(MakeReport());
   EXPECT_NE(output.find("Server: default"), std::string::npos);
   EXPECT_NE(output.find("State: RUNNING"), std::string::npos);
+  EXPECT_NE(output.find("Adapters (4)"), std::string::npos);
+  EXPECT_EQ(output.find("Controllers ("), std::string::npos);
+  EXPECT_NE(output.find("observer\tOBSERVER\tACTIVE\t10\t8\t-\t4\t0\t0\t-\t-"),
+            std::string::npos);
+  EXPECT_NE(output.find("Sensor streams (1)"), std::string::npos);
+  EXPECT_NE(output.find("front_rgb\tSTREAM_RUNNING"), std::string::npos);
   EXPECT_NE(output.find("a_sensor[1], z_sensor[2]"), std::string::npos);
   EXPECT_LT(output.find("alpha"), output.find("zeta"));
   EXPECT_NE(output.find("motor[1]"), std::string::npos);
-  EXPECT_NE(output.find("ID\tState\tSession\tLast heartbeat\tLast commit\t"
-                        "State since\tTimeouts\tBarrier\tMessage\n"),
+  EXPECT_NE(output.find("ID\tRole\tState\tSession\tLast delivery\tLast commit\t"
+                        "Sequence\tState since\tTimeouts\tBarrier\tMessage\n"),
             std::string::npos);
-  EXPECT_NE(output.find("alpha\tTIMED_OUT\t7\t6\t-\t5\t2\tno\t"
+  EXPECT_NE(output.find("alpha\tCONTROLLER\tTIMED_OUT\t7\t-\t-\t-\t5\t2\tno\t"
                         "controller timed out\n"),
             std::string::npos);
-  EXPECT_NE(output.find("error\tERROR\t8\t7\t6\t7\t0\tno\t"
+  EXPECT_NE(output.find("error\tCONTROLLER\tERROR\t8\t-\t6\t-\t7\t0\tno\t"
                         "invalid command\n"),
             std::string::npos);
-  EXPECT_NE(output.find("zeta\tACTIVE\t9\t8\t8\t3\t0\tyes\t-\n"),
+  EXPECT_NE(output.find("zeta\tCONTROLLER\tACTIVE\t9\t8\t8\t-\t3\t0\tyes\t-\n"),
             std::string::npos);
 }
 
@@ -308,6 +335,34 @@ TEST(StatusFormattingTest, PreservesUint64AndEscapesJson) {
   const auto& active = controllers.values(2).struct_value().fields();
   EXPECT_EQ(active.at("controller_id").string_value(), "zeta");
   EXPECT_TRUE(active.at("required_for_barrier").bool_value());
+  const auto& adapters = status.at("adapters").list_value();
+  ASSERT_EQ(adapters.values_size(), 2);
+  EXPECT_EQ(adapters.values(0)
+                .struct_value()
+                .fields()
+                .at("adapter_id")
+                .string_value(),
+            "zeta");
+  EXPECT_EQ(adapters.values(1)
+                .struct_value()
+                .fields()
+                .at("role")
+                .string_value(),
+            "OBSERVER");
+  const auto& streams = status.at("streams").list_value();
+  ASSERT_EQ(streams.values_size(), 1);
+  EXPECT_EQ(streams.values(0)
+                .struct_value()
+                .fields()
+                .at("name")
+                .string_value(),
+            "front_rgb");
+  EXPECT_EQ(streams.values(0)
+                .struct_value()
+                .fields()
+                .at("dropped")
+                .string_value(),
+            "1");
   const auto& observations = fields.at("resources")
                                  .struct_value()
                                  .fields()

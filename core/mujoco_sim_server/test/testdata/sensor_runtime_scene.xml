@@ -1,0 +1,57 @@
+<mujoco model="sensor_runtime_test">
+  <compiler angle="degree"/>
+  <option timestep="0.01" gravity="0 0 0"/>
+  <statistic center="0 0 1" extent="8"/>
+  <visual>
+    <global offwidth="64" offheight="48"/>
+    <map znear="0.01" zfar="2"/>
+    <headlight ambient="0.35 0.35 0.35" diffuse="0.65 0.65 0.65"/>
+  </visual>
+
+  <worldbody>
+    <light name="key" pos="0 -3 5" dir="0 0 -1"/>
+    <geom name="floor" type="plane" size="10 10 0.1"
+          rgba="0.25 0.30 0.35 1"/>
+    <geom name="front_target" type="box" pos="3 0 1" size="0.5 0.8 0.8"
+          rgba="0.85 0.12 0.08 1"/>
+    <geom name="left_wall" type="box" pos="0 3.1 1" size="6 0.1 1"
+          rgba="0.10 0.65 0.20 1"/>
+    <geom name="back_wall" type="box" pos="-2.1 0 1" size="0.1 6 1"
+          rgba="0.15 0.25 0.75 1"/>
+    <geom name="right_wall" type="box" pos="0 -5.1 1" size="6 0.1 1"
+          rgba="0.75 0.70 0.12 1"/>
+
+    <body name="sensor_rig">
+      <site name="lidar_site" pos="0 0 1" size="0.01"/>
+      <site name="imu_site" pos="0 0 1" size="0.01"/>
+      <camera name="test_camera" pos="0 0 1"
+              xyaxes="0 -1 0 0 0 1" fovy="55"/>
+    </body>
+    <body name="controlled_link" pos="0 0 0.5">
+      <joint name="hinge" type="hinge" axis="0 0 1"
+             limited="true" range="-180 180"/>
+      <geom type="capsule" size="0.02" fromto="0 0 0 0.2 0 0"
+            mass="0.1" rgba="0.6 0.6 0.6 1"/>
+    </body>
+    <body name="gate_link" pos="0 0 0.8">
+      <joint name="gate_hinge" type="hinge" axis="0 1 0"
+             limited="true" range="-180 180"/>
+      <geom type="capsule" size="0.015" fromto="0 0 0 0 0.15 0"
+            mass="0.05" rgba="0.4 0.4 0.4 1"/>
+    </body>
+  </worldbody>
+
+  <actuator>
+    <motor name="hinge_motor" joint="hinge" ctrllimited="true"
+           ctrlrange="-1 1"/>
+    <motor name="gate_motor" joint="gate_hinge" ctrllimited="true"
+           ctrlrange="-1 1"/>
+  </actuator>
+
+  <sensor>
+    <framequat name="imu_quat" objtype="site" objname="imu_site"/>
+    <gyro name="imu_gyro" site="imu_site"/>
+    <jointpos name="hinge_pos" joint="hinge"/>
+    <jointpos name="gate_pos" joint="gate_hinge"/>
+  </sensor>
+</mujoco>

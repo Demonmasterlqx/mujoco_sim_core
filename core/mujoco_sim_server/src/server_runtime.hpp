@@ -4,8 +4,13 @@
 #include <condition_variable>
 #include <cstddef>
 #include <cstdint>
+#include <exception>
+#include <functional>
 #include <mutex>
 #include <optional>
+#include <string>
+#include <string_view>
+#include <utility>
 
 namespace mujoco_sim::server {
 
@@ -13,6 +18,66 @@ inline constexpr std::size_t kMaxProtocolPayloadBytes =
     4U * 1024U * 1024U;
 
 bool IsProtocolPayloadSizeAllowed(std::size_t size);
+
+bool RunWithExceptionBoundary(const std::function<void()>& action,
+                              std::string* error_message) noexcept;
+
+template <typename Action>
+bool RunWithExceptionBoundary(Action&& action,
+                              std::string* error_message) noexcept {
+  try {
+    std::forward<Action>(action)();
+    if (error_message != nullptr) {
+      error_message->clear();
+    }
+    return true;
+  } catch (const std::exception& exception) {
+    if (error_message != nullptr) {
+      try {
+        *error_message = exception.what();
+      } catch (...) {
+      }
+    }
+  } catch (...) {
+    if (error_message != nullptr) {
+      try {
+        *error_message = "non-standard exception";
+      } catch (...) {
+      }
+    }
+  }
+  return false;
+}
+
+class BestEffortCleanup {
+ public:
+  using FailureHandler =
+      std::function<void(std::string_view operation, const std::string& error)>;
+
+  explicit BestEffortCleanup(FailureHandler failure_handler)
+      : failure_handler_(std::move(failure_handler)) {}
+
+  template <typename Action>
+  void Run(std::string_view operation, Action&& action) noexcept {
+    std::string error;
+    if (RunWithExceptionBoundary(std::forward<Action>(action), &error)) {
+      return;
+    }
+    succeeded_ = false;
+    try {
+      if (failure_handler_) {
+        failure_handler_(operation, error);
+      }
+    } catch (...) {
+    }
+  }
+
+  bool succeeded() const { return succeeded_; }
+
+ private:
+  FailureHandler failure_handler_;
+  bool succeeded_ = true;
+};
 
 enum class SendOutcome {
   kSent,

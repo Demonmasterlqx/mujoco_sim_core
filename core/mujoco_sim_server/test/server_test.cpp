@@ -5,6 +5,7 @@
 #include <cstdint>
 #include <filesystem>
 #include <fstream>
+#include <functional>
 #include <iterator>
 #include <limits>
 #include <memory>
@@ -110,6 +111,22 @@ void ExpectConfigEquals(const mujoco_sim::server::ServerConfig& actual,
   EXPECT_EQ(actual.activation_timeout_ms, expected.activation_timeout_ms);
   EXPECT_EQ(actual.allow_timed_out_adapter_replacement,
             expected.allow_timed_out_adapter_replacement);
+  EXPECT_EQ(actual.render_backend, expected.render_backend);
+  ASSERT_EQ(actual.sensor_streams.size(), expected.sensor_streams.size());
+  for (std::size_t i = 0; i < actual.sensor_streams.size(); ++i) {
+    EXPECT_EQ(actual.sensor_streams[i].name, expected.sensor_streams[i].name);
+    EXPECT_EQ(actual.sensor_streams[i].kind, expected.sensor_streams[i].kind);
+    EXPECT_EQ(actual.sensor_streams[i].source,
+              expected.sensor_streams[i].source);
+    EXPECT_EQ(actual.sensor_streams[i].frame_id,
+              expected.sensor_streams[i].frame_id);
+    EXPECT_DOUBLE_EQ(actual.sensor_streams[i].rate_hz,
+                     expected.sensor_streams[i].rate_hz);
+    EXPECT_EQ(actual.sensor_streams[i].queue_mode,
+              expected.sensor_streams[i].queue_mode);
+    EXPECT_EQ(actual.sensor_streams[i].queue_depth,
+              expected.sensor_streams[i].queue_depth);
+  }
 }
 
 TEST(ServerConfigTest, ParsesCommandLine) {
@@ -213,6 +230,12 @@ TEST(ServerConfigTest, ReturnsGeneratedHelp) {
   EXPECT_NE(error.find("--gui"), std::string::npos);
   EXPECT_NE(error.find("--log-level"), std::string::npos);
   EXPECT_NE(error.find("--log-summary-period-ms"), std::string::npos);
+  EXPECT_NE(error.find("Timed-out adapter replacement policy toggle"),
+            std::string::npos);
+  EXPECT_NE(error.find("Run mode with or without a graphical viewer"),
+            std::string::npos);
+  EXPECT_EQ(error.find("Allow a new registration to replace"),
+            std::string::npos);
 }
 
 TEST(ServerConfigTest, RejectsInvalidCommandLine) {
@@ -291,7 +314,31 @@ TEST(ServerConfigTest, LoadsStrictYamlWithAllFields) {
       "log_file: logs/server.log\n"
       "log_file_max_size_mb: 20\n"
       "log_file_max_files: 7\n"
-      "log_summary_period_ms: 2500\n");
+      "log_summary_period_ms: 2500\n"
+      "render_backend: egl\n"
+      "sensor_streams:\n"
+      "  - name: front_rgb\n"
+      "    kind: rgb\n"
+      "    source: front_camera\n"
+      "    frame_id: front_camera_optical\n"
+      "    rate_hz: 12.5\n"
+      "    width: 640\n"
+      "    height: 480\n"
+      "    queue_mode: latest\n"
+      "    queue_depth: 1\n"
+      "  - name: lidar_points\n"
+      "    kind: lidar_pointcloud\n"
+      "    source: lidar_site\n"
+      "    frame_id: lidar\n"
+      "    horizontal_samples: 720\n"
+      "    vertical_samples: 16\n"
+      "    vertical_fov_min_deg: -15\n"
+      "    vertical_fov_max_deg: 15\n"
+      "    min_range_m: 0.15\n"
+      "    max_range_m: 20\n"
+      "    queue_mode: fifo\n"
+      "    queue_depth: 3\n"
+      "    fifo_overflow: drop_newest\n");
 
   mujoco_sim::server::ServerConfig config;
   std::string error;
@@ -317,6 +364,66 @@ TEST(ServerConfigTest, LoadsStrictYamlWithAllFields) {
   EXPECT_EQ(config.log_file_max_size_mb, 20U);
   EXPECT_EQ(config.log_file_max_files, 7U);
   EXPECT_EQ(config.log_summary_period_ms, 2500U);
+  EXPECT_EQ(config.render_backend, "egl");
+  ASSERT_EQ(config.sensor_streams.size(), 2U);
+  EXPECT_EQ(config.sensor_streams[0].name, "front_rgb");
+  EXPECT_EQ(config.sensor_streams[0].kind, "rgb");
+  EXPECT_EQ(config.sensor_streams[0].width, 640U);
+  EXPECT_DOUBLE_EQ(config.sensor_streams[0].rate_hz, 12.5);
+  EXPECT_EQ(config.sensor_streams[1].kind, "lidar_pointcloud");
+  EXPECT_EQ(config.sensor_streams[1].vertical_samples, 16U);
+  EXPECT_DOUBLE_EQ(config.sensor_streams[1].max_range_m, 20.0);
+  EXPECT_EQ(config.sensor_streams[1].queue_mode, "fifo");
+  EXPECT_EQ(config.sensor_streams[1].queue_depth, 3U);
+  EXPECT_EQ(config.sensor_streams[1].fifo_overflow, "drop_newest");
+}
+
+TEST(ServerConfigTest, RejectsInvalidSensorStreamConfigurationTransactionally) {
+  const std::vector<std::pair<std::string, std::string>> invalid = {
+      {"sensor_streams:\n"
+       "  - {name: same, source: cam, frame_id: optical}\n"
+       "  - {name: same, source: cam, frame_id: optical}\n",
+       "duplicate sensor stream name"},
+      {"sensor_streams:\n"
+       "  - {name: lidar, kind: lidar_pointcloud, source: site, "
+       "frame_id: lidar, vertical_fov_min_deg: 20, "
+       "vertical_fov_max_deg: -20}\n",
+       "vertical_fov_min_deg"},
+      {"sensor_streams:\n"
+       "  - {name: lidar, kind: lidar_pointcloud, source: site, "
+       "frame_id: lidar, min_range_m: 5, max_range_m: 1}\n",
+       "min_range_m"},
+      {"sensor_streams:\n"
+       "  - {name: rgb, source: cam, frame_id: optical, "
+       "queue_mode: latest, queue_depth: 2}\n",
+       "queue_depth must be 1"},
+      {"sensor_streams:\n"
+       "  - {name: rgb, source: cam, frame_id: optical, "
+       "rate_hz: 1000001}\n",
+       "rate_hz must be <= 1000000"},
+      {"sensor_streams:\n"
+       "  - {name: rgb, source: cam, frame_id: optical, "
+       "queue_mode: fifo, queue_depth: 65}\n",
+       "queue_depth must be <= 64"},
+      {"headless: false\n"
+       "render_backend: osmesa\n"
+       "sensor_streams:\n"
+       "  - {name: rgb, source: cam, frame_id: optical}\n",
+       "osmesa is incompatible with the graphical viewer"},
+  };
+  for (std::size_t i = 0; i < invalid.size(); ++i) {
+    ScopedConfigFile file("invalid_sensor_stream_" + std::to_string(i) +
+                              ".yaml",
+                          invalid[i].first);
+    mujoco_sim::server::ServerConfig config;
+    config.server_name = "unchanged";
+    const auto expected = config;
+    std::string error;
+    EXPECT_FALSE(
+        mujoco_sim::server::LoadConfigFile(file.path(), &config, &error));
+    EXPECT_NE(error.find(invalid[i].second), std::string::npos) << error;
+    ExpectConfigEquals(config, expected);
+  }
 }
 
 TEST(ServerConfigTest, AcceptsEmptyYamlWithoutChangingConfig) {
@@ -548,6 +655,54 @@ TEST(ServerRuntimeTest, EnforcesProtocolPayloadBoundary) {
       mujoco_sim::server::kMaxProtocolPayloadBytes));
   EXPECT_FALSE(mujoco_sim::server::IsProtocolPayloadSizeAllowed(
       mujoco_sim::server::kMaxProtocolPayloadBytes + 1));
+}
+
+TEST(ServerRuntimeTest, ConvertsRuntimeExceptionsAtTransportBoundaries) {
+  std::string error = "stale";
+  EXPECT_TRUE(mujoco_sim::server::RunWithExceptionBoundary([] {}, &error));
+  EXPECT_TRUE(error.empty());
+
+  EXPECT_FALSE(mujoco_sim::server::RunWithExceptionBoundary(
+      [] { throw std::runtime_error("injected eCAL failure"); }, &error));
+  EXPECT_EQ(error, "injected eCAL failure");
+
+  EXPECT_FALSE(mujoco_sim::server::RunWithExceptionBoundary(
+      [] { throw 7; }, &error));
+  EXPECT_EQ(error, "non-standard exception");
+
+  const std::function<void()> erased_action = [] {
+    throw std::runtime_error("erased callback failure");
+  };
+  EXPECT_FALSE(mujoco_sim::server::RunWithExceptionBoundary(erased_action,
+                                                             &error));
+  EXPECT_EQ(error, "erased callback failure");
+  EXPECT_FALSE(mujoco_sim::server::RunWithExceptionBoundary(
+      [] { throw std::runtime_error("ignored"); }, nullptr));
+}
+
+TEST(ServerRuntimeTest, BestEffortCleanupContinuesAfterEachFailure) {
+  std::vector<std::string> actions;
+  std::vector<std::string> failures;
+  mujoco_sim::server::BestEffortCleanup cleanup(
+      [&](std::string_view operation, const std::string& error) {
+        failures.push_back(std::string(operation) + ": " + error);
+        if (operation == "second") {
+          throw std::runtime_error("failure logger also failed");
+        }
+      });
+
+  cleanup.Run("first", [&] { actions.push_back("first"); });
+  cleanup.Run("second", [&] {
+    actions.push_back("second");
+    throw std::runtime_error("injected cleanup failure");
+  });
+  cleanup.Run("third", [&] { actions.push_back("third"); });
+
+  EXPECT_EQ(actions,
+            (std::vector<std::string>{"first", "second", "third"}));
+  ASSERT_EQ(failures.size(), 1U);
+  EXPECT_EQ(failures.front(), "second: injected cleanup failure");
+  EXPECT_FALSE(cleanup.succeeded());
 }
 
 TEST(ServerRuntimeTest, ClassifiesObservableSendOutcomes) {

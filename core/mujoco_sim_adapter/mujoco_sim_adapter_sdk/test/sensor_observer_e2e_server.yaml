@@ -1,0 +1,32 @@
+server_name: sensor-sdk-e2e
+model_path: unused.xml
+headless: true
+render_backend: auto
+max_ticks: 0
+tick_timeout_ms: 50
+activation_timeout_ms: 1000
+status_period_ms: 25
+log_level: debug
+sensor_streams:
+  - name: rgb
+    kind: rgb
+    source: test_camera
+    frame_id: camera_optical
+    rate_hz: 20.0
+    width: 64
+    height: 48
+    queue_mode: latest
+    queue_depth: 1
+  - name: lidar
+    kind: lidar_pointcloud
+    source: lidar_site
+    frame_id: lidar
+    rate_hz: 100.0
+    horizontal_samples: 72
+    vertical_samples: 4
+    vertical_fov_min_deg: -10.0
+    vertical_fov_max_deg: 10.0
+    min_range_m: 0.05
+    max_range_m: 8.0
+    queue_mode: blocking
+    queue_depth: 1

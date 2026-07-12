@@ -140,6 +140,22 @@ class SyncAdapterClientTestPeer {
     return client->registered_;
   }
 
+  static bool WaitInProgress(SyncAdapterClient* client) {
+    std::lock_guard lock(client->mutex_);
+    return client->wait_in_progress_;
+  }
+
+  static void HoldStoppedTransitionBeforeNotify(
+      SyncAdapterClient* client, std::promise<void>* transitioned,
+      std::shared_future<void> release) {
+    std::unique_lock lock(client->mutex_);
+    client->MarkStoppedLocked();
+    transitioned->set_value();
+    release.wait();
+    lock.unlock();
+    client->condition_.notify_all();
+  }
+
   static bool UnregisterWith(
       SyncAdapterClient* client,
       const std::function<bool(
@@ -183,6 +199,15 @@ class SyncAdapterClientTestPeer {
 
   static void StopTickReception(SyncAdapterClient* client) {
     client->StopTickReception();
+  }
+
+  static bool WaitForTickReceptionDisabled(
+      SyncAdapterClient* client, std::chrono::milliseconds timeout) {
+    const auto state = client->callback_state_;
+    std::unique_lock lock(state->mutex);
+    return state->condition.wait_for(lock, timeout, [&] {
+      return !state->enabled && state->client == nullptr;
+    });
   }
 
   static bool PublishSerialized(SyncAdapterClient* client,
@@ -596,6 +621,39 @@ TEST(SyncAdapterClientTest, StopWakesWaiter) {
   EXPECT_EQ(waiting.get(), TickWaitResult::kStopped);
 }
 
+TEST(SyncAdapterClientTest,
+     ServerStoppedTransitionIsAtomicWithConcurrentWait) {
+  SyncAdapterClient client(MakeOptions());
+  SyncAdapterClientTestPeer::Configure(&client, MakeTick(9));
+  std::promise<void> transitioned_promise;
+  auto transitioned = transitioned_promise.get_future();
+  std::promise<void> release_promise;
+  auto release = release_promise.get_future().share();
+  auto stopping = std::async(std::launch::async, [&] {
+    SyncAdapterClientTestPeer::HoldStoppedTransitionBeforeNotify(
+        &client, &transitioned_promise, release);
+  });
+  if (transitioned.wait_for(1s) != std::future_status::ready) {
+    release_promise.set_value();
+    stopping.wait();
+    FAIL() << "stopped transition did not acquire the client mutex";
+    return;
+  }
+
+  mujoco_sim::v1::Tick output;
+  std::string error;
+  auto waiting = std::async(std::launch::async, [&] {
+    return client.WaitForTick(std::chrono::milliseconds::max(), &output,
+                              &error);
+  });
+  EXPECT_EQ(waiting.wait_for(20ms), std::future_status::timeout);
+  release_promise.set_value();
+  stopping.get();
+  ASSERT_EQ(waiting.wait_for(1s), std::future_status::ready);
+  EXPECT_EQ(waiting.get(), TickWaitResult::kStopped);
+  EXPECT_TRUE(error.empty());
+}
+
 TEST(SyncAdapterClientTest, MatchingServerErrorWakesWaiterWithReason) {
   SyncAdapterClient client(MakeOptions());
   const auto session = MakeTick(9);
@@ -613,6 +671,9 @@ TEST(SyncAdapterClientTest, MatchingServerErrorWakesWaiterWithReason) {
   status.mutable_header()->set_epoch(2);
   status.mutable_header()->set_protocol_major(
       mujoco_sim::protocol::kProtocolMajor);
+  status.mutable_header()->set_protocol_minor(
+      mujoco_sim::protocol::kProtocolMinor);
+  status.set_state(mujoco_sim::v1::RUNNING);
   auto* controller = status.add_controllers();
   controller->set_controller_id("arm");
   controller->set_session_id(4);
@@ -642,6 +703,9 @@ TEST(SyncAdapterClientTest, SessionReplacementWakesWaiterWithReason) {
   status.mutable_header()->set_epoch(2);
   status.mutable_header()->set_protocol_major(
       mujoco_sim::protocol::kProtocolMajor);
+  status.mutable_header()->set_protocol_minor(
+      mujoco_sim::protocol::kProtocolMinor);
+  status.set_state(mujoco_sim::v1::RUNNING);
   auto* controller = status.add_controllers();
   controller->set_controller_id("arm");
   controller->set_session_id(5);
@@ -651,6 +715,62 @@ TEST(SyncAdapterClientTest, SessionReplacementWakesWaiterWithReason) {
   ASSERT_EQ(waiting.wait_for(1s), std::future_status::ready);
   EXPECT_EQ(waiting.get(), TickWaitResult::kError);
   EXPECT_EQ(error, "server replaced adapter session");
+}
+
+TEST(SyncAdapterClientTest, ServerTerminalStatesWakeInfiniteWait) {
+  const auto make_status = [](mujoco_sim::v1::ServerState state,
+                              const std::string& message = {}) {
+    mujoco_sim::v1::ServerStatus status;
+    status.mutable_header()->set_server_name("default");
+    status.mutable_header()->set_epoch(2);
+    status.mutable_header()->set_protocol_major(
+        mujoco_sim::protocol::kProtocolMajor);
+    status.mutable_header()->set_protocol_minor(
+        mujoco_sim::protocol::kProtocolMinor);
+    status.set_state(state);
+    status.set_message(message);
+    return status;
+  };
+
+  SyncAdapterClient stopped_client(MakeOptions());
+  SyncAdapterClientTestPeer::Configure(&stopped_client, MakeTick(9));
+  mujoco_sim::v1::Tick stopped_output;
+  std::string stopped_error;
+  auto stopped_wait = std::async(std::launch::async, [&] {
+    return stopped_client.WaitForTick(std::chrono::milliseconds::max(),
+                                      &stopped_output, &stopped_error);
+  });
+  std::this_thread::sleep_for(20ms);
+  SyncAdapterClientTestPeer::HandleStatusBytes(
+      &stopped_client, make_status(mujoco_sim::v1::STOPPED));
+  ASSERT_EQ(stopped_wait.wait_for(1s), std::future_status::ready);
+  EXPECT_EQ(stopped_wait.get(), TickWaitResult::kStopped);
+  EXPECT_TRUE(stopped_error.empty());
+
+  SyncAdapterClient stopped_before_wait(MakeOptions());
+  SyncAdapterClientTestPeer::Configure(&stopped_before_wait, MakeTick(9));
+  SyncAdapterClientTestPeer::HandleStatusBytes(
+      &stopped_before_wait, make_status(mujoco_sim::v1::STOPPED));
+  EXPECT_EQ(stopped_before_wait.WaitForTick(0ms, &stopped_output,
+                                            &stopped_error),
+            TickWaitResult::kStopped);
+  EXPECT_TRUE(stopped_error.empty());
+
+  SyncAdapterClient error_client(MakeOptions());
+  SyncAdapterClientTestPeer::Configure(&error_client, MakeTick(9));
+  mujoco_sim::v1::Tick error_output;
+  std::string error_message;
+  auto error_wait = std::async(std::launch::async, [&] {
+    return error_client.WaitForTick(std::chrono::milliseconds::max(),
+                                    &error_output, &error_message);
+  });
+  std::this_thread::sleep_for(20ms);
+  SyncAdapterClientTestPeer::HandleStatusBytes(
+      &error_client,
+      make_status(mujoco_sim::v1::ERROR_PAUSED, "fatal simulation error"));
+  ASSERT_EQ(error_wait.wait_for(1s), std::future_status::ready);
+  EXPECT_EQ(error_wait.get(), TickWaitResult::kError);
+  EXPECT_EQ(error_message, "fatal simulation error");
 }
 
 TEST(SyncAdapterClientTest, ConcurrentActivateCallsAreSerialized) {
@@ -832,6 +952,46 @@ TEST(SyncAdapterClientTest, FailedUnregisterRemainsRetryableAndWarningsMerge) {
   EXPECT_EQ(calls, 2);
 }
 
+TEST(SyncAdapterClientTest, SuccessfulUnregisterWakesConcurrentWaitAsStopped) {
+  SyncAdapterClient client(MakeOptions());
+  SyncAdapterClientTestPeer::Configure(&client, MakeTick(9));
+  SyncAdapterClientTestPeer::SetRegistered(&client, true);
+  mujoco_sim::v1::Tick output;
+  std::string wait_error;
+  auto waiting = std::async(std::launch::async, [&] {
+    return client.WaitForTick(std::chrono::milliseconds::max(), &output,
+                              &wait_error);
+  });
+  for (int i = 0;
+       i < 100 && !SyncAdapterClientTestPeer::WaitInProgress(&client); ++i) {
+    std::this_thread::sleep_for(1ms);
+  }
+  if (!SyncAdapterClientTestPeer::WaitInProgress(&client)) {
+    client.Stop();
+    waiting.wait();
+    FAIL() << "wait did not enter the blocking state";
+    return;
+  }
+
+  std::string unregister_error;
+  const bool unregistered = SyncAdapterClientTestPeer::UnregisterWith(
+      &client,
+      [](const auto&, auto* response, std::string*) {
+        response->set_code(mujoco_sim::v1::OK);
+        return true;
+      },
+      &unregister_error);
+  if (!unregistered) {
+    client.Stop();
+    waiting.wait();
+    FAIL() << unregister_error;
+    return;
+  }
+  ASSERT_EQ(waiting.wait_for(1s), std::future_status::ready);
+  EXPECT_EQ(waiting.get(), TickWaitResult::kStopped);
+  EXPECT_TRUE(wait_error.empty());
+}
+
 TEST(SyncAdapterClientTest, StopCancelsStartAndCleansRegisteredSession) {
   SyncAdapterClient client(MakeOptions());
   SyncAdapterClientTestPeer::PrepareStartCompletion(&client);
@@ -885,7 +1045,9 @@ TEST(SyncAdapterClientTest, StopReceptionWaitsForInflightCallback) {
   auto stopping = std::async(std::launch::async, [&] {
     SyncAdapterClientTestPeer::StopTickReception(&client);
   });
-  EXPECT_EQ(stopping.wait_for(100ms), std::future_status::timeout);
+  EXPECT_TRUE(SyncAdapterClientTestPeer::WaitForTickReceptionDisabled(
+      &client, 1s));
+  EXPECT_EQ(stopping.wait_for(0ms), std::future_status::timeout);
   release_callback_promise.set_value();
   callback.get();
   ASSERT_EQ(stopping.wait_for(1s), std::future_status::ready);

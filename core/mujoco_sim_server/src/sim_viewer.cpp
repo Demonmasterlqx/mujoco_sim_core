@@ -56,7 +56,7 @@ bool SimViewer::QueueLoad(mujoco_sim::core::SimulationSnapshot* snapshot,
     return false;
   }
   const mujoco::MutexLock viewer_lock(impl_->simulate->mtx);
-  impl_->simulate->mnew_ = snapshot->model();
+  impl_->simulate->mnew_ = const_cast<mjModel_*>(snapshot->model());
   impl_->simulate->dnew_ = snapshot->data();
   std::snprintf(impl_->simulate->filename,
                 sizeof(impl_->simulate->filename), "%s",

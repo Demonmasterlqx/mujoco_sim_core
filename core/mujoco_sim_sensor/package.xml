@@ -1,0 +1,20 @@
+<?xml version="1.0"?>
+<package format="3">
+  <name>mujoco_sim_sensor</name>
+  <version>0.1.0</version>
+  <description>Transport-independent headless camera and ray-lidar capture for MuJoCo snapshots.</description>
+  <maintainer email="pnx@example.com">pnx</maintainer>
+  <license>Apache-2.0</license>
+
+  <buildtool_depend>cmake</buildtool_depend>
+  <depend>pkg-config</depend>
+  <depend>mujoco_sim_core</depend>
+  <depend>mujoco_sim_protocol</depend>
+  <depend>opengl</depend>
+  <depend>libosmesa6-dev</depend>
+  <test_depend>gtest</test_depend>
+
+  <export>
+    <build_type>cmake</build_type>
+  </export>
+</package>

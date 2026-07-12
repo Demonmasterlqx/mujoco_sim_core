@@ -1,0 +1,230 @@
+<mujoco model="mujoco sensor demo">
+  <compiler angle="degree" autolimits="true" inertiafromgeom="auto"/>
+
+  <!-- The soft contact time constant is twice the 0.01 s simulation step. -->
+  <option timestep="0.01" gravity="0 0 -9.81" integrator="implicitfast"
+          solver="Newton" cone="elliptic" iterations="50" ls_iterations="20"
+          tolerance="1e-10" impratio="2">
+    <flag multiccd="enable"/>
+  </option>
+
+  <statistic center="0 0 1.0" extent="7.5"/>
+
+  <visual>
+    <global offwidth="320" offheight="240" azimuth="135" elevation="-25"/>
+    <headlight ambient="0.35 0.35 0.35" diffuse="0.65 0.65 0.65"
+               specular="0.1 0.1 0.1"/>
+    <rgba haze="0.82 0.86 0.90 1"/>
+  </visual>
+
+  <asset>
+    <texture name="floor_grid" type="2d" builtin="checker" width="512" height="512"
+             rgb1="0.72 0.74 0.75" rgb2="0.56 0.59 0.61" mark="edge"
+             markrgb="0.30 0.32 0.34"/>
+    <material name="floor_material" texture="floor_grid" texuniform="true"
+              texrepeat="12 8" reflectance="0.08"/>
+    <material name="wall_material" rgba="0.82 0.85 0.87 1"/>
+    <material name="tire_material" rgba="0.055 0.060 0.065 1"/>
+    <material name="chassis_material" rgba="0.10 0.36 0.48 1"/>
+    <material name="chassis_top_material" rgba="0.72 0.75 0.76 1"/>
+    <material name="sensor_material" rgba="0.10 0.11 0.12 1"/>
+  </asset>
+
+  <default>
+    <geom solref="0.02 1" solimp="0.90 0.95 0.001"
+          friction="0.8 0.005 0.0001" condim="3"/>
+    <joint damping="0.04" armature="0.01"/>
+
+    <default class="column_side">
+      <!-- Six tangent boxes form a regular hexagonal collision boundary. -->
+      <geom type="box" size="0.055 0.25 1.45"/>
+    </default>
+
+    <default class="wheel">
+      <joint type="hinge" axis="0 1 0" limited="false" damping="0.06"
+             armature="0.015"/>
+      <geom type="cylinder" size="0.18 0.055" quat="0.70710678 0.70710678 0 0"
+            mass="0.65" material="tire_material" friction="0.45 0.004 0.0001"
+            priority="1" condim="3"/>
+    </default>
+
+    <default class="decorative">
+      <geom contype="0" conaffinity="0" group="2"/>
+    </default>
+  </default>
+
+  <worldbody>
+    <light name="room_key_light" pos="-2 -1 2.8" dir="0.25 0.15 -1"
+           diffuse="0.75 0.73 0.68" specular="0.08 0.08 0.08"/>
+    <light name="room_fill_light" pos="3 2 2.6" dir="-0.3 -0.2 -1"
+           diffuse="0.42 0.47 0.52" specular="0.04 0.04 0.04"/>
+
+    <!-- The inner wall faces bound a 12 x 8 metre open-top arena. -->
+    <geom name="floor" type="box" pos="0 0 -0.05" size="6 4 0.05"
+          material="floor_material"/>
+    <geom name="wall_west" type="box" pos="-6.05 0 1.5" size="0.05 4 1.5"
+          material="wall_material"/>
+    <geom name="wall_east" type="box" pos="6.05 0 1.5" size="0.05 4 1.5"
+          material="wall_material"/>
+    <geom name="wall_south" type="box" pos="0 -4.05 1.5" size="6 0.05 1.5"
+          material="wall_material"/>
+    <geom name="wall_north" type="box" pos="0 4.05 1.5" size="6 0.05 1.5"
+          material="wall_material"/>
+
+    <!-- Column centres stay inside x=[-3.05, 3.15], y=[-1.15, 1.25].
+         This leaves at least 0.53 m around the car on the perimeter loop
+         x=+/-4.75, y=+/-2.75. -->
+    <body name="column_1" pos="-3.05 -1.15 0">
+      <geom name="column_1_side_0" class="column_side" pos="0.433 0 1.45"
+            rgba="0.62 0.25 0.20 1"/>
+      <geom name="column_1_side_1" class="column_side" pos="0.2165 0.375 1.45"
+            euler="0 0 60" rgba="0.62 0.25 0.20 1"/>
+      <geom name="column_1_side_2" class="column_side" pos="-0.2165 0.375 1.45"
+            euler="0 0 120" rgba="0.62 0.25 0.20 1"/>
+      <geom name="column_1_side_3" class="column_side" pos="-0.433 0 1.45"
+            euler="0 0 180" rgba="0.62 0.25 0.20 1"/>
+      <geom name="column_1_side_4" class="column_side" pos="-0.2165 -0.375 1.45"
+            euler="0 0 240" rgba="0.62 0.25 0.20 1"/>
+      <geom name="column_1_side_5" class="column_side" pos="0.2165 -0.375 1.45"
+            euler="0 0 300" rgba="0.62 0.25 0.20 1"/>
+    </body>
+
+    <body name="column_2" pos="-1.35 1.20 0">
+      <geom name="column_2_side_0" class="column_side" pos="0.433 0 1.45"
+            rgba="0.24 0.48 0.31 1"/>
+      <geom name="column_2_side_1" class="column_side" pos="0.2165 0.375 1.45"
+            euler="0 0 60" rgba="0.24 0.48 0.31 1"/>
+      <geom name="column_2_side_2" class="column_side" pos="-0.2165 0.375 1.45"
+            euler="0 0 120" rgba="0.24 0.48 0.31 1"/>
+      <geom name="column_2_side_3" class="column_side" pos="-0.433 0 1.45"
+            euler="0 0 180" rgba="0.24 0.48 0.31 1"/>
+      <geom name="column_2_side_4" class="column_side" pos="-0.2165 -0.375 1.45"
+            euler="0 0 240" rgba="0.24 0.48 0.31 1"/>
+      <geom name="column_2_side_5" class="column_side" pos="0.2165 -0.375 1.45"
+            euler="0 0 300" rgba="0.24 0.48 0.31 1"/>
+    </body>
+
+    <body name="column_3" pos="0.55 -0.45 0">
+      <geom name="column_3_side_0" class="column_side" pos="0.433 0 1.45"
+            rgba="0.72 0.54 0.16 1"/>
+      <geom name="column_3_side_1" class="column_side" pos="0.2165 0.375 1.45"
+            euler="0 0 60" rgba="0.72 0.54 0.16 1"/>
+      <geom name="column_3_side_2" class="column_side" pos="-0.2165 0.375 1.45"
+            euler="0 0 120" rgba="0.72 0.54 0.16 1"/>
+      <geom name="column_3_side_3" class="column_side" pos="-0.433 0 1.45"
+            euler="0 0 180" rgba="0.72 0.54 0.16 1"/>
+      <geom name="column_3_side_4" class="column_side" pos="-0.2165 -0.375 1.45"
+            euler="0 0 240" rgba="0.72 0.54 0.16 1"/>
+      <geom name="column_3_side_5" class="column_side" pos="0.2165 -0.375 1.45"
+            euler="0 0 300" rgba="0.72 0.54 0.16 1"/>
+    </body>
+
+    <body name="column_4" pos="2.25 1.25 0">
+      <geom name="column_4_side_0" class="column_side" pos="0.433 0 1.45"
+            rgba="0.31 0.37 0.59 1"/>
+      <geom name="column_4_side_1" class="column_side" pos="0.2165 0.375 1.45"
+            euler="0 0 60" rgba="0.31 0.37 0.59 1"/>
+      <geom name="column_4_side_2" class="column_side" pos="-0.2165 0.375 1.45"
+            euler="0 0 120" rgba="0.31 0.37 0.59 1"/>
+      <geom name="column_4_side_3" class="column_side" pos="-0.433 0 1.45"
+            euler="0 0 180" rgba="0.31 0.37 0.59 1"/>
+      <geom name="column_4_side_4" class="column_side" pos="-0.2165 -0.375 1.45"
+            euler="0 0 240" rgba="0.31 0.37 0.59 1"/>
+      <geom name="column_4_side_5" class="column_side" pos="0.2165 -0.375 1.45"
+            euler="0 0 300" rgba="0.31 0.37 0.59 1"/>
+    </body>
+
+    <body name="column_5" pos="3.15 -1.05 0">
+      <geom name="column_5_side_0" class="column_side" pos="0.433 0 1.45"
+            rgba="0.48 0.29 0.49 1"/>
+      <geom name="column_5_side_1" class="column_side" pos="0.2165 0.375 1.45"
+            euler="0 0 60" rgba="0.48 0.29 0.49 1"/>
+      <geom name="column_5_side_2" class="column_side" pos="-0.2165 0.375 1.45"
+            euler="0 0 120" rgba="0.48 0.29 0.49 1"/>
+      <geom name="column_5_side_3" class="column_side" pos="-0.433 0 1.45"
+            euler="0 0 180" rgba="0.48 0.29 0.49 1"/>
+      <geom name="column_5_side_4" class="column_side" pos="-0.2165 -0.375 1.45"
+            euler="0 0 240" rgba="0.48 0.29 0.49 1"/>
+      <geom name="column_5_side_5" class="column_side" pos="0.2165 -0.375 1.45"
+            euler="0 0 300" rgba="0.48 0.29 0.49 1"/>
+    </body>
+
+    <!-- Start on the south straight, facing +X along the clear loop. -->
+    <body name="base_link" pos="-4.60 -2.75 0.18">
+      <freejoint name="base_free_joint"/>
+      <inertial pos="0 0 0.12" mass="12"
+                diaginertia="0.45 0.90 1.20"/>
+
+      <geom name="chassis" type="box" pos="0 0 0.105" size="0.44 0.29 0.095"
+            material="chassis_material"/>
+      <geom name="chassis_top" type="box" pos="-0.03 0 0.255" size="0.28 0.23 0.055"
+            material="chassis_top_material"/>
+      <geom name="front_bumper" type="box" pos="0.47 0 0.08" size="0.03 0.31 0.045"
+            rgba="0.11 0.12 0.13 1"/>
+      <geom name="rear_bumper" type="box" pos="-0.47 0 0.08" size="0.03 0.31 0.045"
+            rgba="0.11 0.12 0.13 1"/>
+
+      <site name="base_frame" pos="0 0 0" type="sphere" size="0.012"
+            rgba="0.95 0.25 0.15 1" group="3"/>
+      <site name="imu_site" pos="0 0 0.18" type="sphere" size="0.012"
+            rgba="0.15 0.75 0.32 1" group="3"/>
+      <!-- Ray generation for all 16 vertical lidar channels uses this pose. -->
+      <site name="lidar_site" pos="0 0 0.48" type="cylinder" size="0.025 0.012"
+            rgba="0.92 0.18 0.12 1" group="3"/>
+
+      <geom name="lidar_housing" class="decorative" type="cylinder"
+            pos="0 0 0.445" size="0.075 0.035" material="sensor_material"/>
+      <geom name="camera_housing" class="decorative" type="box"
+            pos="0.335 0 0.315" size="0.055 0.075 0.045" material="sensor_material"/>
+
+      <!-- Camera optical axis is +X; camera-local +Y points upward. -->
+      <camera name="front_camera" mode="fixed" pos="0.395 0 0.32"
+              xyaxes="0 -1 0 0 0 1" fovy="70" resolution="320 240"/>
+
+      <body name="front_left_wheel" pos="0.31 0.35 0" childclass="wheel">
+        <joint name="front_left_wheel_joint"/>
+        <geom name="front_left_wheel_geom"/>
+      </body>
+      <body name="front_right_wheel" pos="0.31 -0.35 0" childclass="wheel">
+        <joint name="front_right_wheel_joint"/>
+        <geom name="front_right_wheel_geom"/>
+      </body>
+      <body name="rear_left_wheel" pos="-0.31 0.35 0" childclass="wheel">
+        <joint name="rear_left_wheel_joint"/>
+        <geom name="rear_left_wheel_geom"/>
+      </body>
+      <body name="rear_right_wheel" pos="-0.31 -0.35 0" childclass="wheel">
+        <joint name="rear_right_wheel_joint"/>
+        <geom name="rear_right_wheel_geom"/>
+      </body>
+    </body>
+  </worldbody>
+
+  <sensor>
+    <jointpos name="front_left_wheel_pos" joint="front_left_wheel_joint"/>
+    <jointvel name="front_left_wheel_vel" joint="front_left_wheel_joint"/>
+    <jointpos name="front_right_wheel_pos" joint="front_right_wheel_joint"/>
+    <jointvel name="front_right_wheel_vel" joint="front_right_wheel_joint"/>
+    <jointpos name="rear_left_wheel_pos" joint="rear_left_wheel_joint"/>
+    <jointvel name="rear_left_wheel_vel" joint="rear_left_wheel_joint"/>
+    <jointpos name="rear_right_wheel_pos" joint="rear_right_wheel_joint"/>
+    <jointvel name="rear_right_wheel_vel" joint="rear_right_wheel_joint"/>
+
+    <accelerometer name="imu_accel" site="imu_site"/>
+    <gyro name="imu_gyro" site="imu_site"/>
+    <framequat name="imu_quat" objtype="site" objname="imu_site"/>
+    <framepos name="base_position" objtype="site" objname="base_frame"/>
+  </sensor>
+
+  <actuator>
+    <!-- At radius 0.18 m, 1 m/s corresponds to 5.56 rad/s. -->
+    <velocity name="front_left_wheel_actuator" joint="front_left_wheel_joint"
+              kv="8" ctrlrange="-12 12" forcerange="-10 10"/>
+    <velocity name="front_right_wheel_actuator" joint="front_right_wheel_joint"
+              kv="8" ctrlrange="-12 12" forcerange="-10 10"/>
+    <velocity name="rear_left_wheel_actuator" joint="rear_left_wheel_joint"
+              kv="8" ctrlrange="-12 12" forcerange="-10 10"/>
+    <velocity name="rear_right_wheel_actuator" joint="rear_right_wheel_joint"
+              kv="8" ctrlrange="-12 12" forcerange="-10 10"/>
+  </actuator>
+</mujoco>

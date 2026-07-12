@@ -1,0 +1,46 @@
+common:
+  server_name: sensor_demo
+  service_timeout_ms: 10000
+  wait_timeout_ms: 1000
+
+controller:
+  adapter_id: perimeter_controller
+  timeout_ms: 5000
+  log_every_ticks: 250
+  max_simulation_time_s: 0.0
+  interfaces:
+    wheel_positions: [front_left_wheel_pos, front_right_wheel_pos, rear_left_wheel_pos, rear_right_wheel_pos]
+    imu_quaternion: imu_quat
+    imu_angular_velocity: imu_gyro
+    wheel_velocity_commands: [front_left_wheel_actuator, front_right_wheel_actuator, rear_left_wheel_actuator, rear_right_wheel_actuator]
+  control:
+    target_speed: 1.0
+    stop_after_lap: true
+
+state_observer:
+  adapter_id: state_monitor
+  every_n_steps: 5
+  interfaces:
+    wheel_positions: [front_left_wheel_pos, front_right_wheel_pos, rear_left_wheel_pos, rear_right_wheel_pos]
+    wheel_velocities: [front_left_wheel_vel, front_right_wheel_vel, rear_left_wheel_vel, rear_right_wheel_vel]
+    imu_quaternion: imu_quat
+    imu_angular_velocity: imu_gyro
+    imu_linear_acceleration: imu_accel
+
+camera_consumer:
+  streams:
+    rgb: front_rgb
+    depth: front_depth
+    segmentation: front_segmentation
+    pointcloud: front_points
+
+mapper:
+  adapter_id: mapper_imu
+  every_n_steps: 1
+  lidar_stream: lidar_points
+  imu_quaternion: imu_quat
+  algorithm:
+    maximum_fitness_score: 0.25
+    minimum_inlier_ratio: 0.15
+    maximum_translation_step_m: 1.0
+    maximum_rotation_step_rad: 0.8

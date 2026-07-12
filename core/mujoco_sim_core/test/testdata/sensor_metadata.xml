@@ -1,0 +1,122 @@
+<mujoco model="sensor_metadata">
+  <option timestep="0.001"/>
+  <worldbody>
+    <camera name="metadata_camera" pos="0 -2 1"
+            xyaxes="1 0 0 0 0.4472136 0.8944272"/>
+    <site name="reference_site" pos="0.5 0 0"/>
+    <geom name="reference_geom" type="sphere" pos="0.5 0 0"
+          size="0.05"/>
+    <body name="measured_body" pos="0 0 0">
+      <joint name="slide" type="slide" axis="1 0 0"
+             limited="true" range="-1 1"/>
+      <geom name="measured_geom" type="sphere" size="0.05" mass="1"/>
+      <site name="imu_site" pos="0 0 0.05"/>
+      <site name="tendon_start" pos="0 0 0.1"/>
+    </body>
+    <body name="hinge_body" pos="0 0.25 0">
+      <joint name="hinge" type="hinge" axis="0 0 1"
+             limited="true" range="-180 180"/>
+      <geom name="hinge_geom" type="sphere" size="0.05" mass="1"/>
+      <site name="tendon_end" pos="0 0 0.1"/>
+    </body>
+  </worldbody>
+  <tendon>
+    <spatial name="spatial_tendon" limited="true" range="0.01 1">
+      <site site="tendon_start"/>
+      <site site="tendon_end"/>
+    </spatial>
+    <fixed name="hinge_tendon">
+      <joint joint="hinge" coef="1"/>
+    </fixed>
+    <fixed name="slide_tendon">
+      <joint joint="slide" coef="1"/>
+    </fixed>
+    <fixed name="mixed_tendon">
+      <joint joint="hinge" coef="1"/>
+      <joint joint="slide" coef="1"/>
+    </fixed>
+  </tendon>
+  <actuator>
+    <motor name="hinge_actuator" joint="hinge"/>
+    <motor name="slide_actuator" joint="slide"/>
+    <motor name="tendon_actuator" tendon="spatial_tendon"/>
+    <motor name="hinge_tendon_actuator" tendon="hinge_tendon"/>
+    <motor name="slide_tendon_actuator" tendon="slide_tendon"/>
+    <motor name="mixed_tendon_actuator" tendon="mixed_tendon"/>
+    <motor name="site_actuator" site="imu_site" gear="1 0 0 0 0 0"/>
+  </actuator>
+  <sensor>
+    <jointpos name="slide_position" joint="slide"
+              interval="0.01 -0.002" delay="0.003"
+              nsample="4" interp="linear"/>
+    <framepos name="body_position_in_reference"
+              objtype="body" objname="measured_body"
+              reftype="site" refname="reference_site"
+              nsample="4" interp="cubic"/>
+    <framequat name="body_orientation_world"
+               objtype="body" objname="measured_body"/>
+    <accelerometer name="site_acceleration" site="imu_site"/>
+    <gyro name="site_angular_velocity" site="imu_site"/>
+    <force name="site_force" site="imu_site"/>
+    <torque name="site_torque" site="imu_site"/>
+    <normal name="geom_normal" geom1="measured_geom"
+            geom2="reference_geom" cutoff="1"/>
+    <fromto name="geom_fromto" geom1="measured_geom"
+            geom2="reference_geom" cutoff="1"/>
+    <insidesite name="inside_reference_geom" site="imu_site"
+                objtype="geom" objname="reference_geom"/>
+    <camprojection name="site_camera_projection" site="imu_site"
+                   camera="metadata_camera"/>
+    <jointactuatorfrc name="hinge_joint_force" joint="hinge"/>
+    <jointactuatorfrc name="slide_joint_force" joint="slide"/>
+    <jointlimitfrc name="hinge_limit_force" joint="hinge"/>
+    <jointlimitfrc name="slide_limit_force" joint="slide"/>
+    <tendonpos name="tendon_position" tendon="spatial_tendon"/>
+    <tendonvel name="tendon_velocity" tendon="spatial_tendon"/>
+    <tendonactuatorfrc name="tendon_force" tendon="spatial_tendon"/>
+    <tendonlimitpos name="tendon_limit_position" tendon="spatial_tendon"/>
+    <tendonlimitvel name="tendon_limit_velocity" tendon="spatial_tendon"/>
+    <tendonlimitfrc name="tendon_limit_force" tendon="spatial_tendon"/>
+    <tendonpos name="hinge_tendon_position" tendon="hinge_tendon"/>
+    <tendonvel name="hinge_tendon_velocity" tendon="hinge_tendon"/>
+    <tendonactuatorfrc name="hinge_tendon_force" tendon="hinge_tendon"/>
+    <tendonpos name="slide_tendon_position" tendon="slide_tendon"/>
+    <tendonvel name="slide_tendon_velocity" tendon="slide_tendon"/>
+    <tendonactuatorfrc name="slide_tendon_force" tendon="slide_tendon"/>
+    <tendonpos name="mixed_tendon_position" tendon="mixed_tendon"/>
+    <tendonvel name="mixed_tendon_velocity" tendon="mixed_tendon"/>
+    <tendonactuatorfrc name="mixed_tendon_force" tendon="mixed_tendon"/>
+    <actuatorpos name="hinge_actuator_position" actuator="hinge_actuator"/>
+    <actuatorvel name="hinge_actuator_velocity" actuator="hinge_actuator"/>
+    <actuatorfrc name="hinge_actuator_force" actuator="hinge_actuator"/>
+    <actuatorpos name="slide_actuator_position" actuator="slide_actuator"/>
+    <actuatorvel name="slide_actuator_velocity" actuator="slide_actuator"/>
+    <actuatorfrc name="slide_actuator_force" actuator="slide_actuator"/>
+    <actuatorpos name="tendon_actuator_position"
+                 actuator="tendon_actuator"/>
+    <actuatorvel name="tendon_actuator_velocity"
+                 actuator="tendon_actuator"/>
+    <actuatorfrc name="tendon_actuator_force" actuator="tendon_actuator"/>
+    <actuatorpos name="hinge_tendon_actuator_position"
+                 actuator="hinge_tendon_actuator"/>
+    <actuatorvel name="hinge_tendon_actuator_velocity"
+                 actuator="hinge_tendon_actuator"/>
+    <actuatorfrc name="hinge_tendon_actuator_force"
+                 actuator="hinge_tendon_actuator"/>
+    <actuatorpos name="slide_tendon_actuator_position"
+                 actuator="slide_tendon_actuator"/>
+    <actuatorvel name="slide_tendon_actuator_velocity"
+                 actuator="slide_tendon_actuator"/>
+    <actuatorfrc name="slide_tendon_actuator_force"
+                 actuator="slide_tendon_actuator"/>
+    <actuatorpos name="mixed_tendon_actuator_position"
+                 actuator="mixed_tendon_actuator"/>
+    <actuatorvel name="mixed_tendon_actuator_velocity"
+                 actuator="mixed_tendon_actuator"/>
+    <actuatorfrc name="mixed_tendon_actuator_force"
+                 actuator="mixed_tendon_actuator"/>
+    <actuatorpos name="site_actuator_position" actuator="site_actuator"/>
+    <actuatorvel name="site_actuator_velocity" actuator="site_actuator"/>
+    <actuatorfrc name="site_actuator_force" actuator="site_actuator"/>
+  </sensor>
+</mujoco>

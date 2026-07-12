@@ -99,6 +99,8 @@ class SyncAdapterClient {
   bool CompleteUnregister(
       const mujoco_sim::v1::UnregisterControllerResponse& response,
       std::string* error_message);
+  void MarkStoppedLocked();
+  void TransitionToStopped();
   void AddLifecycleWarning(const std::string& warning);
   void SetTerminalError(const std::string& error);
   void StopTickReception();
@@ -148,7 +150,7 @@ class SyncAdapterClient {
   mutable std::mutex mutex_;
   std::condition_variable condition_;
   std::atomic<bool> stop_requested_{false};
-  bool owns_ecal_ = false;
+  std::shared_ptr<void> ecal_runtime_;
   bool monitor_ecal_ = false;
   bool started_ = false;
   bool activated_ = false;

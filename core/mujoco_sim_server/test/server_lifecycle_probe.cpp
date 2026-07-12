@@ -61,7 +61,7 @@ struct ObservedState {
 
 template <typename Predicate>
 bool WaitFor(ObservedState* observed, Predicate predicate,
-             std::chrono::seconds timeout = 5s) {
+             std::chrono::milliseconds timeout = 5s) {
   std::unique_lock lock(observed->mutex);
   return observed->condition.wait_for(lock, timeout,
                                       [&] { return predicate(*observed); });
@@ -77,6 +77,29 @@ const mujoco_sim::v1::ControllerStatus* FindController(
     }
   }
   return nullptr;
+}
+
+bool PublishUntilLocalError(
+    eCAL::CPublisher* publisher, const std::string& payload,
+    ObservedState* observed, const std::string& controller_id,
+    std::uint64_t session_id) {
+  const auto deadline = std::chrono::steady_clock::now() + 3s;
+  while (std::chrono::steady_clock::now() < deadline) {
+    (void)publisher->Send(payload);
+    if (WaitFor(
+            observed,
+            [&](const auto& state) {
+              const auto* controller =
+                  FindController(state.status, controller_id, session_id);
+              return controller != nullptr &&
+                     controller->state() == mujoco_sim::v1::ERROR &&
+                     state.status.state() == mujoco_sim::v1::RUNNING;
+            },
+            100ms)) {
+      return true;
+    }
+  }
+  return false;
 }
 
 mujoco_sim::v1::RegisterControllerResponse Register(
@@ -367,17 +390,10 @@ int main(int argc, char** argv) {
                         command->set_name("hinge_motor");
                         command->add_values(
                             std::numeric_limits<double>::quiet_NaN());
-                        commit_publisher.Send(invalid.SerializeAsString());
-                        if (!WaitFor(&observed, [&](const auto& state) {
-                              const auto* controller = FindController(
-                                  state.status, controller_id,
-                                  faulty.session_id());
-                              return controller != nullptr &&
-                                     controller->state() ==
-                                         mujoco_sim::v1::ERROR &&
-                                     state.status.state() ==
-                                         mujoco_sim::v1::RUNNING;
-                            })) {
+                        if (!PublishUntilLocalError(
+                                &commit_publisher, invalid.SerializeAsString(),
+                                &observed, controller_id,
+                                faulty.session_id())) {
                           std::cerr << "local ERROR status was not observed\n";
                         } else {
                           mujoco_sim::v1::UnregisterControllerRequest cleanup;

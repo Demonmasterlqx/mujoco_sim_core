@@ -6,7 +6,30 @@
 
 namespace mujoco_sim::server {
 
+inline constexpr double kMinimumSensorStreamRateHz = 0.000001;
+inline constexpr double kMaximumSensorStreamRateHz = 1'000'000.0;
+inline constexpr std::uint32_t kMaximumSensorStreamQueueDepth = 64;
+
 struct ServerConfig {
+  struct SensorStream {
+    std::string name;
+    std::string kind = "rgb";
+    std::string source;
+    std::string frame_id;
+    double rate_hz = 10.0;
+    std::uint32_t width = 320;
+    std::uint32_t height = 240;
+    std::uint32_t horizontal_samples = 720;
+    std::uint32_t vertical_samples = 16;
+    double vertical_fov_min_deg = -15.0;
+    double vertical_fov_max_deg = 15.0;
+    double min_range_m = 0.15;
+    double max_range_m = 15.0;
+    std::string queue_mode = "latest";
+    std::uint32_t queue_depth = 1;
+    std::string fifo_overflow = "drop_oldest";
+  };
+
   std::string server_name = "default";
   std::string model_path;
   std::uint64_t max_ticks = 0;
@@ -22,12 +45,16 @@ struct ServerConfig {
   std::uint32_t log_summary_period_ms = 5000;
   std::uint32_t activation_timeout_ms = 5000;
   bool allow_timed_out_adapter_replacement = true;
+  std::string render_backend = "auto";
+  std::vector<SensorStream> sensor_streams;
 };
 
 bool LoadConfigFile(const std::string& path, ServerConfig* config,
                     std::string* error_message);
 bool ParseCommandLine(int argc, char** argv, ServerConfig* config,
                       std::string* error_message);
+bool ValidateServerConfig(const ServerConfig& config,
+                          std::string* error_message);
 std::string Usage();
 
 }  // namespace mujoco_sim::server

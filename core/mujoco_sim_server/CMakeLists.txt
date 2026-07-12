@@ -9,6 +9,7 @@ find_package(glfw3 CONFIG REQUIRED)
 find_package(mujoco_sim_config CONFIG REQUIRED)
 find_package(mujoco_sim_core CONFIG REQUIRED)
 find_package(mujoco_sim_protocol CONFIG REQUIRED)
+find_package(mujoco_sim_sensor CONFIG REQUIRED)
 find_package(PNG REQUIRED)
 find_package(spdlog CONFIG REQUIRED)
 find_package(Threads REQUIRED)
@@ -22,6 +23,7 @@ add_library(${PROJECT_NAME}_lib
   src/lodepng_compat.cpp
   src/server_logging.cpp
   src/server_runtime.cpp
+  src/sensor_runtime.cpp
   src/sim_viewer.cpp
   src/server_config.cpp
   "${MUJOCO_SIMULATE_ROOT}/glfw_adapter.cc"
@@ -49,6 +51,7 @@ target_link_libraries(${PROJECT_NAME}_lib
   PUBLIC
     mujoco_sim::core
     mujoco_sim::protocol
+    mujoco_sim::sensor
     eCAL::core
   PRIVATE
     glfw
@@ -113,6 +116,23 @@ if(BUILD_TESTING)
     spdlog::spdlog
   )
   add_test(NAME server_test COMMAND server_test)
+
+  add_executable(sensor_runtime_test test/sensor_runtime_test.cpp)
+  target_include_directories(sensor_runtime_test PRIVATE
+    "${CMAKE_CURRENT_SOURCE_DIR}/src"
+  )
+  target_link_libraries(sensor_runtime_test PRIVATE
+    ${PROJECT_NAME}_lib
+    GTest::gtest_main
+  )
+  target_compile_definitions(sensor_runtime_test PRIVATE
+    MUJOCO_SIM_SENSOR_RUNTIME_TEST_MODEL="${CMAKE_CURRENT_SOURCE_DIR}/test/testdata/sensor_runtime_scene.xml"
+  )
+  add_test(NAME sensor_runtime_test COMMAND sensor_runtime_test)
+  set_tests_properties(sensor_runtime_test PROPERTIES
+    ENVIRONMENT "DISPLAY=;WAYLAND_DISPLAY="
+    TIMEOUT 30
+  )
 
   add_executable(png_writer_test test/png_writer_test.cpp)
   target_include_directories(png_writer_test PRIVATE

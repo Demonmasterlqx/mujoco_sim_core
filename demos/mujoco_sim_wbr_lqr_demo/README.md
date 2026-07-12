@@ -153,14 +153,14 @@ mujoco-sim-wbr-lqr-adapter \
   --config "$demo_share/config/wbr_lqr.yaml"
 ```
 
-Both shipped configurations use server name `wbr`. The adapter's `max_ticks`
-counts 6000 locally accepted Commits for delivered `ACTIVE` Ticks; Commit has
-no synchronous server acknowledgement. Server `max_ticks`, however, counts
-all simulation steps since model load, including autonomous steps before the
-adapter registers. The command above therefore overrides the shipped server
-value `6000` with `0`; after the adapter explicitly unregisters and exits,
-stop the server separately. For a bounded server run, provide a larger total
-step budget that includes startup time.
+Both shipped configurations use server name `wbr`. The adapter YAML sets
+`max_ticks: 0`, which means unlimited operation; the server command above also
+overrides its shipped value `6000` with `0`. Stop the adapter and server
+separately during an interactive run. For a bounded adapter run, pass
+`--ticks N`; this counts locally accepted Commits for delivered `ACTIVE` Ticks.
+Server `max_ticks` instead counts all simulation steps since model load,
+including autonomous steps before the adapter registers, and is not an adapter
+Tick budget. Commit has no synchronous server acknowledgement.
 
 The adapter prints periodic FSM/clamp counters and a final summary with handled,
 nonzero-command, clamped-command, and scripted Space/E/Q effect counts.
@@ -208,10 +208,10 @@ controllers continue. The SDK handles a `TIMED_OUT` Tick with a non-blocking
 latest-value mailbox. The adapter business thread explicitly receives the
 latest available Tick and submits its valid Commit as recovery proof; the
 server restores the session to `ACTIVE` on the next Tick. Delivered recovery
-Ticks do not count toward the adapter's 6000-Tick limit, but they advance the
-stateful controller pipeline and its session-local input script index. If
-timeout Tick production outruns the adapter, overwritten mailbox entries are
-not processed and do not advance controller state.
+Ticks do not count toward an optional local limit set by `--ticks N`, but they
+advance the stateful controller pipeline and its session-local input script
+index. If timeout Tick production outruns the adapter, overwritten mailbox
+entries are not processed and do not advance controller state.
 
 Tick reception and Commit are separate SDK calls; eCAL callbacks never run the
 WBR decoder or controller. An exception in decoding or control stops and

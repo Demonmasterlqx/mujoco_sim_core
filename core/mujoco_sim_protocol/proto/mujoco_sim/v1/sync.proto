@@ -25,6 +25,34 @@ enum ResourceType {
   COMMAND_ACTUATOR = 2;
 }
 
+enum AdapterRole {
+  ADAPTER_ROLE_UNSPECIFIED = 0;
+  CONTROLLER = 1;
+  OBSERVER = 2;
+}
+
+enum StreamFormat {
+  STREAM_FORMAT_UNSPECIFIED = 0;
+  RGB8 = 1;
+  DEPTH32F = 2;
+  SEGMENTATION32U = 3;
+  XYZ32F = 4;
+}
+
+enum FrameConvention {
+  FRAME_CONVENTION_UNSPECIFIED = 0;
+  MUJOCO_NATIVE = 1;
+  ROS_OPTICAL = 2;
+  ROS_BODY = 3;
+}
+
+enum StreamState {
+  STREAM_STATE_UNSPECIFIED = 0;
+  STREAM_IDLE = 1;
+  STREAM_RUNNING = 2;
+  STREAM_ERROR = 3;
+}
+
 enum ControllerState {
   CONTROLLER_STATE_UNSPECIFIED = 0;
   PROVISIONAL = 1;
@@ -56,6 +84,7 @@ message Header {
   uint64 timestamp_unix_nanos = 5;
   uint32 protocol_major = 6;
   uint32 protocol_minor = 7;
+  optional double simulation_time_s = 8;
 }
 
 message ResourceDescriptor {
@@ -68,6 +97,15 @@ message ResourceDescriptor {
   bool has_ctrl_range = 7;
   double ctrl_min = 8;
   double ctrl_max = 9;
+  int32 mujoco_stage = 10;
+  double interval_period_s = 11;
+  double interval_phase_s = 12;
+  double delay_s = 13;
+  string frame_id = 14;
+  string unit = 15;
+  string object_name = 16;
+  int32 object_type = 17;
+  string interpolation = 18;
 }
 
 message ResourceLayout {
@@ -113,6 +151,64 @@ message RegisterControllerResponse {
   ControllerState state = 9;
 }
 
+message ObservationDelivery {
+  oneof schedule {
+    uint32 every_n_steps = 1;
+    double period_s = 2;
+  }
+}
+
+message RegisterAdapterRequest {
+  string server_name = 1;
+  string adapter_id = 2;
+  AdapterRole role = 3;
+  uint32 protocol_major = 4;
+  uint32 protocol_minor = 5;
+  repeated string observation_names = 6;
+  repeated string command_names = 7;
+  uint32 timeout_ms = 8;
+  ObservationDelivery delivery = 9;
+}
+
+message RegisterAdapterResponse {
+  ErrorCode code = 1;
+  string message = 2;
+  string adapter_id = 3;
+  AdapterRole role = 4;
+  uint64 session_id = 5;
+  uint64 epoch = 6;
+  uint32 effective_protocol_major = 7;
+  uint32 effective_protocol_minor = 8;
+  ResourceLayout layout = 9;
+  ControllerState state = 10;
+}
+
+message ActivateAdapterRequest {
+  string adapter_id = 1;
+  AdapterRole role = 2;
+  uint64 session_id = 3;
+  uint64 epoch = 4;
+}
+
+message ActivateAdapterResponse {
+  ErrorCode code = 1;
+  string message = 2;
+  ControllerState state = 3;
+}
+
+message UnregisterAdapterRequest {
+  string adapter_id = 1;
+  AdapterRole role = 2;
+  uint64 session_id = 3;
+  uint64 epoch = 4;
+}
+
+message UnregisterAdapterResponse {
+  ErrorCode code = 1;
+  string message = 2;
+  ControllerState state = 3;
+}
+
 message ActivateControllerRequest {
   string controller_id = 1;
   uint64 session_id = 2;
@@ -155,6 +251,13 @@ message Tick {
   ControllerState controller_state = 5;
 }
 
+message ObservationFrame {
+  Header header = 1;
+  string observer_id = 2;
+  uint64 sequence = 3;
+  repeated ObservationBlock observations = 4;
+}
+
 message AdapterCommit {
   Header header = 1;
   string controller_id = 2;
@@ -166,6 +269,13 @@ message AdapterCommit {
 message Heartbeat {
   Header header = 1;
   string controller_id = 2;
+}
+
+message AdapterHeartbeat {
+  Header header = 1;
+  string adapter_id = 2;
+  AdapterRole role = 3;
+  uint64 last_observation_sequence = 4;
 }
 
 message ControllerStatus {
@@ -180,9 +290,97 @@ message ControllerStatus {
   bool required_for_barrier = 9;
 }
 
+message AdapterStatus {
+  string adapter_id = 1;
+  AdapterRole role = 2;
+  uint64 session_id = 3;
+  ControllerState state = 4;
+  string message = 5;
+  uint64 state_since_tick_id = 6;
+  uint64 timeout_count = 7;
+  optional uint64 last_delivery_tick_id = 8;
+  uint64 last_observation_sequence = 9;
+  uint64 dropped_observation_frames = 10;
+}
+
+message CameraIntrinsics {
+  double fx = 1;
+  double fy = 2;
+  double cx = 3;
+  double cy = 4;
+}
+
+message SegmentationLabel {
+  uint32 value = 1;
+  int32 mujoco_object_type = 2;
+  int32 mujoco_object_id = 3;
+  string name = 4;
+}
+
+message StreamDescriptor {
+  string name = 1;
+  string topic = 2;
+  StreamFormat format = 3;
+  uint32 width = 4;
+  uint32 height = 5;
+  uint32 row_stride_bytes = 6;
+  string frame_id = 7;
+  FrameConvention frame_convention = 8;
+  string source_name = 9;
+  double rate_hz = 10;
+  uint64 maximum_payload_bytes = 11;
+  optional CameraIntrinsics camera_intrinsics = 12;
+  repeated SegmentationLabel segmentation_labels = 13;
+}
+
+message GetSensorStreamsRequest {
+  string server_name = 1;
+  uint32 protocol_major = 2;
+  uint32 protocol_minor = 3;
+}
+
+message GetSensorStreamsResponse {
+  ErrorCode code = 1;
+  string message = 2;
+  uint64 epoch = 3;
+  uint32 effective_protocol_major = 4;
+  uint32 effective_protocol_minor = 5;
+  repeated StreamDescriptor streams = 6;
+}
+
+message StreamFrameHeader {
+  Header header = 1;
+  string stream_name = 2;
+  uint64 stream_sequence = 3;
+  uint64 capture_id = 4;
+  StreamFormat format = 5;
+  uint32 width = 6;
+  uint32 height = 7;
+  uint32 row_stride_bytes = 8;
+  string frame_id = 9;
+  FrameConvention frame_convention = 10;
+  uint64 payload_size = 11;
+  uint64 dropped_since_previous = 12;
+}
+
+message StreamStatus {
+  string name = 1;
+  StreamState state = 2;
+  string message = 3;
+  uint64 subscriber_count = 4;
+  uint64 captures = 5;
+  uint64 published = 6;
+  uint64 dropped = 7;
+  uint64 publish_errors = 8;
+  double blocked_time_ms = 9;
+  optional uint64 last_capture_tick_id = 10;
+}
+
 message ServerStatus {
   Header header = 1;
   ServerState state = 2;
   string message = 3;
   repeated ControllerStatus controllers = 4;
+  repeated AdapterStatus adapters = 5;
+  repeated StreamStatus streams = 6;
 }

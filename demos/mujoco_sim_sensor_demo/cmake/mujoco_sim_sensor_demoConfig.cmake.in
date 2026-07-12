@@ -1,0 +1,15 @@
+@PACKAGE_INIT@
+
+include(CMakeFindDependencyMacro)
+find_dependency(Eigen3 CONFIG)
+find_dependency(mujoco_sim_adapter_sdk CONFIG)
+find_dependency(PkgConfig)
+pkg_check_modules(PCL REQUIRED IMPORTED_TARGET
+  pcl_common
+  pcl_filters
+  pcl_registration
+)
+find_dependency(PNG)
+
+include("${CMAKE_CURRENT_LIST_DIR}/mujoco_sim_sensor_demoTargets.cmake")
+check_required_components(mujoco_sim_sensor_demo)

@@ -1,0 +1,27 @@
+<?xml version="1.0"?>
+<package format="3">
+  <name>mujoco_sim_sensor_demo</name>
+  <version>0.1.0</version>
+  <description>Four-process MuJoCo sensor, control, and PCL mapping demo.</description>
+  <maintainer email="pnx@example.com">pnx</maintainer>
+  <license>Apache-2.0</license>
+
+  <buildtool_depend>cmake</buildtool_depend>
+  <depend>pkg-config</depend>
+  <depend>eigen</depend>
+  <depend>libpcl-all-dev</depend>
+  <depend>libpng-dev</depend>
+  <depend>mujoco_sim_adapter_sdk</depend>
+  <depend>mujoco_sim_config</depend>
+  <depend>mujoco_sim_protocol</depend>
+  <exec_depend>mujoco_sim_server</exec_depend>
+  <test_depend>gtest</test_depend>
+  <test_depend>mujoco_sim_core</test_depend>
+  <test_depend>mujoco_sim_sensor</test_depend>
+  <test_depend>mujoco_sim_server</test_depend>
+  <test_depend>xvfb</test_depend>
+
+  <export>
+    <build_type>cmake</build_type>
+  </export>
+</package>

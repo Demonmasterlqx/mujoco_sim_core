@@ -13,6 +13,7 @@ file(MAKE_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}/generated/proto")
 
 add_library(${PROJECT_NAME}
   ${PROTO_FILES}
+  src/stream_frame.cpp
 )
 add_library(mujoco_sim::protocol ALIAS ${PROJECT_NAME})
 

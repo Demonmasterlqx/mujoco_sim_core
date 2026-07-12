@@ -5,12 +5,14 @@
 | 包 | 作用 | 文档 |
 |---|---|---|
 | `mujoco_sim_config` | 从 schema 在构建期生成 C++ 配置类型、严格 YAML/CLI 解析器 | [查看](core/mujoco_sim_config/README.md) |
-| `mujoco_sim_protocol` | 定义 V1.1 Protobuf 协议和 eCAL 命名规则 | [查看](core/mujoco_sim_protocol/Readme.md) |
+| `mujoco_sim_protocol` | 定义兼容 V1.1 Controller 的 V1.2 Protobuf/raw stream 协议和 eCAL 命名规则 | [查看](core/mujoco_sim_protocol/Readme.md) |
 | `mujoco_sim_core` | 管理 MuJoCo 状态、资源所有权和 lockstep 仿真 | [查看](core/mujoco_sim_core/Readme.md) |
+| `mujoco_sim_sensor` | 从隔离 Snapshot 捕获 headless camera 与 360 度 ray LiDAR | [查看](core/mujoco_sim_sensor/README.md) |
 | `mujoco_sim_server` | 提供 eCAL server、配置解析和图形界面 | [查看](core/mujoco_sim_server/Readme.md) |
-| `mujoco_sim_adapter_sdk` | 提供同步 controller adapter C++ SDK | [查看](core/mujoco_sim_adapter/mujoco_sim_adapter_sdk/Readme.md) |
+| `mujoco_sim_adapter_sdk` | 提供同步 Controller、非 Barrier Observer 与异步 Stream C++ Client | [查看](core/mujoco_sim_adapter/mujoco_sim_adapter_sdk/Readme.md) |
 | `mujoco_sim_sample_adapter` | 展示固定 command adapter 和端到端联调 | [查看](core/mujoco_sim_adapter/mujoco_sim_sample_adapter/Readme.md) |
 | `mujoco_sim_wbr_lqr_demo` | 迁移 WBR LQR 抡腿机器人控制器，提供可配置接口和完整闭环示例 | [查看](demos/mujoco_sim_wbr_lqr_demo/README.md) |
+| `mujoco_sim_sensor_demo` | 四进程房间巡航、相机消费和 IMU/LiDAR ICP 建图示例 | [查看](demos/mujoco_sim_sensor_demo/README.md) |
 
 ## 构建方式
 
@@ -18,12 +20,16 @@
 
 配置生成依赖 Python 3/PyYAML，生成后的运行时依赖 CLI11 和 yaml-cpp；server 图形界面
 依赖 GLFW 和 libpng。可通过 rosdep 安装，对应 Ubuntu 包包括 `python3-yaml`、
-`libcli11-dev`、`libyaml-cpp-dev`、`libglfw3-dev` 和 `libpng-dev`。
+`libcli11-dev`、`libyaml-cpp-dev`、`libglfw3-dev`、`libpng-dev`、EGL/OSMesa 和 PCL。
+
+```bash
+rosdep install --from-paths core demos --ignore-src -r -y
+```
 
 ```bash
 colcon list --topological-order
 colcon build --cmake-args -DBUILD_TESTING=ON
-colcon test --packages-select mujoco_sim_config mujoco_sim_protocol mujoco_sim_core mujoco_sim_server mujoco_sim_adapter_sdk mujoco_sim_sample_adapter mujoco_sim_wbr_lqr_demo
+colcon test --packages-select mujoco_sim_config mujoco_sim_protocol mujoco_sim_core mujoco_sim_sensor mujoco_sim_server mujoco_sim_adapter_sdk mujoco_sim_sample_adapter mujoco_sim_wbr_lqr_demo mujoco_sim_sensor_demo
 colcon test-result --verbose
 ```
 
@@ -36,6 +42,11 @@ V1 使用 eCAL 作为 IPC 方案。外部控制器通过 adapter 接入，不直
 外部控制器（ROS 2/RTOS/裸机/native C++ 等）通过 adapter 接入。
 
 MuJoCo server 会加载模型，然后通过同步 Tick/Commit 协议与各控制器通信。
+
+同步 Controller 的既有行为保持不变：`SyncAdapterClient` 仍在每个 Tick 中原子获得其声明的
+关节/IMU 等小 observation，计算后 Commit 才能完成 Barrier。只读小数据使用
+`ObserverClient`，它在 completed step 后按步数或仿真时间降采样，不参与 Barrier；RGB、
+深度、分割和点云使用 `SensorStreamClient` 消费独立异步 raw stream。
 
 各程序的配置类型和解析器由 `mujoco_sim_config` 根据包内 schema 在构建期生成。启动参数
 使用 CLI11，配置文件使用 yaml-cpp 解析标准 YAML。配置优先级固定为
@@ -53,6 +64,8 @@ activation_timeout_ms: 5000
 allow_timed_out_adapter_replacement: true
 status_period_ms: 100
 headless: false
+render_backend: auto
+sensor_streams: []
 ```
 
 YAML 中的相对路径按配置文件所在目录解析，CLI 路径按进程当前目录解析。使用
@@ -61,7 +74,8 @@ YAML 中的相对路径按配置文件所在目录解析，CLI 路径按进程�
 同名超时 adapter 替换开关可以覆盖对应 YAML 字段。`--startup-timeout-ms` 仍可解析，
 但已弃用且运行时忽略。默认启动 MuJoCo 官方
 `simulate` 图形界面；远程服务、CI 或无显示环境使用 `--headless`，该模式不会初始化
-GLFW/OpenGL。若 YAML 设置了 `headless: true`，可用 `--gui` 在命令行恢复图形模式。
+GLFW viewer。若配置 camera Stream，sensor worker 仍会初始化 EGL 或 OSMesa offscreen
+OpenGL context。若 YAML 设置了 `headless: true`，可用 `--gui` 在命令行恢复图形模式。
 
 图形界面读取 Core 生成的隔离快照，支持官方相机旋转、平移、缩放、左右侧栏、
 渲染选项、传感器和性能面板。UI 不持有也不会修改真实 `mjModel/mjData`，控制器所有权
@@ -111,8 +125,9 @@ mujoco-sim-status --server-name default --watch --interval-ms 1000
 mujoco-sim-status --server-name default --json
 ```
 
-`mujoco-sim-status` 默认收到一条有效 `ServerStatus` 后退出；controller 表同时显示最后
-heartbeat/Commit Tick、状态起始 Tick、累计超时次数和当前 Barrier 成员标志。`--watch` 按
+`mujoco-sim-status` 默认收到一条有效 `ServerStatus` 后退出；统一 Adapter 表区分
+Controller/Observer，并保留 Controller 的 Commit/Barrier 诊断；Sensor Stream 表显示
+subscriber、capture/publish/drop/error/blocking 指标。`--watch` 按
 指定间隔持续输出，断线后报告 stale 并等待同名 server 恢复。`--json --watch` 输出
 NDJSON，诊断信息始终写入 stderr。
 
@@ -142,7 +157,26 @@ mujoco-sim-wbr-lqr-adapter \
   --config install/mujoco_sim_wbr_lqr_demo/share/mujoco_sim_wbr_lqr_demo/config/wbr_lqr.yaml
 ```
 
-adapter 默认处理 6000 个 `ACTIVE` Tick。这里把 server 的全局 `max_ticks` 覆盖为 `0`，
-避免 adapter 接入前的自主步进消耗其预算；adapter 退出后需单独结束 server。21 个 state
-resource 和 6 个 command resource 均可在 adapter YAML 中改名；控制器仍按六个固定语义
-槽位执行上游 LQR/FSM 逻辑。
+随附 adapter YAML 的 `max_ticks: 0` 表示无限运行；这里也把 server 的全局 `max_ticks`
+覆盖为 `0`，因此正常交互运行需由操作者分别结束 adapter 和 server。需要有限验收时，
+使用 adapter 的 `--ticks` 设置本地 `ACTIVE` Tick 上限，不要把 server 的启动总 step 上限
+当作 adapter 预算。21 个 state resource 和 6 个 command resource 均可在 adapter YAML
+中改名；控制器仍按六个固定语义槽位执行上游 LQR/FSM 逻辑。
+
+## Sensor / Mapping Demo
+
+该 Demo 启动一个 Server 和四个独立 eCAL 进程，完成房间周界一圈控制、非 Barrier 状态
+Observer、四类 camera 流消费，以及 16 线 LiDAR + IMU 的 PCL ICP 建图：
+
+```bash
+source install/setup.bash
+mujoco-sim-sensor-demo-launch \
+  --server-config demos/mujoco_sim_sensor_demo/config/sensor_demo_server.yaml \
+  --demo-config demos/mujoco_sim_sensor_demo/config/sensor_demo.yaml \
+  --output-dir /tmp/mujoco_sensor_demo \
+  --mode headless
+```
+
+`--mode gui` 在保持 offscreen sensor streams 的同时打开 MuJoCo viewer。正常完成条件是
+Controller 检测到一圈闭环，不依赖 Server `max_ticks`。输出目录包含 `map.pcd`、
+`trajectory.csv`、`map_top_down.png`、`front_camera.png` 和各进程日志。

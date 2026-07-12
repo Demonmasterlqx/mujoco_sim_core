@@ -1,6 +1,6 @@
 # mujoco_sim_core
 
-`mujoco_sim_core` 是与传输层无关的 MuJoCo V1.1 lockstep 仿真核心。它持有真实
+`mujoco_sim_core` 是与传输层无关的 MuJoCo V1.2 lockstep 仿真核心。它持有真实
 `mjModel`/`mjData`，从模型建立资源目录，并在当前 Tick 打开时固定一组 required
 controller；该组完成或被局部隔离后执行一次 `mj_step()`。
 
@@ -19,6 +19,8 @@ controller；该组完成或被局部隔离后执行一次 `mj_step()`。
 - 通过 `mj_loadXML()` 加载 MJCF XML，可从具名 keyframe 初始化，并创建、重置和持有
   唯一真实仿真状态。
 - 从具名 MuJoCo sensor 和 actuator 建立 observation/command 资源目录。
+- 在 observation descriptor 中公开 MuJoCo stage、interval/phase、delay、frame/object、
+  unit 和 interpolation 元数据。
 - 校验资源发现、控制器注册、激活、注销、session、epoch 与 tick。
 - 对 command actuator 实施单控制器独占所有权。
 - 支持运行期注册、激活和注销；每个 Tick 的 Barrier 集合在打开时固定，新激活者从下一
@@ -27,7 +29,10 @@ controller；该组完成或被局部隔离后执行一次 `mj_step()`。
   Barrier 后写入有效命令并调用一次 `mj_step()`。
 - 按 controller 检查 Commit timeout，局部隔离、清零和恢复；记录 heartbeat/Commit Tick，
   并生成包含动态生命周期字段的 `ServerStatus`。
-- 为可视化调用方创建与真实仿真状态隔离的 MuJoCo 快照。
+- 独立管理非 Barrier Observer：严格资源注册、激活/注销、step/time 降采样、post-step
+  `ObservationFrame`、keepalive timeout 和同名超时替换。
+- 为可视化和异步传感器创建与真实状态隔离的 MuJoCo 快照；快照池可共享一个只读 model，
+  每个快照仍独占 data。
 
 本包不负责：
 
@@ -123,19 +128,21 @@ API 位于 `mujoco_sim::core` 命名空间。
 | `observations()`、`commands()` | 读取当前模型建立的资源目录 |
 | `GetAvailableResources()` | 校验 server/协议版本并返回资源目录 |
 | `RegisterController()` | 校验并分配资源，返回 session、epoch、layout 和 provisional 状态 |
+| `RegisterAdapter()`、`ActivateAdapter()`、`UnregisterAdapter()` | role-aware API；Controller 转发到既有语义，Observer 只获配 observation 且不加入 Barrier |
 | `ActivateController()` | 在运行期将 provisional controller 设为 active；下一 Tick 才加入 Barrier |
 | `UnregisterController()` | 运行期清零并释放 controller/actuator；若它属于当前 Barrier，移除后可能立即完成 step |
 | `OpenTick()` | 打开 Tick 时固定 required/recipient 集合并保存 immutable Tick；重复调用返回已发出的同一 payload |
+| `CollectObservationFrames()` | drain 已在 completed step 时生成的 post-step 小数据帧；重复调用不重复生成，连续 step 与 unregister 内部 step 不丢帧 |
 | `IsTickIssued()` | 判断一份 Tick 是否仍是当前已发出的精确 payload，供异步传输层避免发送失效快照 |
 | `StepIfBarrierComplete()` | required 集合为空或均已有 Commit 时写命令、执行一步并关闭 Tick |
 | `SubmitCommit()` | 校验正常 Commit、局部 command 错误和 `TIMED_OUT` 恢复证明 |
-| `AcceptHeartbeat()` | 对 header 有效的已知控制器记录当前 tick，不返回错误 |
-| `CheckControllerDeadlines(now)` | 清理激活超时的 provisional controller，并逐个隔离 Commit 超时者 |
+| `AcceptHeartbeat()`、`AcceptAdapterHeartbeat()` | 分别处理 Controller 与 Observer keepalive |
+| `CheckControllerDeadlines(now)` | 清理两类 provisional adapter，隔离 Controller Commit timeout 与 Observer keepalive timeout |
 | `CheckTickTimeout(now)` | 兼容包装：执行 deadline 检查并返回本次是否出现 `TIMED_OUT` 转换 |
 | `EnterFatalError()`、`MarkStopped()` | 由宿主显式进入全局 `ERROR_PAUSED` 或 `STOPPED`；adapter 局部故障不调用它们 |
 | `MakeStatus()` | 生成当前服务端和控制器状态消息 |
-| `CreateSnapshot()`、`UpdateSnapshot()` | 创建和刷新隔离的可视化副本 |
-| 状态 getter | 另含 `timestep()` 和按状态计数的 `controller_count()` |
+| `CreateSnapshot()`、`CloneSnapshot()`、`UpdateSnapshot()` | 创建深拷贝 model/data、克隆共享 model 的独立 data，并从 Core 刷新 data |
+| 状态 getter | 另含 `timestep()`、`controller_count()` 和 `observer_count()` |
 
 `LoadModel()` 保留原有 `(model_path, error_message)` 签名，并新增
 `(model_path, ModelLoadOptions, error_message)` 重载。所有 `LoadModel()`、
@@ -161,6 +168,48 @@ if (!simulation.LoadModel(model_path, load_options, &error)) {
 keyframe 的 time、qpos、qvel、act 等状态会成为初始状态；其中保存的 ctrl 不会成为启动
 命令。只有临时状态完成初始化后才替换当前模型。XML 加载、data 分配或 keyframe 查找失败
 时，现有 model/data、资源目录、controller、epoch、Tick、快照 generation 和服务状态均不变。
+
+## 小数据 Sensor 与 Observer
+
+Core 不限制具名 MuJoCo Sensor 的具体类型。MuJoCo 3.10 的常用类型包括 joint/tendon/
+actuator position/velocity/force、ball joint、limit、touch、IMU（accelerometer/gyro/
+magnetometer）、force/torque、rangefinder、camera projection、frame pose/axis/velocity/
+acceleration、subtree、几何距离/法向、contact、energy/clock、tactile、plugin 和 user sensor。
+每项的实际 `sensor_needstage`、interval 和 delay 来自模型并写入 catalog。
+descriptor 的 `object_type/object_name` 来自 MuJoCo `sensor_objtype/sensor_objid`；
+`frame_id` 表示数值实际所在坐标系，而不是统一照抄 `sensor_reftype/sensor_refid`：frame
+sensor 使用显式 reference，没有 reference 时为 `world`；accelerometer/gyro/
+velocimeter/force/torque/magnetometer 使用其 site frame；geom normal/from-to 和 subtree
+world-frame 输出标记为 `world`；不携带坐标系语义的标量保持空。joint/tendon 和可确定的
+actuator transmission 还按线性/转动类型给出 `m`、`rad`、`N` 或 `N*m` 等 unit；无法唯一
+推导的 transmission 不声明 unit。
+
+Controller 仍在每个 `Tick` 中同步收到注册 layout 的这些小数据，并必须 Commit。纯观测方
+使用 protocol minor 2 的 role-aware `RegisterAdapter(OBSERVER)`，配置 `every_n_steps` 或
+`period_s`。Core 在每次 completed step 立即读取 post-step `sensordata` 并将 due frame
+排队，宿主随后用 `CollectObservationFrames()` drain；`period_s` 的 deadline 锁相推进，
+离散 timestep 晚于 deadline 时不会把下一周期重新锚定到实际交付时刻：
+
+```cpp
+mujoco_sim::v1::RegisterAdapterRequest request;
+request.set_server_name("default");
+request.set_adapter_id("state_logger");
+request.set_role(mujoco_sim::v1::OBSERVER);
+request.set_protocol_major(mujoco_sim::protocol::kProtocolMajor);
+request.set_protocol_minor(mujoco_sim::protocol::kProtocolMinor);
+request.add_observation_names("imu_quat");
+request.mutable_delivery()->set_every_n_steps(1);
+
+const auto registered = simulation.RegisterAdapter(request);
+// 使用 returned session/epoch 调用 ActivateAdapter()。
+simulation.OpenTick();
+if (simulation.StepIfBarrierComplete()) {
+  const auto frames = simulation.CollectObservationFrames();
+}
+```
+
+Observer 没有 command、不会进入 Barrier；其 keepalive timeout 只改变自身状态。相机 RGB/
+深度和大点云不是这里的 `sensordata` 小数据，使用 `mujoco_sim_sensor` 与 Server stream runtime。
 
 ## 最小可用示例
 
@@ -283,6 +332,9 @@ if (!simulation.UpdateSnapshot(snapshot.get(), &error)) {
 
 - `CreateSnapshot()` 使用 `mj_copyModel()` 和 `mj_copyData()` 创建独立 model/data；
   修改快照不会修改 Core 的真实状态。
+- `CloneSnapshot(source)` 共享 source 的只读 model，并从 source 当时的 data 状态创建独立
+  data，适合一个 capture worker 的有界 snapshot pool；它不会改用 Core 此刻的状态。不同
+  worker 可各自从 `CreateSnapshot()` 开始。
 - 快照不会自动更新。`UpdateSnapshot()` 只把当前真实 `mjData` 复制到既有快照，
   不执行 step，也不把快照内容写回 Core。
 - 快照只能由创建它的同一个 `SimulationCore`、同一模型 generation 刷新。Core 再次
@@ -304,6 +356,9 @@ if (!simulation.UpdateSnapshot(snapshot.get(), &error)) {
   `ctrlrange` 校验。
 - controller 可在 `RUNNING` 期间注册、激活和注销。注册至少要申请一个 command actuator；
   同一 actuator 不能同时属于两个 controller，资源名也不能在同一请求中重复。
+- Observer 至少申请一个 observation，必须不申请 command；其 ID 不能与 Controller 冲突。
+  默认每 step delivery，或二选一配置正整数 every-N-step/有限正 period。首次帧在激活后的
+  下一 completed step 生成，sequence 独立单调递增。
 - `PROVISIONAL` controller 超过 `activation_timeout_ms` 未激活时，deadline 检查将其移除并
   释放 actuator。运行期激活不会加入已经打开的 Tick；每个 Tick 的 required Barrier 集合
   在 `OpenTick()` 打开时固定。
@@ -334,6 +389,9 @@ if (!simulation.UpdateSnapshot(snapshot.get(), &error)) {
 - `AcceptHeartbeat()` 只单调更新状态中的最后 heartbeat tick，乱序旧消息不会令它倒退。当前
   deadline 判断的是 open Tick 后各 required controller 尚未提交 Commit 的耗时，不使用
   heartbeat 年龄，也不会自行定时调用。
+- Observer deadline 使用 wall-clock heartbeat 年龄，仅将该 Observer 置为 `TIMED_OUT`；
+  Controller Barrier、actuator 和其他 Observer 不受影响。替换开关同样适用于同名超时
+  Observer session。
 - `ControllerStatus` 报告 optional 最后 Commit Tick、状态起始 Tick、累计超时数和当前
   `required_for_barrier`。全局 `ERROR_PAUSED` 只保留给宿主显式调用 `EnterFatalError()` 等
   server 级致命错误，不再用于 adapter timeout 或局部命令错误。
@@ -356,9 +414,12 @@ colcon test-result \
 ```
 
 [simulation_core_test.cpp](test/simulation_core_test.cpp) 当前覆盖默认与 keyframe 模型初始化、
-空 Barrier step、资源/快照、运行期注册激活注销、协商 minor、固定 Barrier、重复 Commit、
+空 Barrier step、资源/快照及从 source 状态复制的共享-model clone、完整 Sensor
+stage/interval/delay/frame/object/unit/interpolation 元数据、运行期注册激活注销、协商 minor、固定 Barrier、重复 Commit、
 身份错误的非破坏性拒绝、局部 command `ERROR`、provisional 激活过期、per-controller
-timeout/清零/继续 step、immutable Tick、下一 Tick 恢复、同名 `TIMED_OUT` 替换及禁用替换。
+timeout/清零/继续 step、immutable Tick、下一 Tick 恢复、同名 `TIMED_OUT` 替换及禁用替换，
+以及 Controller 同步 observation 回归、Observer 严格注册、非 Barrier post-step 数据、两种
+降采样、keepalive timeout 和替换隔离。
 
 ## 相关包
 

@@ -1,0 +1,60 @@
+server_name: sensor_demo
+model_path: ../mjcf/scene.xml
+max_ticks: 0
+tick_timeout_ms: 5000
+activation_timeout_ms: 10000
+status_period_ms: 100
+headless: true
+render_backend: auto
+log_level: info
+sensor_streams:
+  - name: front_rgb
+    kind: rgb
+    source: front_camera
+    frame_id: front_camera_optical
+    rate_hz: 8.0
+    width: 320
+    height: 240
+    queue_mode: latest
+    queue_depth: 1
+  - name: front_depth
+    kind: depth
+    source: front_camera
+    frame_id: front_camera_optical
+    rate_hz: 8.0
+    width: 320
+    height: 240
+    queue_mode: latest
+    queue_depth: 1
+  - name: front_segmentation
+    kind: segmentation
+    source: front_camera
+    frame_id: front_camera_optical
+    rate_hz: 8.0
+    width: 320
+    height: 240
+    queue_mode: latest
+    queue_depth: 1
+  - name: front_points
+    kind: camera_pointcloud
+    source: front_camera
+    frame_id: front_camera_optical
+    rate_hz: 8.0
+    width: 320
+    height: 240
+    queue_mode: latest
+    queue_depth: 1
+  - name: lidar_points
+    kind: lidar_pointcloud
+    source: lidar_site
+    frame_id: lidar_link
+    rate_hz: 8.0
+    horizontal_samples: 360
+    vertical_samples: 16
+    vertical_fov_min_deg: -15.0
+    vertical_fov_max_deg: 15.0
+    min_range_m: 0.15
+    max_range_m: 15.0
+    queue_mode: fifo
+    queue_depth: 4
+    fifo_overflow: drop_oldest

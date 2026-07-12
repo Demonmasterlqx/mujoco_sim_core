@@ -11,6 +11,8 @@
 #include <ecal/ecal.h>
 #include <mujoco_sim/protocol/topics.hpp>
 
+#include "ecal_runtime.hpp"
+
 namespace mujoco_sim::adapter_sdk {
 namespace {
 
@@ -76,9 +78,7 @@ SyncAdapterClient::~SyncAdapterClient() {
     heartbeat_publisher_.reset();
   }
   registry_client_.reset();
-  if (owns_ecal_) {
-    eCAL::Finalize();
-  }
+  ecal_runtime_.reset();
 }
 
 bool SyncAdapterClient::Start(std::string* error_message) {
@@ -106,13 +106,10 @@ bool SyncAdapterClient::Start(std::string* error_message) {
     *error_message = "at least one command actuator is required";
     return false;
   }
-  if (!eCAL::IsInitialized()) {
-    owns_ecal_ = eCAL::Initialize("mujoco-sim-adapter-" +
-                                  options_.controller_id);
-    if (!owns_ecal_) {
-      *error_message = "failed to initialize eCAL";
-      return false;
-    }
+  ecal_runtime_ = internal::AcquireEcalRuntime(
+      "mujoco-sim-adapter-" + options_.controller_id, error_message);
+  if (!ecal_runtime_) {
+    return false;
   }
 
   eCAL::ServiceMethodInformationSetT methods;
@@ -374,6 +371,13 @@ TickWaitResult SyncAdapterClient::WaitForTick(
   }
 
   std::unique_lock lock(mutex_);
+  if (!terminal_error_.empty()) {
+    *error_message = terminal_error_;
+    return TickWaitResult::kError;
+  }
+  if (stop_requested_ || (monitor_ecal_ && !eCAL::Ok())) {
+    return TickWaitResult::kStopped;
+  }
   if (!started_ || !activated_) {
     *error_message = "adapter client must be activated before waiting";
     return TickWaitResult::kError;
@@ -639,16 +643,25 @@ bool SyncAdapterClient::CompleteUnregister(
     *error_message = response.message();
     return false;
   }
+  TransitionToStopped();
+  return true;
+}
+
+void SyncAdapterClient::MarkStoppedLocked() {
+  stop_requested_ = true;
+  registered_ = false;
+  activated_ = false;
+  accepting_ticks_ = false;
+  queued_tick_.reset();
+  outstanding_tick_.reset();
+}
+
+void SyncAdapterClient::TransitionToStopped() {
   {
     std::lock_guard lock(mutex_);
-    registered_ = false;
-    activated_ = false;
-    accepting_ticks_ = false;
-    queued_tick_.reset();
-    outstanding_tick_.reset();
+    MarkStoppedLocked();
   }
-  Stop();
-  return true;
+  condition_.notify_all();
 }
 
 void SyncAdapterClient::AddLifecycleWarning(const std::string& warning) {
@@ -712,6 +725,7 @@ void SyncAdapterClient::StopTickReception() {
     callback_state_->enabled = false;
     callback_state_->client = nullptr;
   }
+  callback_state_->condition.notify_all();
   {
     std::lock_guard lock(mutex_);
     accepting_ticks_ = false;
@@ -722,12 +736,13 @@ void SyncAdapterClient::StopTickReception() {
   if (status_subscriber_) {
     status_subscriber_->RemoveReceiveCallback();
   }
-  tick_subscriber_.reset();
-  status_subscriber_.reset();
   std::unique_lock callback_lock(callback_state_->mutex);
   callback_state_->condition.wait(
       callback_lock,
       [this] { return callback_state_->active_callbacks == 0; });
+  callback_lock.unlock();
+  tick_subscriber_.reset();
+  status_subscriber_.reset();
 }
 
 bool SyncAdapterClient::IsExpectedTick(
@@ -755,7 +770,19 @@ void SyncAdapterClient::HandleStatusBytes(const void* data, std::size_t size) {
       status.header().server_name() != options_.server_name ||
       status.header().epoch() != registration_.epoch() ||
       status.header().protocol_major() !=
-          registration_.effective_protocol_major()) {
+          registration_.effective_protocol_major() ||
+      status.header().protocol_minor() !=
+          registration_.effective_protocol_minor()) {
+    return;
+  }
+  if (status.state() == mujoco_sim::v1::STOPPED) {
+    TransitionToStopped();
+    return;
+  }
+  if (status.state() == mujoco_sim::v1::ERROR_PAUSED) {
+    SetTerminalError(status.message().empty()
+                         ? "server entered ERROR_PAUSED"
+                         : status.message());
     return;
   }
   for (const auto& controller : status.controllers()) {

@@ -3,7 +3,7 @@
 `mujoco_sim_server` 是 MuJoCo lockstep 仿真的进程入口和 eCAL 组合层。它加载
 MJCF 模型，将无传输依赖的仿真 Core 暴露为 V1 eCAL service/topic，可选运行
 MuJoCo `simulate` 图形界面，并安装只读状态查询命令 `mujoco-sim-status`。包版本为
-`0.1.0`，协议版本为 `1.1`。
+`0.1.0`，协议版本为 `1.2`。
 
 本文所有 shell 命令都假定当前目录是仓库根目录。示例统一使用仓库已有的
 [simple_actuator.xml](../mujoco_sim_core/test/testdata/simple_actuator.xml)。
@@ -14,12 +14,16 @@ MuJoCo `simulate` 图形界面，并安装只读状态查询命令 `mujoco-sim-s
 
 - 使用 `mujoco_sim_config` 的构建期 schema 生成器解析命令行和严格 YAML，构造
   `ServerConfig`。
-- 初始化 eCAL、加载 MJCF，并注册 controller registry service 和运行时 topic。
-- 模型加载后立即以 `RUNNING` 驱动仿真；无 adapter 时按模型 timestep 实时步进，有
-  adapter 时按每 Tick 固定的 Commit Barrier 推进。
+- 初始化 eCAL、加载 MJCF，并注册 Controller/Observer/Stream registry service 和运行时 topic。
+- 模型加载后立即以 `RUNNING` 驱动仿真；无 active Controller 时按模型 timestep 实时
+  步进，有 active Controller 时按每 Tick 固定的 Commit Barrier 推进；Observer 永不加入
+  Barrier。
 - 支持运行期 register/activate/unregister，以及 adapter timeout、恢复、替换和局部命令
   错误隔离。
-- 周期发布 server/controller 状态，处理 Heartbeat，并把运行时错误转换为进程退出码。
+- 在 completed step 后发布非 Barrier Observer 小数据，并按仿真时间异步捕获/发布
+  RGB、深度、分割、camera point cloud 与 ray LiDAR。
+- 为大数据流提供 subscriber-aware lazy capture、latest/FIFO/blocking 背压和分层错误
+  隔离；周期发布 server/adapter/stream 状态。
 - 使用结构化键值日志记录生命周期、协议拒绝、超时和窗口化运行指标；日志默认写 stderr，
   可选写入轮转文件。
 - 默认创建基于 GLFW 的 MuJoCo `simulate` 界面；界面读取 Core 的隔离快照，不持有或
@@ -36,6 +40,9 @@ MuJoCo `simulate` 图形界面，并安装只读状态查询命令 `mujoco-sim-s
 - controller 控制逻辑、重试和命令生成属于 adapter；本包不内置控制策略，也不向
   adapter 暴露原始 MuJoCo 指针。
 - GUI 和 `--headless` 使用同一套 Core 与 eCAL 协议；GUI 不改变 barrier 语义。
+- 相机/LiDAR capture 实现位于
+  [`mujoco_sim_sensor`](../mujoco_sim_sensor/README.md)；本包只负责 profile、snapshot pool、
+  scheduling、queue 和 eCAL publish。
 
 ## 依赖与构建
 
@@ -44,8 +51,8 @@ MuJoCo `simulate` 图形界面，并安装只读状态查询命令 `mujoco-sim-s
 | 类别 | 依赖 | 用途 |
 |---|---|---|
 | 构建 | CMake `>= 3.22`、C++20 | 配置和编译 |
-| 仓库内 | `mujoco_sim_config`、`mujoco_sim_core`、`mujoco_sim_protocol` | 生成配置、仿真 Core、V1 Protobuf 与命名规则 |
-| 系统 | Python 3/PyYAML、CLI11、eCAL、GLFW 3、libpng、yaml-cpp、spdlog、Threads | 构建期生成、CLI、IPC、GUI、PNG、YAML、日志、线程 |
+| 仓库内 | `mujoco_sim_config`、`mujoco_sim_core`、`mujoco_sim_protocol`、`mujoco_sim_sensor` | 生成配置、仿真 Core、V1 Protobuf、命名规则与 headless capture |
+| 系统 | Python 3/PyYAML、CLI11、eCAL、GLFW 3、libpng、yaml-cpp、spdlog、EGL、OSMesa、Threads | 构建期生成、CLI、IPC、GUI、PNG、YAML、日志、offscreen GL、线程 |
 | 测试 | GTest、Xvfb、`readelf` | 单元/包消费测试、状态工具依赖检查和无物理显示器的 GUI 测试 |
 
 CLI11、yaml-cpp、Python 和 PyYAML 由 `mujoco_sim_config` 传递；本包直接声明 eCAL、
@@ -53,7 +60,7 @@ GLFW、libpng 和 spdlog，测试还需要 GTest 和 Xvfb。即使运行时始�
 构建仍会编译 GUI，因此 GLFW 和 libpng 仍是构建依赖。MuJoCo 3.10.0 库及
 `simulate` 源码来自 `mujoco_sim_core` 中现有的 Linux/x86 vendored 目录。
 安装态 package consumer 使用 `readelf` 检查状态工具没有引入 MuJoCo/GUI 等重依赖；
-Ubuntu 可通过 `binutils` 提供该命令，当前 `package.xml` 尚未单独声明这一测试依赖。
+Ubuntu 由 manifest 中的 `binutils` 测试依赖提供该命令。
 
 已配置 rosdep 的环境可先安装清单依赖：
 
@@ -87,7 +94,9 @@ mujoco-sim-server \
 
 ### 无头模式
 
-服务器、CI 或无显示环境使用 `--headless`。此模式不初始化 GLFW/OpenGL：
+服务器、CI 或无显示环境使用 `--headless`。此模式不初始化 GLFW viewer；如果 YAML
+配置相机 Stream，仍会在 sensor worker 内初始化 EGL 或 OSMesa offscreen context，但不会
+连接显示服务器：
 
 ```bash
 source install/setup.bash
@@ -137,11 +146,11 @@ Xvfb 仍会初始化并运行 GUI 渲染；如果不需要渲染，应直接使�
 | `--initial-keyframe NAME` | 字符串 | 空 | 模型加载后原子应用具名 MuJoCo keyframe；空值使用模型默认初始状态。 |
 | `--server-name NAME` | 非空字符串 | `default` | eCAL service/topic 的命名空间。 |
 | `--max-ticks N` | `uint64`，`0..18446744073709551615` | `0` | server 启动后累计完成 N 次 `mj_step()` 即成功退出；包含无 adapter 的 step，`0` 表示无限运行。 |
-| `--tick-timeout-ms N` | `uint32`，`0..4294967295` | `1000` | controller 注册请求未提供非零 timeout 时使用的 Commit barrier 超时。 |
+| `--tick-timeout-ms N` | `uint32`，`0..4294967295` | `1000` | Controller/Observer 注册请求未提供非零 timeout 时使用的默认 Commit barrier/keepalive 超时。 |
 | `--startup-timeout-ms N` | `uint32`，`0..4294967295` | `5000` | 已弃用的兼容参数；仍解析并记录，但运行时始终忽略。 |
 | `--activation-timeout-ms N` | `uint32`，`1..4294967295` | `5000` | `PROVISIONAL` adapter 完成 Activate 的最长时间；过期后自动移除并释放资源。 |
-| `--allow-timed-out-adapter-replacement` | 无 | 启用 | 允许同 `controller_id` 的新注册替换 `TIMED_OUT` session。与 deny flag 互斥。 |
-| `--deny-timed-out-adapter-replacement` | 无 | 未启用 | 禁止同名 `TIMED_OUT` 替换；注册返回 `ALREADY_EXISTS`。与 allow flag 互斥。 |
+| `--allow-timed-out-adapter-replacement` | 无 | 启用 | 允许同 ID、同 role 的新 Controller/Observer 注册替换 `TIMED_OUT` session。与 deny flag 互斥。 |
+| `--deny-timed-out-adapter-replacement` | 无 | 未启用 | 禁止同名同 role 的 `TIMED_OUT` Controller/Observer 替换；注册返回 `ALREADY_EXISTS`。与 allow flag 互斥。 |
 | `--headless` | 无 | 未启用 | 将 `headless` 设为 `true`，不创建 viewer。与 `--gui` 互斥。 |
 | `--gui` | 无 | 未启用 | 将 `headless` 设为 `false`，可覆盖 YAML。与 `--headless` 互斥。 |
 | `--log-level LEVEL` | `trace/debug/info/warn/error/critical/off` | `info` | 设置 server 最低日志级别。 |
@@ -173,10 +182,10 @@ YAML 顶层支持且只支持以下字段：
 | `model_path` | string，最终非空 | 空 | MJCF 模型路径 | `--model` |
 | `initial_keyframe` | string | 空 | 初始具名 MuJoCo keyframe；空值不应用 keyframe | `--initial-keyframe` |
 | `max_ticks` | unsigned integer (`uint64`)，`0..18446744073709551615` | `0` | 从启动开始的最大总 step 数；`0` 无限 | `--max-ticks` |
-| `tick_timeout_ms` | unsigned integer (`uint32`)，`0..4294967295` | `1000` | 默认 Commit barrier 超时 | `--tick-timeout-ms` |
+| `tick_timeout_ms` | unsigned integer (`uint32`)，`0..4294967295` | `1000` | Controller 默认 Commit barrier 超时，也是 Observer 默认 keepalive 超时 | `--tick-timeout-ms` |
 | `startup_timeout_ms` | unsigned integer (`uint32`)，`0..4294967295` | `5000` | 已弃用且忽略，仅保留配置兼容 | `--startup-timeout-ms` |
 | `activation_timeout_ms` | unsigned integer (`uint32`)，`1..4294967295` | `5000` | provisional adapter 激活期限 | `--activation-timeout-ms` |
-| `allow_timed_out_adapter_replacement` | boolean | `true` | 是否允许同名注册替换 `TIMED_OUT` session | allow/deny flags |
+| `allow_timed_out_adapter_replacement` | boolean | `true` | 是否允许同 ID、同 role 注册替换 `TIMED_OUT` Controller/Observer session | allow/deny flags |
 | `status_period_ms` | unsigned integer (`uint32`)，`0..4294967295` | `100` | `ServerStatus` 发布周期；`0` 会在每轮 server loop 尝试发布 | 无 |
 | `headless` | boolean | `false` | `true` 不创建 viewer，`false` 创建 viewer | `--headless` / `--gui` |
 | `log_level` | enum：`trace/debug/info/warn/error/critical/off` | `info` | 最低日志级别 | `--log-level` |
@@ -184,6 +193,40 @@ YAML 顶层支持且只支持以下字段：
 | `log_file_max_size_mb` | unsigned integer (`uint32`)，`1..4294967295` | `10` | 单文件 MiB 上限 | `--log-file-max-size-mb` |
 | `log_file_max_files` | unsigned integer (`uint32`)，`1..200000` | `5` | 当前文件和历史文件总数 | `--log-file-max-files` |
 | `log_summary_period_ms` | unsigned integer (`uint32`) | `5000` | 摘要周期，`0` 关闭 | `--log-summary-period-ms` |
+| `render_backend` | enum：`auto/egl/osmesa` | `auto` | offscreen camera backend | 无 |
+| `sensor_streams` | object sequence | `[]` | 静态 camera/LiDAR Stream catalog 与队列策略 | 无 |
+
+每个 `sensor_streams` item 必须给出非空且全局唯一的 `name`、MuJoCo camera/site
+`source` 和 `frame_id`。`kind` 为 `rgb`、`depth`、`segmentation`、
+`camera_pointcloud` 或 `lidar_pointcloud`；`rate_hz` 范围为有限的
+`0.000001..1000000.0` Hz。camera 使用正整数
+`width/height`，LiDAR 使用 `horizontal_samples`、`vertical_samples`、
+`vertical_fov_min_deg/max_deg` 和 `min_range_m/max_range_m`。所有采样维度不得超过
+`INT_MAX`，按格式计算的单帧 payload 不得超过 512 MiB；LiDAR `max_range_m` 还必须可由
+float32 表示。这些限制在创建 snapshot pool 或渲染资源前校验。`queue_mode` 为：
+
+- `latest`：`queue_depth` 必须为 1，新 capture 替换未处理 capture。
+- `fifo`：有界深度 `1..64`，`fifo_overflow` 可选 `drop_oldest` 或 `drop_newest`。
+- `blocking`：`queue_depth` 范围同样为 `1..64`。每个到期 capture 都阻塞仿真
+  completed-step 路径，直到 worker 完成 capture 和全部 eCAL publish 尝试；不等待
+  subscriber 业务处理。等待期间仍持有仿真推进锁以保证 snapshot 和 Observation 发布顺序，
+  但不持有 Server 主状态锁，因此 register、heartbeat 和 status 查询仍可继续；外部
+  `Stop()`、`max_ticks`、`ERROR_PAUSED` 和 eCAL shutdown 都会先唤醒 blocking wait，再等待
+  worker 退出。
+
+同一 camera/source/frame/shape/rate/queue profile 的多个输出共享一次 render。无任何正常
+Stream subscriber 时不 capture；单个输出的序列化失败只将该输出置为 `STREAM_ERROR`
+并解除 blocking。同一次 camera capture 失败会将共享该 camera worker 的全部输出置为
+`STREAM_ERROR`。单次 eCAL `Send()` 拒绝只增加 `publish_errors` 并在后续 capture 重试；
+subscriber 清零时 Stream 回到 `STREAM_IDLE`。eCAL publisher 创建异常发生在初始化阶段，
+会使 Server `Start()` 失败；运行中的 subscriber 查询或发送抛出异常时，对应输出进入粘性
+`STREAM_ERROR` 并唤醒 blocking wait，其他输出、worker 和 Server 继续运行。service/topic
+callback 的异常被隔离在 eCAL 线程边界，GUI server thread 的异常转成退出码 `2`，不会触发
+`std::terminate`。
+
+`render_backend: auto` 在 headless 模式按 EGL 后 OSMesa 回退；GUI 模式只尝试 EGL，防止
+MuJoCo 进程级 OpenGL dispatch 在 GLFW viewer 与 OSMesa 间冲突。GUI 配置显式
+`render_backend: osmesa` 会在启动前被拒绝。
 
 ### 严格校验
 
@@ -230,6 +273,8 @@ log_file: logs/server.log
 log_file_max_size_mb: 10
 log_file_max_files: 5
 log_summary_period_ms: 5000
+render_backend: auto
+sensor_streams: []
 ```
 
 加载配置：
@@ -316,7 +361,8 @@ service 名称为：
 mujoco_sim.<server_name>.registry
 ```
 
-默认配置对应 `mujoco_sim.default.registry`。该 service 注册四个 method：
+默认配置对应 `mujoco_sim.default.registry`。legacy Controller method 保持不变，并追加
+role-aware Adapter 与 Stream catalog method：
 
 | method | request | response | 作用 |
 |---|---|---|---|
@@ -324,6 +370,10 @@ mujoco_sim.<server_name>.registry
 | `RegisterController` | `RegisterControllerRequest` | `RegisterControllerResponse` | 申请资源、检查冲突并取得 session、epoch 和实际 layout。 |
 | `ActivateController` | `ActivateControllerRequest` | `ActivateControllerResponse` | 运行期将 provisional controller 激活；从下一 Tick 加入 Barrier。 |
 | `UnregisterController` | `UnregisterControllerRequest` | `UnregisterControllerResponse` | 运行期清零并释放 controller 及 actuator；可从 open Tick 的 Barrier 移除。 |
+| `RegisterAdapter` | `RegisterAdapterRequest` | `RegisterAdapterResponse` | 注册 Controller 或非 Barrier Observer；Observer 只能声明 observation 和 delivery。 |
+| `ActivateAdapter` | `ActivateAdapterRequest` | `ActivateAdapterResponse` | 按 role 激活 adapter。 |
+| `UnregisterAdapter` | `UnregisterAdapterRequest` | `UnregisterAdapterResponse` | 按 role 注销；Observer 不影响 Barrier。 |
+| `GetSensorStreams` | `GetSensorStreamsRequest` | `GetSensorStreamsResponse` | 返回启动时固定的 stream descriptor/topic/shape/rate catalog。 |
 
 无法反序列化的 service request 会得到对应 response 类型的 `INVALID_ARGUMENT`；业务
 校验失败通过 response 的 `ErrorCode` 返回，通常不会终止 server。
@@ -335,9 +385,12 @@ mujoco_sim.<server_name>.registry
 | 名称模板 | 方向 | Protobuf 消息 | 行为 |
 |---|---|---|---|
 | `mujoco_sim/<server_name>/tick/<controller_id>` | 发布 | `Tick` | 每个 `ACTIVE`/`TIMED_OUT` controller 独立 topic，携带其 layout、observation 和状态。 |
-| `mujoco_sim/<server_name>/commit` | 订阅 | `AdapterCommit` | 所有 adapter 共用；有效 Commit 参与当前 tick barrier。 |
-| `mujoco_sim/<server_name>/heartbeat` | 订阅 | `Heartbeat` | 所有 adapter 共用；更新合法 controller 的 heartbeat。 |
-| `mujoco_sim/<server_name>/status` | 发布 | `ServerStatus` | 按 `status_period_ms` 发布状态；达到 `max_ticks` 或受控运行错误退出前再发布一次。 |
+| `mujoco_sim/<server_name>/commit` | 订阅 | `AdapterCommit` | 所有 Controller 共用；有效 Commit 参与当前 Tick Barrier。 |
+| `mujoco_sim/<server_name>/heartbeat` | 订阅 | `Heartbeat` | legacy Controller keepalive；更新合法 Controller 的 heartbeat。 |
+| `mujoco_sim/<server_name>/adapter_heartbeat` | 订阅 | `AdapterHeartbeat` | role-aware keepalive；Observer 使用它维持 session。 |
+| `mujoco_sim/<server_name>/observation/<observer_id>` | 发布 | `ObservationFrame` | 每个 Observer 的 post-step 具名小数据，不要求 Commit。 |
+| `mujoco_sim/<server_name>/sensor/<stream_name>` | 发布 | raw framed message | 24-byte framing + `StreamFrameHeader` + raw RGB/depth/segmentation/XYZ payload。 |
+| `mujoco_sim/<server_name>/status` | 发布 | `ServerStatus` | 按 `status_period_ms` 发布 server、adapter 和 stream 状态。 |
 
 server 启动 eCAL 时的进程名为 `mujoco-sim-server`。空或无法解析的 Commit/Heartbeat
 topic payload 会记录限流后的 malformed 告警。server 与 adapter 的 `server_name` 必须
@@ -348,13 +401,13 @@ false 属于正常 discovery 状态，只在 trace 记录。eCAL 不返回更具
 
 ### 运行循环与动态生命周期
 
-- 模型加载成功后 Core 立即为 `RUNNING`。没有 active adapter 时，server 打开空 Barrier、
+- 模型加载成功后 Core 立即为 `RUNNING`。没有 active Controller 时，server 打开空 Barrier、
   执行一步，并以模型 `timestep` 为周期安排下一步。每次完成后按“当前 wall time +
   timestep”重新安排，因此调度或 Barrier 延迟不会触发补跑追赶。
 - `max_ticks` 比较 server 启动后的全局 Tick/step ID；adapter 注册前和注销后的空 Barrier
   step 也计入。它不是任一 adapter 的 `Run(max_ticks)` 计数。
 - 每次打开 Tick 时固定 required Barrier 集合。运行期 register/activate 不修改已打开的
-  Barrier，新 `ACTIVE` adapter 从下一 Tick 加入；运行期 unregister 会清零并移除该成员，
+  Barrier，新 `ACTIVE` Controller 从下一 Tick 加入；运行期 unregister 会清零并移除该成员，
   其余 Commit 已齐时可直接完成本 Tick。
 - 每个 required adapter 使用其注册的 `timeout_ms`。单个 adapter 超时后转为 `TIMED_OUT`、
   actuator 清零并从 Barrier 移除，server 和其他 adapter 继续 `RUNNING`。当前 Core 已
@@ -369,6 +422,16 @@ false 属于正常 discovery 状态，只在 trace 记录。eCAL 不返回更具
 - 完整但非法的 command、`COMMIT_ERROR` 或同 Tick 不同 payload 的重复 Commit 只把来源
   controller 置为 `ERROR`、清零并移出 Barrier；不会把整个 server 置为
   `ERROR_PAUSED`。身份/version/tick 不匹配的消息只被拒绝，也不会改变 controller 状态。
+- 每次正常 Commit、timeout、unregister 或空 Barrier 导致 `mj_step()` 完成后，都先收集
+  ObserverFrame，再按 `simulation_time_s` 调度 Stream snapshot；任何 completed-step 分支
+  都不能跳过 post-step 处理。
+- Observer 的 register/activate/unregister 与 Controller 独立；它按 every-N-step 或
+  period 接收小数据、通过 adapter heartbeat 保活，但永不进入 Barrier。Observer timeout/
+  replacement 只影响自己的 session。
+- camera/LiDAR worker 在 Core 锁外处理 snapshot。latest/FIFO 丢弃计入 frame header 和
+  StreamStatus；blocking 的保证止于 eCAL publish 尝试返回。camera capture 错误隔离到同
+  camera worker 的全部输出，serialization 错误隔离到单个输出；单次 eCAL publish 拒绝
+  保留为可重试诊断，均不停止仿真。
 
 同一 open Tick 会重复发布；payload 保持不变，adapter 可幂等重发相同 Commit。全局
 `ERROR_PAUSED` 只用于 viewer 同步失败等 server 级致命错误。
@@ -407,10 +470,11 @@ mujoco-sim-status --server-name demo --watch --json
 | `--interval-ms N` | `1000` | watch 的最小输出间隔；必须大于 0。 |
 | `--json` | 关闭 | 单次输出 JSON；watch 每行输出一个完整 JSON 对象，即 NDJSON。 |
 
-人类模式显示 server state、epoch、tick、协议版本、更新时间、状态消息、controller，
-以及 observation/command 的数量、名称和维度。controller 表列为 `ID`、`State`、
-`Session`、`Last heartbeat`、`Last commit`、`State since`、`Timeouts`、`Barrier` 和
-`Message`；可直接观察 `TIMED_OUT`/`ERROR`、恢复进度和当前 Barrier 成员。JSON 顶层固定为 `status`、`resources`
+人类模式显示 server state、epoch、tick、协议版本、更新时间、状态消息、统一 Adapter 表、
+Sensor Stream 表，以及 observation/command 的数量、名称和维度。Adapter 表区分
+`CONTROLLER`/`OBSERVER` 并显示 session、delivery/sequence、状态起点、timeout 和消息；
+Stream 表显示 state、subscriber、capture/publish/drop/error/blocking 指标。legacy
+Controller Commit/Barrier 字段仍保留在状态 payload。JSON 顶层固定为 `status`、`resources`
 和 `resource_error`；资源查询失败不会使状态查询失败，此时 `resources` 为 `null`，具体
 原因位于 `resource_error`。stdout 只包含状态结果，stale/recovered 和冲突诊断写入
 stderr。
@@ -511,7 +575,7 @@ target_link_libraries(my_server PRIVATE mujoco_sim::server)
 [`ecal_server.hpp`](include/mujoco_sim/server/ecal_server.hpp)，提供配置解析以及
 `EcalServer::Start/Run/Stop`。可执行 target 用于 `$<TARGET_FILE:...>`、测试或部署，
 不作为链接库使用。安装态 package config 会继续查找 `mujoco_sim_config`、eCAL、GLFW、
-`mujoco_sim_core`、`mujoco_sim_protocol`、PNG、spdlog 和 Threads；配置包再传递 CLI11 与
+`mujoco_sim_core`、`mujoco_sim_protocol`、`mujoco_sim_sensor`、PNG、spdlog 和 Threads；配置包再传递 CLI11 与
 yaml-cpp。
 状态工具内部静态库 `mujoco_sim_status_lib` 仅供本包构建和测试，不安装、不导出。
 
@@ -535,7 +599,12 @@ ctest --test-dir build/mujoco_sim_server --output-on-failure
 
 - `server_test`：生成式 CLI/YAML、日志配置、格式/转义、级别、并发、文件失败、轮转、
   告警限流、payload/send 分类、callback 排空、亚毫秒调度 deadline、全部 Barrier 指标和
-  endpoint 命名。
+  endpoint 命名，以及标准/非标准 transport 异常边界。
+- `sensor_runtime_test`：无 DISPLAY 的非空 camera/LiDAR、catalog、simulation-time rate、
+  协议 minor、最大 rate 常数时间调度、latest/FIFO overflow、blocking 在主状态锁外完成
+  capture/publish、pending capture failure 解阻、camera-group capture 与单输出 serialization
+  隔离、publish 拒绝重试、subscriber 断开/替换/idle 竞态、无 subscriber lazy capture、
+  queue/rate/shape/payload 上限、Stop 唤醒 blocking wait 和初始化失败回滚。
 - `png_writer_test`：PNG 兼容写出路径。
 - `server_help`：帮助输出和退出码。
 - `server_logging_e2e`：真实 eCAL malformed/rejection 流量、stderr/文件双 sink、摘要、
@@ -543,6 +612,10 @@ ctest --test-dir build/mujoco_sim_server --output-on-failure
 - `server_lifecycle_e2e`：运行期注册/激活/注销、局部 timeout、恢复、同名替换、局部
   command `ERROR`，并使用双 actuator 验证快速 `ACTIVE` Commit 不会饿死 `TIMED_OUT` Tick，
   且 adapter timeout 不停止 server。
+- Adapter SDK 包中的 `sensor_observer_e2e` 连接真实 Server，明确验证空 Barrier、正常
+  Commit、Controller timeout、legacy/generic open-Barrier unregister 和局部 command
+  `ERROR`。独立 gate Controller 阻止后续空 Barrier step，Observer 与 blocking LiDAR 必须
+  精确发布目标 completed-step 的 Tick，并同时校验 RGB 数据。
 - `server_package_consumer`：安装、外部 `find_package`、链接、两个安装态命令和状态工具
   动态依赖检查。
 - `sim_viewer_test`：viewer 加载、快照同步和关闭。

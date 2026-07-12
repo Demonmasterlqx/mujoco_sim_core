@@ -1,0 +1,186 @@
+version: 1
+namespace: mujoco_sim::sensor_demo::generated
+name: SensorDemoConfig
+program: mujoco-sim-sensor-demo
+description: Run one process from the MuJoCo sensor and mapping demo
+config:
+  flags: [--config, -c]
+  description: Strict sensor demo YAML file
+fields:
+  common:
+    type: object
+    fields:
+      server_name:
+        type: string
+        default: sensor_demo
+        non_empty: true
+        cli: [--server-name]
+      output_directory:
+        type: path
+        default: sensor_demo_output
+        non_empty: true
+        cli: [--output-dir]
+      service_timeout_ms:
+        type: uint32
+        default: 10000
+        min: 1
+        cli: [--service-timeout-ms]
+      wait_timeout_ms:
+        type: uint32
+        default: 1000
+        min: 1
+        cli: [--wait-timeout-ms]
+  controller:
+    type: object
+    fields:
+      adapter_id:
+        type: string
+        default: perimeter_controller
+        non_empty: true
+        cli: [--controller-id]
+      timeout_ms: {type: uint32, default: 5000, min: 1}
+      log_every_ticks: {type: uint64, default: 250}
+      max_simulation_time_s:
+        type: double
+        default: 0.0
+        finite: true
+        min: 0.0
+        cli: [--controller-max-simulation-time-s]
+      interfaces:
+        type: object
+        fields:
+          wheel_positions:
+            type: array
+            items: string
+            size: 4
+            unique: true
+            default: [front_left_wheel_pos, front_right_wheel_pos, rear_left_wheel_pos, rear_right_wheel_pos]
+          imu_quaternion: {type: string, default: imu_quat, non_empty: true}
+          imu_angular_velocity: {type: string, default: imu_gyro, non_empty: true}
+          wheel_velocity_commands:
+            type: array
+            items: string
+            size: 4
+            unique: true
+            default: [front_left_wheel_actuator, front_right_wheel_actuator, rear_left_wheel_actuator, rear_right_wheel_actuator]
+      control:
+        type: object
+        fields:
+          wheel_radius: {type: double, default: 0.18, finite: true, min: 0.000001}
+          track_width: {type: double, default: 0.70, finite: true, min: 0.000001}
+          target_speed:
+            type: double
+            default: 1.0
+            finite: true
+            min: 0.0
+            cli: [--target-speed]
+          max_wheel_angular_speed: {type: double, default: 12.0, finite: true, min: 0.000001}
+          heading_gain: {type: double, default: 2.5, finite: true, min: 0.000001}
+          max_yaw_rate: {type: double, default: 1.8, finite: true, min: 0.000001}
+          waypoint_tolerance: {type: double, default: 0.25, finite: true, min: 0.000001}
+          corner_slowdown_distance: {type: double, default: 0.75, finite: true, min: 0.000001}
+          stop_after_lap: {type: bool, default: true}
+          initial_pose:
+            type: object
+            fields:
+              x: {type: double, default: 0.0, finite: true}
+              y: {type: double, default: 0.0, finite: true}
+              yaw: {type: double, default: 0.0, finite: true}
+          waypoints:
+            type: object_sequence
+            default:
+              - {x: 0.0, y: 0.0}
+              - {x: 9.35, y: 0.0}
+              - {x: 9.35, y: 5.5}
+              - {x: 0.0, y: 5.5}
+            items:
+              type: object
+              fields:
+                x: {type: double, default: 0.0, finite: true}
+                y: {type: double, default: 0.0, finite: true}
+  state_observer:
+    type: object
+    fields:
+      adapter_id: {type: string, default: state_monitor, non_empty: true, cli: [--state-observer-id]}
+      timeout_ms: {type: uint32, default: 5000, min: 1}
+      keepalive_period_ms: {type: uint32, default: 500, min: 1}
+      every_n_steps: {type: uint32, default: 5, min: 1}
+      queue_capacity: {type: uint32, default: 8, min: 1}
+      log_every_frames: {type: uint64, default: 50}
+      max_frames:
+        type: uint64
+        default: 0
+        cli: [--state-max-frames]
+      interfaces:
+        type: object
+        fields:
+          wheel_positions:
+            type: array
+            items: string
+            size: 4
+            unique: true
+            default: [front_left_wheel_pos, front_right_wheel_pos, rear_left_wheel_pos, rear_right_wheel_pos]
+          wheel_velocities:
+            type: array
+            items: string
+            size: 4
+            unique: true
+            default: [front_left_wheel_vel, front_right_wheel_vel, rear_left_wheel_vel, rear_right_wheel_vel]
+          imu_quaternion: {type: string, default: imu_quat, non_empty: true}
+          imu_angular_velocity: {type: string, default: imu_gyro, non_empty: true}
+          imu_linear_acceleration: {type: string, default: imu_accel, non_empty: true}
+  camera_consumer:
+    type: object
+    fields:
+      queue_capacity: {type: uint32, default: 2, min: 1}
+      max_samples_per_stream:
+        type: uint64
+        default: 0
+        cli: [--camera-max-samples]
+      screenshot_filename: {type: string, default: front_camera.png, non_empty: true}
+      streams:
+        type: object
+        fields:
+          rgb: {type: string, default: front_rgb, non_empty: true}
+          depth: {type: string, default: front_depth, non_empty: true}
+          segmentation: {type: string, default: front_segmentation, non_empty: true}
+          pointcloud: {type: string, default: front_points, non_empty: true}
+  mapper:
+    type: object
+    fields:
+      adapter_id: {type: string, default: mapper_imu, non_empty: true, cli: [--mapper-observer-id]}
+      timeout_ms: {type: uint32, default: 5000, min: 1}
+      keepalive_period_ms: {type: uint32, default: 500, min: 1}
+      every_n_steps: {type: uint32, default: 1, min: 1}
+      observer_queue_capacity: {type: uint32, default: 256, min: 1}
+      stream_queue_capacity: {type: uint32, default: 4, min: 1}
+      lidar_stream: {type: string, default: lidar_points, non_empty: true}
+      imu_quaternion: {type: string, default: imu_quat, non_empty: true}
+      imu_max_age_s: {type: double, default: 0.05, finite: true, min: 0.0}
+      max_scans:
+        type: uint64
+        default: 0
+        cli: [--mapper-max-scans]
+      algorithm:
+        type: object
+        fields:
+          voxel_size: {type: double, default: 0.12, finite: true, min: 0.000001}
+          max_correspondence_distance: {type: double, default: 0.9, finite: true, min: 0.000001}
+          max_iterations: {type: uint32, default: 30, min: 1, max: 1000}
+          local_map_scans: {type: uint32, default: 15, min: 1}
+          minimum_points: {type: uint32, default: 20, min: 3}
+          transformation_epsilon: {type: double, default: 0.00000001, finite: true, min: 0.0}
+          euclidean_fitness_epsilon: {type: double, default: 0.000001, finite: true, min: 0.0}
+          maximum_fitness_score: {type: double, default: 0.25, finite: true, min: 0.0}
+          minimum_inlier_ratio: {type: double, default: 0.15, finite: true, min: 0.0, max: 1.0}
+          maximum_translation_step_m: {type: double, default: 1.0, finite: true, min: 0.000001}
+          maximum_rotation_step_rad: {type: double, default: 0.8, finite: true, min: 0.000001, max: 3.141592653589793}
+      output:
+        type: object
+        fields:
+          pcd_filename: {type: string, default: map.pcd, non_empty: true}
+          trajectory_filename: {type: string, default: trajectory.csv, non_empty: true}
+          top_down_png_filename: {type: string, default: map_top_down.png, non_empty: true}
+          image_width: {type: uint32, default: 1024, min: 32, max: 16384}
+          image_height: {type: uint32, default: 768, min: 32, max: 16384}
+          padding_meters: {type: double, default: 0.5, finite: true, min: 0.0}

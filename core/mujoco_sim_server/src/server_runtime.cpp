@@ -2,12 +2,19 @@
 
 #include <algorithm>
 #include <limits>
+#include <string>
 
 namespace mujoco_sim::server {
 
 bool IsProtocolPayloadSizeAllowed(std::size_t size) {
   return size <= kMaxProtocolPayloadBytes &&
          size <= static_cast<std::size_t>(std::numeric_limits<int>::max());
+}
+
+bool RunWithExceptionBoundary(const std::function<void()>& action,
+                              std::string* error_message) noexcept {
+  return RunWithExceptionBoundary<const std::function<void()>&>(action,
+                                                                error_message);
 }
 
 SendOutcome ClassifySendOutcome(bool sent, std::size_t subscribers_before,

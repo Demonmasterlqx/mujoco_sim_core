@@ -14,6 +14,8 @@
   <depend>mujoco_sim_config</depend>
   <depend>mujoco_sim_core</depend>
   <depend>mujoco_sim_protocol</depend>
+  <depend>mujoco_sim_sensor</depend>
+  <test_depend>binutils</test_depend>
   <test_depend>gtest</test_depend>
   <test_depend>xvfb</test_depend>
 

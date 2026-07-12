@@ -6,11 +6,17 @@ V1 要把当前仓库从包骨架推进到可运行的 MuJoCo lockstep 仿真闭
 
 - `mujoco_sim_server` 加载 MuJoCo MJCF 模型，是唯一 `mjModel/mjData` 持有者、唯一 `mjData.ctrl` 写入者和唯一 `mj_step()` 调用者。
 - `mujoco_sim_sample_adapter` 通过 `mujoco_sim_adapter_sdk` 使用真实 eCAL 注册到 server，接收 Tick，提交 Commit。
-- `mujoco_sim_protocol` 使用 Protobuf 定义 1.1 跨进程消息和动态 Adapter 生命周期状态。
+- `mujoco_sim_protocol` 使用 Protobuf 定义向 1.1 向后兼容的 1.2 跨进程消息、动态
+  Adapter 生命周期、同步小数据 Observation 和异步大数据 Stream 描述。
 - `mujoco_sim_core` 不依赖 eCAL，不依赖任何具体 adapter。
+- `SyncAdapterClient` 的 Controller Tick 继续携带同步的关节/IMU 等小数据，并继续以
+  Commit 参与 Barrier；新增 Observer 不能改变这条既有控制闭环语义。
+- sensor-only 使用两条互补路径：`ObserverClient` 同步仿真步后的低带宽具名 MuJoCo
+  Sensor，`SensorStreamClient` 异步消费 RGB、深度、分割和点云等大 payload。
 - 所有代码必须有对应测试；所有计划和代码必须交给 subagent 审查，审查发现作为验收门禁。
 
-V1 不实现 observer-only adapter、异步相机/点云、动态 contact list、多 controller 叠加控制同一 actuator、优先级控制、通配符资源声明。
+V1 不实现运行期修改 Stream catalog、动态 contact list、多 controller 叠加控制同一
+actuator、优先级控制、通配符资源声明、图像压缩/视频编码、GPU 直通或 ROS 2 runtime。
 
 ## 2. 包职责
 
@@ -39,8 +45,15 @@ V1 不实现 observer-only adapter、异步相机/点云、动态 contact list�
 
 - 保存 V1 `.proto` 定义并生成 C++ Protobuf 绑定。
 - 定义 Header、错误码、资源描述、Register/Activate/Unregister、Tick、Commit、Heartbeat、
-  Status；协议 1.1 增加 `TIMED_OUT` 以及最后 Commit Tick、状态起始 Tick、超时计数和
-  Barrier 成员状态。
+  Status；保留 1.1 的 `TIMED_OUT`、最后 Commit Tick、状态起始 Tick、超时计数和 Barrier
+  成员状态。
+- 协议 1.2 增加通用 `AdapterRole` 生命周期、`ObservationDelivery`、`ObservationFrame`、
+  Observer heartbeat/status，以及可选 `Header.simulation_time_s`；所有新增字段和消息均为
+  additive，1.1 Controller wire 字段编号和语义不变。
+- 定义静态 Stream catalog、相机内参/分割 label、frame convention、StreamStatus 和小型
+  Protobuf header + 原始 payload framing。framing 前缀固定为 24-byte little-endian，原始
+  Protobuf header 上限为 1 MiB、payload 上限为 512 MiB；float32/uint32 数值 payload 同样
+  固定为 little-endian。
 - 定义 eCAL service/topic 命名辅助函数。
 
 约束：
@@ -55,8 +68,14 @@ V1 不实现 observer-only adapter、异步相机/点云、动态 contact list�
 - 加载 MJCF，管理 `mjModel/mjData` 生命周期。
 - 可选按具名 keyframe 初始化模型；keyframe 不存在时加载必须原子失败且保留旧模型/状态。
 - 为图形化 viewer 创建和刷新隔离的 `mjModel/mjData` 深拷贝快照。
+- 支持从一个快照克隆共享只读 `mjModel`、独占 `mjData` 的快照池，供异步 renderer/LiDAR
+  worker 在仿真锁外捕获一致状态；clone 必须复制 source 当时的 data，而不是 Core 当前 data。
 - 构建具名 Sensor catalog 和具名 Actuator catalog。
+- 在 Sensor descriptor 中公开 MuJoCo type/datatype/needstage、interval/phase、delay、
+  object/frame、unit 和 interpolation 元数据。
 - 执行 Controller 注册、资源存在性检查、Actuator 独占检查、Session/Epoch/Tick 校验。
+- 独立管理 Observer 的 register/activate/unregister、仿真 step 或仿真时间降采样、
+  heartbeat timeout 和同名超时 session 替换；Observer 永不加入 Controller Barrier。
 - 管理动态 controller 集合、每 Tick 固定 Barrier、Commit 幂等去重、per-controller
   timeout/清零/恢复、局部 `ERROR` 和同名 `TIMED_OUT` session 替换。
 - 将合法 command 写入 `data->ctrl[actuator_id]` 并调用 `mj_step()`。
@@ -66,15 +85,45 @@ V1 不实现 observer-only adapter、异步相机/点云、动态 contact list�
 - 不依赖 eCAL，不创建 topic/service。
 - 真实模型和数据仍由 Core 独占；viewer 只能访问稳定快照，不能写回仿真状态。
 - Observation 只来自具名 MuJoCo Sensor；Command 只对应具名 MuJoCo Actuator。
+- Controller Tick 在 step 前读取当前 Sensor 数据；ObserverFrame 在每次完成 `mj_step()` 后
+  按配置采样。二者均读取同一个 Core 状态，但只有 Controller 必须 Commit。
 - Command 维度固定为 1。
+
+### `mujoco_sim_sensor`
+
+职责：
+
+- 提供与 transport、线程和调度无关的 Snapshot 传感器捕获库。
+- 从固定 MuJoCo camera 一次渲染生成任意组合的 `RGB8`、米制 optical-Z `DEPTH32F`、
+  geom-id `SEGMENTATION32U` 和 ROS optical organized `XYZ32F`。
+- 从具名 site 使用 `mj_multiRay()` 生成 360 度 organized ray LiDAR `XYZ32F`，坐标采用
+  ROS body 约定，miss/range reject 使用 NaN，并排除 site 所在非 world 父 body 的 geom；
+  world-body site 保留环境 geom。
+- 生成完整 StreamDescriptor，校验 profile、尺寸、内参、payload 上限和 snapshot/model
+  一致性。
+
+约束：
+
+- 不依赖 eCAL，不创建 worker、队列或 subscriber，不决定 capture 频率与背压。
+- headless backend 按 `EGL surfaceless -> EGL pbuffer -> OSMesa` 选择；不得打开 X11/
+  Wayland display。MuJoCo OpenGL dispatch 为进程级状态，renderer 创建必须串行化，首次
+  选择 backend family 后不得在同进程切换 EGL/OSMesa。
+- 当前仅支持 perspective camera；分割 label 仅覆盖 MuJoCo geom。
 
 ### `mujoco_sim_server`
 
 职责：
 
 - 作为 composition root 创建 Core 和真实 eCAL 通信端。
-- 提供 registry service：`GetAvailableResources`、`RegisterController`、`ActivateController`、`UnregisterController`。
-- 发布 per-controller Tick，订阅 Commit/Heartbeat，发布 ServerStatus。
+- 提供 legacy Controller 和通用 Adapter registry service，并提供静态
+  `GetSensorStreams` catalog。
+- 发布 per-controller Tick 和 per-observer ObservationFrame，订阅 Controller/Adapter
+  heartbeat 与 Commit，发布统一 ServerStatus。
+- 根据静态 Server YAML 将 camera 同源输出分组，并为每个 camera/LiDAR source 建立独立
+  snapshot pool 与 worker；每次仿真 step 完成后按 simulation time 调度 capture。
+- 为每个 Stream 发布“小 Protobuf header + raw payload”，按 `latest`、有界 `fifo` 或显式
+  `blocking` 实施背压。`latest` 固定深度 1；FIFO 可选 drop-oldest/drop-newest；blocking
+  保证只到 capture 与 eCAL publish 尝试完成，不保证 `Send()` 成功或 subscriber 已处理。
 - 使用 `mujoco_sim_config` 生成的 CLI11/yaml-cpp 配置，处理 initial keyframe、从启动总
   step 计数的 `max_ticks`、`activation_timeout_ms`、同名超时替换开关和错误退出；
   `startup_timeout_ms` 仅为兼容保留，弃用且忽略。
@@ -104,6 +153,14 @@ V1 不实现 observer-only adapter、异步相机/点云、动态 contact list�
   结果，server 不得记录无法证实的 accepted/rejected 结论。
 - 模型加载成功即进入 `RUNNING`。无 adapter 时按模型 timestep 实时推进，每次完成后从
   当前 wall time 安排下一步，不补跑追赶；`max_ticks` 统计启动以来全部 step。
+- Stream catalog 在 Server 启动时固定；无 subscriber 时不做 capture。单个 Stream 的
+  serialize 失败只把该 Stream 置为 `STREAM_ERROR`，必须释放 blocking wait，不能令 Core
+  或其他 Stream 退出；camera capture 失败则隔离该 camera worker 的全部输出，其他 worker
+  继续。eCAL 单次 `Send()` 拒绝是可重试 publish failure，只累计诊断；subscriber 在计数与
+  Send 间断开或替换不得误置永久错误，计数归零时非错误 Stream 回到 `STREAM_IDLE`。
+- `render_backend` 支持 `auto|egl|osmesa`。headless 传感器与 GUI viewer 可同时存在，
+  renderer/context 必须只在其 worker 线程创建、使用和销毁；GUI 的 auto 只允许 EGL，显式
+  OSMesa 必须拒绝，避免与 MuJoCo 进程级 OpenGL dispatch 冲突。
 - 状态工具源码和内部 library 位于 `tools/status`，使用生成式 YAML/CLI 配置，但不链接
   server library、Core、MuJoCo、GUI 或 PNG；资源查询失败不得掩盖已收到的有效
   ServerStatus。
@@ -124,6 +181,15 @@ V1 不实现 observer-only adapter、异步相机/点云、动态 contact list�
 - 使用共享 callback lease state 隔离 eCAL 延迟回调与 Client 生命周期；endpoint teardown
   先断开 owner 再排空 lease。生命周期 service/Commit 操作和 publisher 写入分别串行化，
   `Stop()` 可无阻塞取消正在进行的 Start/Activate。
+- 提供 `ObserverClient`：显式 `Start -> Activate -> WaitForObservation -> Unregister`，支持
+  every-N-step 或 simulation-period delivery、有界 FIFO/drop-oldest queue、丢帧计数和独立 keepalive；
+  它只读取具名小数据，不声明 command，不参与 Barrier。
+- 提供 `SensorStreamClient`：发现静态 catalog 后按 stream 建立 subscriber，支持每个 stream
+  独占选择 blocking wait 或 borrowed-view callback；需要跨 callback 保存时显式 `Copy()`，
+  并校验 epoch/version/format/shape/stride/payload/sequence；订阅 ServerStatus，将请求 stream
+  的 `STREAM_ERROR` 作为该 stream 的粘性 terminal error 唤醒 Wait 并暴露诊断。
+- 三种 Client 使用进程级引用计数 eCAL runtime lease，因此 Controller、Observer 和 Stream
+  consumer 可安全组合在同一进程而不会互相提前 `Finalize()`。
 
 约束：
 
@@ -132,6 +198,8 @@ V1 不实现 observer-only adapter、异步相机/点云、动态 contact list�
 - Commit 使用 pub/sub 且没有同步业务回执；本地成功只表示已缓存并尝试发送，可靠性依靠
   Server 重发 Tick 后 SDK 幂等重发缓存 Commit。
 - 不提供 `Run(handler, max_ticks)` 或 `CommitError()`；Tick 上限和控制错误处理属于应用层。
+- `SyncAdapterClient` 的 observation layout、Tick 小数据读取、outstanding Tick 和 Commit
+  语义保持原样；新增 Observer/Stream API 不从同步 Controller Tick 中移除任何 observation。
 
 ### `mujoco_sim_sample_adapter`
 
@@ -164,11 +232,66 @@ V1 不实现 observer-only adapter、异步相机/点云、动态 contact list�
 - 控制周期与模型 timestep 固定为 `0.001 s`，模型从 `home` keyframe 启动。
 - resource name 只来自配置，控制逻辑内部只依赖六个固定 semantic slot。
 
+### `mujoco_sim_sensor_demo`
+
+职责：
+
+- 提供 12 x 8 x 3 m 房间、五个六边形立柱、四轮 skid-steer 小车、前视相机、IMU 和
+  16 线 360 度 LiDAR 的自包含 MJCF；小车沿封闭房间周界完成一圈。
+- 使用四个互相独立的 eCAL 应用进程验证边界：Controller 通过 `SyncAdapterClient` 获取
+  同步轮速/IMU 并提交四轮 command；state observer 通过 `ObserverClient` 获取非 Barrier
+  小数据；camera consumer 通过 `SensorStreamClient` 校验四类相机流；mapper 同时组合
+  Observer IMU 与异步 LiDAR，并使用 PCL ICP 建图。
+- 所有 state/command/stream 名称、adapter ID、delivery、timeout、队列和算法参数均由
+  `mujoco_sim_config` 生成的严格 YAML/CLI 配置提供，不把模型资源名写死在算法中。
+- launcher 启动 Server 和四个应用进程，传播信号，等待 Controller 完成一圈后让 mapper
+  正常落盘并清理全部子进程。正常运行使用无限 Server；`max_ticks` 仅可用于独立测试。
+- 输出 PCD、trajectory CSV 和 top-down PNG；算法不得读取 ground truth，测试可在输出完成
+  后使用模型真值进行质量评分。
+
+约束：
+
+- 不依赖 ROS 2 runtime；进程通信只使用 eCAL，点云处理使用 PCL。
+- waypoint 控制和 ICP 算法保持 transport-free，并有独立 deterministic 单元测试。
+- mapper 必须按 simulation timestamp 对齐最近的 IMU orientation 与 LiDAR，不使用 wall
+  clock 作为融合时间，不把 NaN miss 送入 ICP。
+
 ## 3. 仿真循环
+
+### 3.1 MuJoCo 3.10 传感器范围与更新频率
+
+Core 对模型中所有“具名且有固定 `sensor_dim`”的 MuJoCo Sensor 统一作为小数据资源，不按
+具体类型做白名单。仓库随附 MuJoCo 3.10 的 `mjtSensor` 包含：
+
+| 类别 | MuJoCo Sensor |
+| --- | --- |
+| site 常用机器人传感器 | touch、accelerometer、velocimeter、gyro、force、torque、magnetometer、rangefinder、camprojection |
+| joint/tendon/actuator | jointpos/jointvel、tendonpos/tendonvel、actuatorpos/actuatorvel/actuatorfrc、jointactuatorfrc、tendonactuatorfrc |
+| ball joint 与 limit | ballquat、ballangvel、jointlimit pos/vel/frc、tendonlimit pos/vel/frc |
+| 空间 frame | framepos、framequat、frame x/y/z axis、frame linear/angular velocity、frame linear/angular acceleration |
+| subtree 与几何关系 | subtree COM/linear velocity/angular momentum、insidesite、geomdist、geomnormal、geomfromto |
+| contact/global/tactile | contact、potential/kinetic energy、clock、tactile |
+| 扩展 | plugin sensor、`mjcb_sensor` user sensor |
+
+MuJoCo 的 camera 不是上述 `sensordata` 中的 RGB/深度图；本计划由
+`mujoco_sim_sensor::OffscreenRenderer` 从 camera 渲染这些大数据。16 线 LiDAR 也不是单个
+MuJoCo Sensor 类型，而是从 site pose 调用 `mj_multiRay()` 合成。
+
+更新频率分三层：
+
+1. MuJoCo 计算层：每次 `mj_step()` 在 `mjSTAGE_POS`、`mjSTAGE_VEL` 或 `mjSTAGE_ACC` 的
+   `sensor_needstage` 阶段刷新 Sensor；模型的 interval/phase/delay、plugin/user callback
+   规则仍优先生效，元数据随 ResourceDescriptor 暴露。
+2. 同步小数据层：Controller 每个 Tick 读取一次当前值；Observer 可配置 every-N-step 或
+   simulation-period，只做降采样，不能提高底层更新率。
+3. 异步大数据层：camera/LiDAR 的 `rate_hz` 由 Server 按 simulation time 调度，实际时间点
+   落在完成 step 的离散边界；wall-clock 变慢不会改变 frame 的 simulation timestamp，队列
+   满时再按 backpressure policy 丢弃或阻塞。
 
 1. Server 启动并加载 MJCF；若配置 `initial_keyframe`，Core 原子应用 keyframe、清零 ctrl
    并执行 `mj_forward()`。具名 Sensor/Actuator 分别进入 Observation/Command catalog，
-   Core 随即进入 `RUNNING`。
+   Core 随即进入 `RUNNING`。Server 同时验证静态 camera/LiDAR profile、建立 Stream catalog，
+   为每个 capture worker 分配共享只读 model、独占 data 的 snapshot pool。
 2. 没有 adapter 时，Server 打开空 Barrier、执行 `mj_step()`，并从完成时刻起等待一个模型
    timestep 再开下一 Tick；延迟不通过连续补步追赶。`max_ticks` 从启动后的第一步累计。
 3. Adapter 可在运行期通过 registry 注册资源。Server 校验协议、资源和 actuator 独占，
@@ -180,6 +303,7 @@ V1 不实现 observer-only adapter、异步相机/点云、动态 contact list�
    per-controller immutable Tick。`ACTIVE` 是 required recipient，`TIMED_OUT` 仅是恢复
    recipient；同一 open Tick 的重传必须保持 payload 不变。Core 只保证生成 issued Tick，
    transport 持续尝试发布但不保证对端收到；minor 0 的超时 Tick 在线上降级为 `ACTIVE`。
+   这里的 observation 是当前 step 边界上的小数据快照，继续随 Controller Tick 同步交付。
 6. SDK callback 校验 Tick 后发送 Heartbeat，并把最新 Tick 放入有界 mailbox；业务线程通过
    `WaitForTick()` 取出一个 outstanding Tick，完成计算后显式 `Commit()`。未提交时不能再次
    Wait；重复 Tick 不重复执行控制逻辑，已有 Commit 时自动原样重发。`TIMED_OUT` 期间只
@@ -197,6 +321,29 @@ V1 不实现 observer-only adapter、异步相机/点云、动态 contact list�
 10. GUI 按固定刷新周期复制 Core 快照；渲染不参与 Barrier。Server 聚合 step rate、
     real-time factor、发布/重传、Commit、timeout/recovery/replacement/local error、激活过期、
     malformed payload 和全部 Barrier completion latency；日志 sink I/O 不进入仿真临界区。
+11. 每次 `mj_step()` 完成后，Core 先按 Observer delivery 规则读取新的 `sensordata`，生成
+    `ObservationFrame` 并写入 completed-step 队列；`CollectObservationFrames()` 只 drain，
+    因此连续 step 和 unregister 内部 step 不会被后一次状态覆盖。Observer 的 every-N-step
+    直接按完成 step 计数；period 模式使用按 `simulation_time_s` 锁相推进的 deadline，不用
+    wall time，也不从迟到的实际交付时刻重新起算。ObservationFrame 发布、丢失或 Observer
+    timeout 都不改变 Controller Barrier。
+12. 同一个 completed-step 路径随后调用 SensorRuntime。每个 worker 先按 simulation time
+    更新下一截止时间；未到期或全部 Stream 无 subscriber 时立即返回。到期时把 Core 当前
+    data 复制进空闲 snapshot，并按配置入 latest/FIFO/blocking capture queue。正常 Commit、
+    Barrier timeout、adapter unregister、局部 command `ERROR` 和空 Barrier 自动 step 的所有路径都必须执行同一
+    post-step Observer/Stream 流程，不能漏采。
+13. camera/LiDAR worker 在仿真锁外捕获 snapshot，生成同一 capture ID/sequence 对应的 raw
+    frame，用 framing API 拼接 header 与 payload，然后调用 eCAL publish。latest/FIFO drop
+    计入 `dropped_since_previous` 和 StreamStatus；blocking 深度为 `1..64`，每个到期 capture
+    都等到 snapshot 在 capture 和 publish 尝试后归还，等待发生在 Server 主状态锁外。单输出
+    serialize 失败或 camera worker capture 失败进入对应范围的 `STREAM_ERROR` 并唤醒 wait；
+    单次 publish 拒绝重试，其余 worker、Server 和仿真循环继续。
+14. MuJoCo Sensor 值本身由 MuJoCo 在其 `sensor_needstage` 对应的 position/velocity/
+    acceleration 计算阶段更新；带 `interval`/`delay` 的插件或原生传感器还受模型配置影响。
+    Controller/Observer 的 delivery 和大数据 Stream `rate_hz` 都是 Server 侧的读取/捕获
+    频率，不能让底层 Sensor 比 MuJoCo 模型声明的更新更快。实际可见频率分别为：Controller
+    每完成 step 一次、Observer 按其降采样规则、Stream 按 profile simulation-time rate，且
+    都以模型 timestep 为离散上限。
 
 ## 4. 测试与验收
 
@@ -204,17 +351,31 @@ V1 不实现 observer-only adapter、异步相机/点云、动态 contact list�
 
 - `mujoco_sim_config`：schema 合法/非法输入、生成代码、严格 YAML/CLI、嵌套类型、相对
   path、优先级、事务性和安装后 consumer 生成。
-- `mujoco_sim_protocol`：topic 命名、Protobuf 序列化/反序列化、协议 1.1、`TIMED_OUT` 和新增
-  ControllerStatus 字段的稳定 wire 值。
+- `mujoco_sim_protocol`：topic 命名、Protobuf 序列化/反序列化、1.1 Controller 兼容性、
+  1.2 Adapter/Observer/Stream 消息、18 组 1.1 golden bytes、稳定 enum/字段号/wire 值，以及 raw frame round-trip、magic/
+  固定 golden bytes、严格 framing `1.0` version、坏 Protobuf header、长度冲突、1 MiB header/
+  512 MiB payload 上限和畸形输入。
 - `mujoco_sim_core`：模型加载、具名 keyframe 成功/失败原子性、catalog、隔离 viewer 快照
-  及刷新、注册失败路径、actuator 冲突、运行期 register/activate/unregister、空/固定
+  及按 source data 复制的共享-model snapshot clone、完整 Sensor 元数据、注册失败路径、actuator 冲突、运行期 register/activate/unregister、空/固定
   Barrier、非法 command 局部 `ERROR`、identity 错误非破坏性拒绝、provisional 激活过期、
-  per-adapter timeout/清零、immutable Tick、恢复和同名替换开关。
+  per-adapter timeout/清零、immutable Tick、恢复和同名替换开关；Observer 严格注册、无
+  command、非 Barrier、post-step 数据、step/time 降采样、keepalive timeout 和替换隔离；
+  回归测试必须证明 Controller Tick 仍同步携带原 observation。
+- `mujoco_sim_sensor`：全部 profile/overflow 校验、descriptor/intrinsics/label、EGL 与 OSMesa
+  无 DISPLAY 非空渲染、米制 depth/XYZ/segmentation 一致性、little-endian 数值 payload、并发/重复 renderer 创建和 EGL context 隔离、已知墙距
+  LiDAR/NaN miss/vertical ring、foreign snapshot、确定性重复 capture 和安装态 consumer。
 - `mujoco_sim_server`：CLI11/YAML（含 activation timeout、替换开关和弃用 startup timeout）、
   GUI/headless、自主实时无追赶步进、启动总 step 上限、真实 GLFW/PNG、安装态 consumer、
   endpoint、日志/限流/指标；真实生命周期 E2E 覆盖动态注册激活注销、timeout、恢复、替换和
   局部 `ERROR` 不停止 server，以及快速 `ACTIVE` Commit 与 `TIMED_OUT` recipient 并存时的
-  整批 Tick 发布。
+  整批 Tick 发布；SensorRuntime 还必须确定性覆盖 catalog、非空相机/LiDAR、simulation-time
+  rate 上限与常数时间调度、latest/FIFO 两种 overflow、blocking 在主锁外到 publish 尝试、
+  全部 Server/eCAL 停止源有界取消、subscriber 断开竞态、单输出与 camera-group ERROR
+  解阻/隔离、惰性 capture、queue 上限、初始化回滚和无 DISPLAY；transport teardown 必须覆盖
+  中间清理动作及错误记录器抛出后仍继续，late callback 在 lifecycle guard 失败后不得访问
+  Server。真实组合 E2E 必须用仍在 Barrier 的 gate Controller 阻止后续空 Barrier 假阳性，
+  并以精确 Tick 覆盖 Commit、timeout、legacy/generic unregister、局部 command `ERROR` 和空
+  Barrier completed-step 后 Observer/Stream 发布。
 - 状态工具单元测试：CLI、status publisher/epoch、资源成功/失败、排序、人类输出新增
   Last commit/State since/Timeouts/Barrier 列，以及 JSON 中 optional Commit、状态、超时和
   Barrier 字段、转义/uint64 精度及 NDJSON。
@@ -223,11 +384,20 @@ V1 不实现 observer-only adapter、异步相机/点云、动态 contact list�
   发布失败缓存、匹配 `ERROR`/替换 status 唤醒、冲突 Tick 诊断、Start/Activate/Commit/
   Unregister 与 Stop 交错、publisher 串行化、延迟 callback 隔离与排空、注销失败重试和
   lifecycle warning；真实 eCAL E2E
-  必须覆盖持有 Tick 超时后的 `TIMED_OUT -> recovery pending -> ACTIVE`。
+  必须覆盖持有 Tick 超时后的 `TIMED_OUT -> recovery pending -> ACTIVE`；Observer 和 Stream
+  Client 分别覆盖 option/layout/identity、队列/sequence drop、wait/callback 互斥、callback
+  borrowed lifetime/异常、Stop/teardown race 和 heartbeat，组合 E2E 必须在同一进程同时收到
+  连续 IMU ObservationFrame、非空 RGB 和 LiDAR raw frame；同 tick status 更新由真实 eCAL
+  registry/status 测试覆盖，生产 SensorRuntime 的 capture `STREAM_ERROR` 还必须经真实 eCAL
+  transport 唤醒 SDK Wait。
 - `mujoco_sim_sample_adapter`：生成式 YAML/CLI、默认/自定义资源、固定 command 生成。
 - `mujoco_sim_wbr_lqr_demo`：上游 golden、同步 pipeline、全部资源改名/乱序映射、严格配置
   转换、输入脚本效果、真实模型 keyframe contract、GUI 非空像素截图、安装态配置闭环、
   6000 Tick headless 验收以及 GUI/Xvfb E2E。
+- `mujoco_sim_sensor_demo`：waypoint/odometry、ICP transactional failure、map 文件原子输出、
+  生成配置和模型资源 contract；真实 server + 四进程 headless 一圈验收必须生成可重载 PCD、
+  单调 trajectory CSV 和非空 PNG，并在测试阶段评分地图范围/闭环误差。另有 GUI/Xvfb 或
+  等价截图测试证明 scene 和 camera 非空；算法运行时不得读取评分 ground truth。
 - 端到端：真实 eCAL server + sample adapter 分别在 headless 和 GUI 模式完成固定 Adapter
   Tick、显式注销；测试确认注销后显式终止无限 server。server 自身的启动总 step 上限由
   server 单元/E2E 独立验证。
@@ -243,8 +413,9 @@ mujoco-sim-status --server-name default --watch --interval-ms 1000
 mujoco-sim-status --server-name default --json
 ```
 
-人类输出包含 server/state、epoch/tick、协议版本、更新时间、消息、controller 动态状态表
-（含最后 Commit、状态起始 Tick、超时数、Barrier 标志）和资源。JSON 顶层固定为
+人类输出包含 server/state、epoch/tick、协议版本、更新时间、消息、统一 Adapter 状态表、
+Sensor Stream 表和资源；legacy Controller 的最后 Commit、状态起始 Tick、超时数和 Barrier
+字段仍保留在状态 payload。JSON 顶层固定为
 `status`、`resources`、`resource_error`；watch JSON 是 NDJSON，诊断只写 stderr。
 
 验收命令：
@@ -252,7 +423,7 @@ mujoco-sim-status --server-name default --json
 ```bash
 colcon list --topological-order
 colcon build --cmake-args -DBUILD_TESTING=ON
-colcon test --packages-select mujoco_sim_config mujoco_sim_protocol mujoco_sim_core mujoco_sim_server mujoco_sim_adapter_sdk mujoco_sim_sample_adapter mujoco_sim_wbr_lqr_demo
+colcon test --packages-select mujoco_sim_config mujoco_sim_protocol mujoco_sim_core mujoco_sim_sensor mujoco_sim_server mujoco_sim_adapter_sdk mujoco_sim_sample_adapter mujoco_sim_wbr_lqr_demo mujoco_sim_sensor_demo
 colcon test-result --verbose
 ```
 
@@ -283,3 +454,132 @@ adapter 接入前的自主 step 单独预留总 `max_ticks` 预算。
 - 配置 schema、生成器、包导出、迁移文档和全部代码差异都必须进入 subagent 审查范围；
   修复发现后重新执行相关测试并进行最终复审。
 - 审查重点：包边界、协议一致性、仿真循环、资源所有权、Barrier/超时、测试覆盖、构建/install 可用性。
+
+## 6. 实施、审查与验证记录
+
+### 6.1 首轮独立审查（2026-07-12）
+
+计划和代码差异按所有权拆成四个只读 subagent 审查面，均覆盖对应生产代码、测试、manifest、
+CMake package export 和文档：
+
+1. Protocol/Core：审查 Protobuf wire contract、raw stream framing、Sensor 元数据、Snapshot
+   所有权、Observer delivery 和 Tick/Commit 状态机。
+2. Sensor/Server：审查 renderer/LiDAR 数学、simulation-time 调度、队列背压、异常边界、
+   Server 配置入口和状态工具。
+3. Adapter SDK：审查 Controller/Observer/Stream 三类 client 生命周期、终止状态、callback
+   teardown、eCAL runtime 共享和并发竞态。
+4. Sensor Demo/集成：审查配置完整性、Controller/Observer/Stream 进程边界、ICP 事务性、
+   launcher 信号传播、真值隔离和 E2E 质量门禁。
+
+首轮发现已修复并新增回归测试：
+
+- Observer 周期改为 Tick 锚点的整数周期序号，避免长期浮点漂移；极小 period 每 step
+  交付。Snapshot 公开 `const mjModel*`，同时保留共享 model/独占 data 所有权。
+- 修正 fixed tendon、tendon actuator、`camprojection frame_id` 元数据，Tick 0 delivery
+  status，陈旧 Commit 幂等范围，以及 payload/output 重叠时的 raw frame 拼接。
+- 为 Sensor worker 增加顶层异常边界；修正 camera `cy`、mono-average camera 一致性和
+  连续淘汰累计；Server 公共配置入口统一校验直接构造配置，包括 FOV/range 有限值。
+- 三类 SDK client 均处理 Server `STOPPED/ERROR_PAUSED`，无限等待可被终止状态唤醒；
+  callback teardown 使用 lease 排空，并增加真实 eCAL 在途析构和 Server 终止 E2E。
+- ICP 在修改地图前统一执行 fitness、inlier、平移和旋转门禁；独立 Observer 记录
+  `base_position/imu_quat` 真值，评分器只在运行完成后计算 ATE、RPE、尺度、时间偏差、
+  fitness p95 和接受率，算法运行时不读取真值。
+- launcher 把 truth recorder 纳入正式 consumer 生命周期，在停止 Server 前先通知其注销并
+  落盘；场景移除天花板并以模型 contract 防止恢复。
+
+### 6.2 已完成验证
+
+- Protocol、Core、Sensor、Server、Adapter SDK 和 Sensor Demo 聚焦单元/安装态测试通过；
+  真实 eCAL 覆盖 Server 终止、Stream 接收、Observer + Sensor 组合以及 callback teardown。
+- Protocol/Core/Sensor/Adapter SDK 的 ASan+UBSan 构建测试和 Adapter SDK TSan 测试通过；
+  各主要新增包的 `-Wall -Wextra -Wpedantic -Werror` 构建通过。
+- Sensor Demo 非 E2E 共 7 项通过；headless 一圈 E2E 用时 46.93 s，得到 739705 个地图点、
+  287 个 pose、接受率 1.0、ATE 1.18756 m、平移 RPE 0.0267582 m、航向 RPE
+  0.00287298 rad、路径尺度 0.952148、fitness p95 0.00612714，满足独立质量门禁。
+- 最终验收仍须重新执行干净的全仓 colcon build/test、sanitizer、严格告警和 E2E 稳定性，
+  再由 subagent 对全部最终差异复审；最终结果追加在本节后，不以本记录替代验收。
+
+### 6.3 最终审查修复（2026-07-12）
+
+首轮审查后的聚焦复查继续发现并修复以下问题，每项均增加可重复自动化测试：
+
+- Protocol/Core：Commit 成功后同步更新 `last_commit`，保证 timeout 恢复后的延迟重传仍按
+  payload 判重；Controller/Observer 在 `STOPPED`/`ERROR_PAUSED` 时均拒绝 Activate；每次
+  成功 `LoadModel()` 重建 Snapshot identity，防止 moved-from Core 复用时交叉接受旧
+  Snapshot；raw framing 的 Protobuf header 上限统一为 1 MiB；`mjSENS_INSIDESITE` unit
+  修正为无量纲 `1`。
+- Sensor：校准相机 `cy` 使用 MuJoCo principal-pixel 的正确符号，并用真实 framebuffer RGB
+  中目标包围盒中心独立验证 descriptor 主点，而非仅依赖同一套射线数学的 segmentation；公开
+  `StreamShapeFor()`，统一执行 renderer `int` 维度和 512 MiB payload 预检，安装态 consumer
+  必须真实提取静态 archive。
+- Server：直接构造配置也拒绝超过 `INT_MAX` 的 camera/LiDAR 采样维度、五类格式的超限
+  payload 和 float32 无法表示的 LiDAR range。`SensorRuntime::RequestStop()` 在 join 前先
+  唤醒 blocking enqueue；blocking wait 还以有界轮询检查 Server stop/eCAL shutdown，且
+  `max_ticks`、`ERROR_PAUSED` 和 `FinishRun()` 都先请求 Sensor 停止，因此所有退出源均不会
+  无限等待 capture queue。
+- Server eCAL 边界：启动期 eCAL 初始化、service 和 endpoint 创建异常转成 `Start()`
+  错误；Tick/Observation/Status 的瞬时 subscriber count/`Send()` 异常限流记录并重试；Sensor
+  publisher 创建异常使启动失败，运行期 Sensor subscriber count/`Send()` 异常只将对应输出
+  置为粘性 `STREAM_ERROR`，其他输出和 Server 继续。service/topic callback 在任何 `this`
+  访问前取得 lifecycle guard；析构以 best-effort 独立执行每项 callback、Sensor 和 endpoint
+  清理，清理有异常时跳过 `eCAL::Finalize()` 以维持残留对象的依赖顺序。GUI server thread、
+  render loop 和全部 transport 操作均有异常边界，不得越过 eCAL/std::thread 边界触发
+  `std::terminate`。
+- Adapter SDK：eCAL runtime 改为进程期常驻，避免 static/global Client 析构顺序访问已销毁
+  mutex；Controller/Observer Wait 先检查 stop/terminal，再检查 activated，确保 status 先于
+  wait 到达时返回准确终止原因；独立进程 static-lifetime 测试覆盖进程退出。最终复审进一步
+  将 Controller/Observer 的 `STOPPED` 与成功注销收敛为同一个锁内原子终止转换，消除清除
+  activation 后才设置 stop 的并发窗口；确定性测试在状态转换完成、notify 尚未发生时持锁，
+  证明并发 Wait 只能在释放后返回 `kStopped`，并分别覆盖真实注销唤醒路径。
+- Sensor Demo：launcher 对所有子进程实施有界 `SIGINT -> SIGTERM -> SIGKILL`，在 consumer
+  注销和落盘期间持续监控 Server，并严格校验预期/异常退出状态；外层 timeout 设置独立
+  kill-after。GUI stream 脚本同样为 camera timeout 设置 kill-after，并有界回收 Server。
+  fake child 测试覆盖拒绝信号、Controller 后 Server 异常退出、异常 shutdown status、GUI
+  camera 拒绝终止和 GUI Server 拒绝 `SIGINT/SIGTERM`，保证脚本不无限等待或遗留进程。
+- Sensor Demo 质量门禁：使用最接近 mapper 首个轨迹时间的 truth XY/yaw 将地图变换到 world，按五个非对称柱中心
+  统计表面支持、角覆盖、内点率和残差；确定性负例必须拒绝 Y 镜像、各向异性尺度、仅地图
+  统一缩放和持续漂移，另以 recorder 先于 mapper 启动的样例验证时间锚点。模型 contract
+  遍历 world/static box/plane 的姿态、相对地面高度与 arena 覆盖面积，并以改名为
+  `weather_shield` 的墙顶封闭正例和 2 m 低顶板正例证明不能靠名称或墙顶高度规避。
+- 包导出：`mujoco_sim_sensor` 与 `mujoco_sim_sensor_demo` 的 installed CMake config 都会调用
+  `PkgConfig`，因此 manifest 使用完整 `pkg-config` `<depend>`，确保二进制安装的下游也安装
+  配置期工具，而不是只满足源码包自身构建。
+- 配置/文档：Sensor Demo 将全部 state、command、camera/LiDAR stream 名称重命名并乱序后
+  逐字段验证 `BuildAppConfig()`；根 README 明确 headless camera 仍初始化 EGL/OSMesa；WBR
+  README 将固定 Tick 描述改为用户可选 `--ticks N` 本地上限。
+
+### 6.4 最终验证（2026-07-12）
+
+- 干净执行 `colcon build --cmake-clean-first --parallel-workers 2`，9 个包全部成功；随后
+  `colcon test --parallel-workers 2` 和 `colcon test-result --verbose` 得到
+  `50 tests, 0 errors, 0 failures, 0 skipped`。
+- Protocol、Core、Sensor、Server、Adapter SDK、Sensor Demo 六个独立目录均以
+  `-Wall -Wextra -Wpedantic -Werror` 构建成功；Sensor 安装态 consumer、Demo scorer、
+  launcher、模型与全改名配置测试还在对应严格告警目录中运行通过。
+- Protocol/Core/Sensor/Server/Adapter SDK 的 ASan+UBSan 构建与功能断言通过；Server
+  `11/11`、SDK `7/7` 均包含真实 eCAL E2E。SDK 在干净全仓安装产物生成后重新构建并复跑；
+  完整 LSan 检测下，`server_terminal_state_ecal_test` 的断言通过，但
+  `libecal_core.so.6` named-event 在进程退出时残留 123 B 第三方分配；关闭 leak detection 后
+  SDK 7/7 保持 address/undefined `halt_on_error=1` 通过。Mesa EGL/OSMesa 驱动同样在退出时
+  保留第三方全局分配，因此 GL 测试使用 `detect_leaks=0`；不使用 GL 的 Sensor 安装态
+  consumer 在完整 leak detection 下通过，并验证 sanitizer 静态 archive 的外部链接参数。
+- Adapter SDK 的 TSan 59 项纯并发单元测试及 static-lifetime 测试通过。真实 eCAL TSan 仍报告
+  `libecal_core.so.6` 的 SHM/service/named-event 内部竞态；同一测试在 ASan+UBSan 和普通
+  E2E 下通过，该第三方风险不通过 suppression 伪装成仓库代码通过。
+- 最新 clean Sensor Demo headless E2E 用时 56.17 s，生成 740378 个地图点、287 个 pose，路径
+  29.2406 m、闭环误差 2.20075 m、接受率 1.0、ATE 1.06603 m、平移 RPE 0.0244271 m、
+  航向 RPE 0.00244998 rad、尺度 0.954829、fitness p95 0.00680103；五柱 landmark 内点率
+  0.595982、残差 p90 0.53403 m，全部门禁通过。GUI Stream E2E 用时 8.35 s 并通过。
+- `git diff --check`、修改脚本 `bash -n` 和全部 package manifest XML 校验通过。
+  `rosdep check --from-paths core demos --ignore-src` 无未知 key；本机仅报告尚未由 apt 满足的
+  `ros-jazzy-ecal`、`xvfb` 和 `binutils-dev`，当前测试使用系统现有工具链完成。
+
+### 6.5 最终复审闭环（2026-07-12）
+
+- Protocol/Core、Adapter SDK、Sensor/Server、Sensor Demo/文档四个审查面均由 subagent 完成
+  最终只读复审，所有首轮及聚焦复查发现均已关闭，无剩余高、中、低严重级代码问题。
+- 最后两项增量复审专门核对 Server sanitizer consumer flags、vendored simulate 的零长度
+  `memcpy` 防护、开放顶部旋转几何裁剪、mapper/truth 时间锚点及其确定性回归测试，均确认
+  不改变正常路径语义且测试能够击穿旧实现。
+- 计划文档中的旧 `49 tests` 记录已在 clean 全仓测试完成后更新为最终 `50 tests`；本节与
+  最终验证记录一并纳入文档审查闭环。
