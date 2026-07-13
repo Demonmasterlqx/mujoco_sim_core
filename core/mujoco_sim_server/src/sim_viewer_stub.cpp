@@ -13,11 +13,11 @@ bool SimViewer::Initialize(std::string* error_message) {
   }
   return false;
 }
-bool SimViewer::QueueLoad(core::SimulationSnapshot*, const std::string&,
+bool SimViewer::QueueLoad(core::SimulationSnapshot&, const std::string&,
                           std::string* error_message) {
   return Initialize(error_message);
 }
-bool SimViewer::Synchronize(core::SimulationCore*, core::SimulationSnapshot*,
+bool SimViewer::Synchronize(core::SimulationCore&, core::SimulationSnapshot&,
                             std::string* error_message) {
   return Initialize(error_message);
 }

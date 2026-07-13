@@ -94,12 +94,27 @@ TEST(ServerTerminalStateEcalTest, StoppedServerWakesAllClientRoles) {
   ASSERT_EQ(tick_wait.wait_for(3s), std::future_status::ready);
   ASSERT_EQ(observation_wait.wait_for(3s), std::future_status::ready);
   ASSERT_EQ(sample_wait.wait_for(3s), std::future_status::ready);
-  EXPECT_EQ(tick_wait.get(), TickWaitResult::kStopped);
-  EXPECT_EQ(observation_wait.get(), ObservationWaitResult::kStopped);
-  EXPECT_EQ(sample_wait.get(), SampleWaitResult::kStopped);
+  const auto tick_result = tick_wait.get();
+  const auto observation_result = observation_wait.get();
+  const auto sample_result = sample_wait.get();
+  EXPECT_TRUE(tick_result == TickWaitResult::kReceived ||
+              tick_result == TickWaitResult::kStopped);
+  EXPECT_TRUE(observation_result == ObservationWaitResult::kReceived ||
+              observation_result == ObservationWaitResult::kStopped);
+  EXPECT_TRUE(sample_result == SampleWaitResult::kReceived ||
+              sample_result == SampleWaitResult::kStopped);
   EXPECT_TRUE(tick_error.empty());
   EXPECT_TRUE(observation_error.empty());
   EXPECT_TRUE(sample_error.empty());
+
+  // Start() now launches the simulation loop, so data may legitimately arrive
+  // before RequestStop(). The terminal status must still dominate later waits.
+  EXPECT_EQ(controller.WaitForTick(0ms, &tick, &tick_error),
+            TickWaitResult::kStopped);
+  EXPECT_EQ(observer.WaitForObservation(0ms, &observation, &observation_error),
+            ObservationWaitResult::kStopped);
+  EXPECT_EQ(streams.WaitForSample("lidar", 0ms, &sample, &sample_error),
+            SampleWaitResult::kStopped);
 }
 
 }  // namespace

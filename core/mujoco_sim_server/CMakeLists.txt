@@ -28,83 +28,54 @@ set(MUJOCO_SIMULATE_ROOT
   "${CMAKE_CURRENT_SOURCE_DIR}/../mujoco_sim_core/mujoco/linux/x86/mujoco-3.10.0/simulate"
 )
 
-add_library(mujoco_sim_server_runtime
+add_library(${PROJECT_NAME}_lib
+  src/ecal_server_transport.cpp
+  src/server_application.cpp
+  src/server_config.cpp
+  src/server_event.cpp
+  src/server_event_queue.cpp
   src/server_logging.cpp
   src/server_runtime.cpp
-  src/simulation_scheduler.cpp)
-add_library(mujoco_sim_server_endpoints src/endpoints.cpp)
-add_library(mujoco_sim_server_config src/server_config.cpp)
+  src/simulation_loop.cpp)
+add_library(mujoco_sim::server ALIAS ${PROJECT_NAME}_lib)
 
 if(MUJOCO_SIM_BUILD_GUI)
-  add_library(mujoco_sim_server_viewer
+  target_sources(${PROJECT_NAME}_lib PRIVATE
     src/lodepng_compat.cpp src/sim_viewer.cpp
     "${MUJOCO_SIMULATE_ROOT}/glfw_adapter.cc"
     "${MUJOCO_SIMULATE_ROOT}/glfw_dispatch.cc"
     "${MUJOCO_SIMULATE_ROOT}/platform_ui_adapter.cc"
     "${MUJOCO_SIMULATE_ROOT}/simulate.cc")
 else()
-  add_library(mujoco_sim_server_viewer src/sim_viewer_stub.cpp)
+  target_sources(${PROJECT_NAME}_lib PRIVATE src/sim_viewer_stub.cpp)
 endif()
 if(MUJOCO_SIM_BUILD_SENSOR_STREAMS)
-  add_library(mujoco_sim_server_sensor_runtime src/sensor_runtime.cpp)
+  target_sources(${PROJECT_NAME}_lib PRIVATE src/sensor_runtime.cpp)
 else()
-  add_library(mujoco_sim_server_sensor_runtime src/sensor_runtime_stub.cpp)
+  target_sources(${PROJECT_NAME}_lib PRIVATE src/sensor_runtime_stub.cpp)
 endif()
 
-add_library(${PROJECT_NAME}_lib
-  src/server_application.cpp)
-add_library(mujoco_sim::server ALIAS ${PROJECT_NAME}_lib)
 mujoco_sim_generate_config(
   TARGET server_config_generated
   SCHEMA config/server_config.yaml
   OUTPUT_NAME server_config_generated
-  OWNER_TARGET mujoco_sim_server_config
+  OWNER_TARGET ${PROJECT_NAME}_lib
 )
 target_compile_features(${PROJECT_NAME}_lib PUBLIC cxx_std_20)
-set(MUJOCO_SIM_SERVER_COMPONENT_TARGETS
-  mujoco_sim_server_config
-  mujoco_sim_server_runtime
-  mujoco_sim_server_endpoints
-  mujoco_sim_server_sensor_runtime
-  mujoco_sim_server_viewer)
-foreach(target IN LISTS MUJOCO_SIM_SERVER_COMPONENT_TARGETS)
-  target_compile_features(${target} PUBLIC cxx_std_20)
-  target_include_directories(${target} PUBLIC
-    "$<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>"
-    "$<INSTALL_INTERFACE:${CMAKE_INSTALL_INCLUDEDIR}>"
-    PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/src")
-endforeach()
 target_include_directories(${PROJECT_NAME}_lib PUBLIC
   "$<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>"
   "$<INSTALL_INTERFACE:${CMAKE_INSTALL_INCLUDEDIR}>"
   PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/src")
-target_include_directories(mujoco_sim_server_viewer PRIVATE
+target_include_directories(${PROJECT_NAME}_lib PRIVATE
   "${MUJOCO_SIMULATE_ROOT}")
 
-target_link_libraries(mujoco_sim_server_runtime PUBLIC
-  mujoco_sim::core mujoco_sim::protocol eCAL::core
-  PRIVATE spdlog::spdlog Threads::Threads)
-target_link_libraries(mujoco_sim_server_config PUBLIC
-  mujoco_sim::config mujoco_sim::protocol)
-target_link_libraries(mujoco_sim_server_endpoints PUBLIC
-  mujoco_sim::core mujoco_sim::protocol eCAL::core
-  PRIVATE mujoco_sim_server_runtime)
-target_link_libraries(mujoco_sim_server_viewer PUBLIC mujoco_sim::core
-  PRIVATE mujoco::mujoco Threads::Threads)
-target_link_libraries(mujoco_sim_server_sensor_runtime PUBLIC
-  mujoco_sim::core mujoco_sim::protocol eCAL::core
-  PRIVATE mujoco_sim_server_config)
 target_link_libraries(${PROJECT_NAME}_lib
   PUBLIC
     mujoco_sim::core
     mujoco_sim::protocol
     eCAL::core
-    mujoco_sim_server_runtime
-    mujoco_sim_server_config
-    mujoco_sim_server_endpoints
-    mujoco_sim_server_sensor_runtime
-    mujoco_sim_server_viewer
   PRIVATE
+    mujoco_sim::config
     mujoco::mujoco
     spdlog::spdlog
     Threads::Threads
@@ -112,23 +83,13 @@ target_link_libraries(${PROJECT_NAME}_lib
 target_compile_definitions(${PROJECT_NAME}_lib PUBLIC
   MUJOCO_SIM_HAS_GUI=$<BOOL:${MUJOCO_SIM_BUILD_GUI}>
   MUJOCO_SIM_HAS_SENSOR_STREAMS=$<BOOL:${MUJOCO_SIM_BUILD_SENSOR_STREAMS}>)
-target_compile_definitions(mujoco_sim_server_config PUBLIC
-  MUJOCO_SIM_HAS_GUI=$<BOOL:${MUJOCO_SIM_BUILD_GUI}>
-  MUJOCO_SIM_HAS_SENSOR_STREAMS=$<BOOL:${MUJOCO_SIM_BUILD_SENSOR_STREAMS}>)
 if(MUJOCO_SIM_BUILD_GUI)
-  target_link_libraries(mujoco_sim_server_viewer PRIVATE glfw PNG::PNG)
+  target_link_libraries(${PROJECT_NAME}_lib PRIVATE glfw PNG::PNG)
 endif()
 if(MUJOCO_SIM_BUILD_SENSOR_STREAMS)
-  target_link_libraries(mujoco_sim_server_config PRIVATE mujoco_sim::sensor)
-  target_link_libraries(mujoco_sim_server_sensor_runtime PUBLIC
-    mujoco_sim::sensor)
+  target_link_libraries(${PROJECT_NAME}_lib PRIVATE mujoco_sim::sensor)
 endif()
 set_target_properties(${PROJECT_NAME}_lib PROPERTIES EXPORT_NAME server)
-set_target_properties(mujoco_sim_server_config PROPERTIES EXPORT_NAME server_config)
-set_target_properties(mujoco_sim_server_runtime PROPERTIES EXPORT_NAME server_runtime)
-set_target_properties(mujoco_sim_server_endpoints PROPERTIES EXPORT_NAME server_endpoints)
-set_target_properties(mujoco_sim_server_sensor_runtime PROPERTIES EXPORT_NAME server_sensor_runtime)
-set_target_properties(mujoco_sim_server_viewer PROPERTIES EXPORT_NAME server_viewer)
 
 add_executable(mujoco-sim-server src/main.cpp)
 target_link_libraries(mujoco-sim-server PRIVATE ${PROJECT_NAME}_lib)
@@ -137,8 +98,7 @@ set_target_properties(mujoco-sim-server PROPERTIES
   INSTALL_RPATH "$ORIGIN/../lib;$ORIGIN/../../mujoco_sim_core/lib"
 )
 
-install(TARGETS ${PROJECT_NAME}_lib ${MUJOCO_SIM_SERVER_COMPONENT_TARGETS}
-  mujoco-sim-server
+install(TARGETS ${PROJECT_NAME}_lib mujoco-sim-server
   EXPORT ${PROJECT_NAME}Targets
   ARCHIVE DESTINATION ${CMAKE_INSTALL_LIBDIR}
   LIBRARY DESTINATION ${CMAKE_INSTALL_LIBDIR}
@@ -186,12 +146,12 @@ if(BUILD_TESTING)
   )
   add_test(NAME server_test COMMAND server_test)
 
-  add_executable(simulation_scheduler_test test/simulation_scheduler_test.cpp)
-  target_include_directories(simulation_scheduler_test PRIVATE
+  add_executable(server_event_queue_test test/server_event_queue_test.cpp)
+  target_include_directories(server_event_queue_test PRIVATE
     "${CMAKE_CURRENT_SOURCE_DIR}/src")
-  target_link_libraries(simulation_scheduler_test PRIVATE
+  target_link_libraries(server_event_queue_test PRIVATE
     ${PROJECT_NAME}_lib GTest::gtest_main)
-  add_test(NAME simulation_scheduler_test COMMAND simulation_scheduler_test)
+  add_test(NAME server_event_queue_test COMMAND server_event_queue_test)
 
   if(MUJOCO_SIM_RUN_BUILD_MATRIX_TESTS)
     add_test(NAME server_build_matrix

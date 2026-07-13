@@ -214,7 +214,7 @@ bool Advance(mujoco_sim::core::SimulationCore* core,
              SensorRuntime* runtime) {
   core->OpenIssuedTicks();
   if (!core->CompleteEmptyBarrier().step_completed.has_value()) return false;
-  runtime->OnStepCompleted(core);
+  runtime->OnStepCompleted(*core);
   runtime->CompleteBlockingEnqueues();
   return true;
 }
@@ -291,7 +291,7 @@ TEST(SensorRuntimeTest, PublishesHeadlessCameraAndLidarCatalogFrames) {
   };
 
   std::string error;
-  ASSERT_TRUE(runtime.Initialize(core.get(), config, &error)) << error;
+  ASSERT_TRUE(runtime.Initialize(*core, config, &error)) << error;
   const auto catalog = runtime.GetCatalog(CatalogRequest());
   ASSERT_EQ(catalog.code(), mujoco_sim::v2::OK);
   ASSERT_EQ(catalog.streams_size(), 5);
@@ -351,7 +351,7 @@ TEST(SensorRuntimeTest, RejectsAnyProtocolVersionOtherThanTwoZero) {
   ServerConfig config = BaseConfig();
   config.sensor_streams = {LidarStream()};
   std::string error;
-  ASSERT_TRUE(runtime.Initialize(core.get(), config, &error)) << error;
+  ASSERT_TRUE(runtime.Initialize(*core, config, &error)) << error;
 
   auto request = CatalogRequest();
   request.set_protocol_minor(1);
@@ -372,7 +372,7 @@ TEST(SensorRuntimeTest, UsesSimulationTimeForStreamRate) {
   config.sensor_streams = {
       LidarStream("lidar", "blocking", 1, "drop_oldest", 20.0)};
   std::string error;
-  ASSERT_TRUE(runtime.Initialize(core.get(), config, &error)) << error;
+  ASSERT_TRUE(runtime.Initialize(*core, config, &error)) << error;
 
   for (int step = 0; step < 21; ++step) {
     ASSERT_TRUE(Advance(core.get(), &runtime));
@@ -404,7 +404,7 @@ TEST(SensorRuntimeTest, MaximumRateAdvancesScheduleWithoutCatchUpLoop) {
                                        "drop_oldest",
                                        kMaximumSensorStreamRateHz)};
   std::string error;
-  ASSERT_TRUE(runtime.Initialize(core.get(), config, &error)) << error;
+  ASSERT_TRUE(runtime.Initialize(*core, config, &error)) << error;
 
   for (int step = 0; step < 3; ++step) {
     ASSERT_TRUE(Advance(core.get(), &runtime));
@@ -424,7 +424,7 @@ TEST(SensorRuntimeTest, LatestQueueKeepsNewestCaptureAndCountsDrops) {
   ServerConfig config = BaseConfig();
   config.sensor_streams = {LidarStream()};
   std::string error;
-  ASSERT_TRUE(runtime.Initialize(core.get(), config, &error)) << error;
+  ASSERT_TRUE(runtime.Initialize(*core, config, &error)) << error;
 
   ASSERT_TRUE(Advance(core.get(), &runtime));
   ASSERT_TRUE(gate.WaitUntilEntered());
@@ -462,7 +462,7 @@ TEST_P(SensorFifoRuntimeTest, AppliesConfiguredOverflowPolicy) {
   config.sensor_streams = {
       LidarStream("lidar", "fifo", 2, GetParam().first)};
   std::string error;
-  ASSERT_TRUE(runtime.Initialize(core.get(), config, &error)) << error;
+  ASSERT_TRUE(runtime.Initialize(*core, config, &error)) << error;
 
   ASSERT_TRUE(Advance(core.get(), &runtime));
   ASSERT_TRUE(gate.WaitUntilEntered());
@@ -505,13 +505,13 @@ TEST(SensorRuntimeTest, BlockingQueueWaitsThroughSuccessfulPublish) {
   config.sensor_streams = {
       LidarStream("lidar", "blocking", 1, "drop_oldest")};
   std::string error;
-  ASSERT_TRUE(runtime.Initialize(core.get(), config, &error)) << error;
+  ASSERT_TRUE(runtime.Initialize(*core, config, &error)) << error;
 
   {
     std::lock_guard lock(core_mutex);
     core->OpenIssuedTicks();
     ASSERT_TRUE(core->CompleteEmptyBarrier().step_completed.has_value());
-    runtime.OnStepCompleted(core.get());
+    runtime.OnStepCompleted(*core);
   }
   ASSERT_TRUE(gate.WaitUntilEntered());
   auto completion = std::async(std::launch::async, [&] {
@@ -555,11 +555,11 @@ TEST(SensorRuntimeTest, StopRequestReleasesBlockingEnqueueBeforeWorkerJoin) {
   config.sensor_streams = {
       LidarStream("lidar", "blocking", 1, "drop_oldest")};
   std::string error;
-  ASSERT_TRUE(runtime.Initialize(core.get(), config, &error)) << error;
+  ASSERT_TRUE(runtime.Initialize(*core, config, &error)) << error;
 
   core->OpenIssuedTicks();
   ASSERT_TRUE(core->CompleteEmptyBarrier().step_completed.has_value());
-  runtime.OnStepCompleted(core.get());
+  runtime.OnStepCompleted(*core);
   ASSERT_TRUE(capture_gate.WaitUntilEntered());
   auto completion = std::async(std::launch::async, [&] {
     runtime.CompleteBlockingEnqueues();
@@ -592,21 +592,20 @@ TEST(SensorRuntimeTest, ExternalStopPredicateReleasesBlockingEnqueue) {
   config.sensor_streams = {
       LidarStream("lidar", "blocking", 1, "drop_oldest")};
   std::string error;
-  ASSERT_TRUE(runtime.Initialize(core.get(), config, &error)) << error;
+  ASSERT_TRUE(runtime.Initialize(*core, config, &error)) << error;
 
   core->OpenIssuedTicks();
   ASSERT_TRUE(core->CompleteEmptyBarrier().step_completed.has_value());
-  runtime.OnStepCompleted(core.get());
+  runtime.OnStepCompleted(*core);
   ASSERT_TRUE(capture_gate.WaitUntilEntered());
-  std::atomic<bool> should_stop{false};
+  std::stop_source stop_source;
   auto completion = std::async(std::launch::async, [&] {
-    runtime.CompleteBlockingEnqueues(
-        [&] { return should_stop.load(std::memory_order_relaxed); });
+    runtime.CompleteBlockingEnqueues(stop_source.get_token());
   });
   ASSERT_TRUE(wait_gate.WaitUntilEntered());
   ASSERT_EQ(completion.wait_for(0ms), std::future_status::timeout);
 
-  should_stop.store(true, std::memory_order_relaxed);
+  stop_source.request_stop();
   ASSERT_EQ(completion.wait_for(500ms), std::future_status::ready);
   completion.get();
 
@@ -632,16 +631,16 @@ TEST(SensorRuntimeTest, BlockingCaptureFailureReleasesPendingWaitSafely) {
   config.sensor_streams = {
       LidarStream("lidar", "blocking", 1, "drop_oldest")};
   std::string error;
-  ASSERT_TRUE(runtime.Initialize(core.get(), config, &error)) << error;
+  ASSERT_TRUE(runtime.Initialize(*core, config, &error)) << error;
 
   core->OpenIssuedTicks();
   ASSERT_TRUE(core->CompleteEmptyBarrier().step_completed.has_value());
-  runtime.OnStepCompleted(core.get());
+  runtime.OnStepCompleted(*core);
   ASSERT_TRUE(capture_gate.WaitUntilEntered());
   for (int step = 0; step < 2; ++step) {
     core->OpenIssuedTicks();
     ASSERT_TRUE(core->CompleteEmptyBarrier().step_completed.has_value());
-    runtime.OnStepCompleted(core.get());
+    runtime.OnStepCompleted(*core);
   }
   auto completion = std::async(std::launch::async, [&] {
     runtime.CompleteBlockingEnqueues();
@@ -670,7 +669,7 @@ TEST(SensorRuntimeTest, PublishRejectionIsRetriedWithoutStoppingStream) {
   config.sensor_streams = {CameraStream("rgb", "rgb"),
                            CameraStream("depth", "depth")};
   std::string error;
-  ASSERT_TRUE(runtime.Initialize(core.get(), config, &error)) << error;
+  ASSERT_TRUE(runtime.Initialize(*core, config, &error)) << error;
   const std::string rgb_topic =
       mujoco_sim::protocol::SensorStreamTopicName("sensor-test", "rgb");
   const std::string depth_topic =
@@ -718,7 +717,7 @@ TEST(SensorRuntimeTest, SerializationFailureErrorsOnlyThatCameraOutput) {
   config.sensor_streams = {CameraStream("rgb", "rgb"),
                            CameraStream("depth", "depth")};
   std::string error;
-  ASSERT_TRUE(runtime.Initialize(core.get(), config, &error)) << error;
+  ASSERT_TRUE(runtime.Initialize(*core, config, &error)) << error;
   const std::string rgb_topic =
       mujoco_sim::protocol::SensorStreamTopicName("sensor-test", "rgb");
   const std::string depth_topic =
@@ -763,7 +762,7 @@ TEST(SensorRuntimeTest, SerializationExceptionErrorsOnlyThatCameraOutput) {
   config.sensor_streams = {CameraStream("rgb", "rgb"),
                            CameraStream("depth", "depth")};
   std::string error;
-  ASSERT_TRUE(runtime.Initialize(core.get(), config, &error)) << error;
+  ASSERT_TRUE(runtime.Initialize(*core, config, &error)) << error;
 
   ASSERT_TRUE(Advance(core.get(), &runtime));
   const std::string depth_topic =
@@ -797,7 +796,7 @@ TEST(SensorRuntimeTest, PublisherExceptionErrorsOnlyThatCameraOutput) {
   config.sensor_streams = {CameraStream("rgb", "rgb"),
                            CameraStream("depth", "depth")};
   std::string error;
-  ASSERT_TRUE(runtime.Initialize(core.get(), config, &error)) << error;
+  ASSERT_TRUE(runtime.Initialize(*core, config, &error)) << error;
 
   ASSERT_TRUE(Advance(core.get(), &runtime));
   const std::string depth_topic =
@@ -823,7 +822,7 @@ TEST(SensorRuntimeTest, SubscriberReplacementDuringSendIsRetryable) {
   ServerConfig config = BaseConfig();
   config.sensor_streams = {LidarStream()};
   std::string error;
-  ASSERT_TRUE(runtime.Initialize(core.get(), config, &error)) << error;
+  ASSERT_TRUE(runtime.Initialize(*core, config, &error)) << error;
   const std::string topic =
       mujoco_sim::protocol::SensorStreamTopicName("sensor-test", "lidar");
   const auto channel = bus.GetOrCreate(topic);
@@ -858,7 +857,7 @@ TEST(SensorRuntimeTest, SubscriberDisconnectDuringSendIsNotAStreamError) {
   ServerConfig config = BaseConfig();
   config.sensor_streams = {LidarStream()};
   std::string error;
-  ASSERT_TRUE(runtime.Initialize(core.get(), config, &error)) << error;
+  ASSERT_TRUE(runtime.Initialize(*core, config, &error)) << error;
   const std::string topic =
       mujoco_sim::protocol::SensorStreamTopicName("sensor-test", "lidar");
   const auto channel = bus.GetOrCreate(topic);
@@ -894,7 +893,7 @@ TEST(SensorRuntimeTest, LazyStreamReturnsToIdleAfterLastSubscriberLeaves) {
   config.sensor_streams = {
       LidarStream("lidar", "latest", 1, "drop_oldest", 1.0)};
   std::string error;
-  ASSERT_TRUE(runtime.Initialize(core.get(), config, &error)) << error;
+  ASSERT_TRUE(runtime.Initialize(*core, config, &error)) << error;
   const std::string topic =
       mujoco_sim::protocol::SensorStreamTopicName("sensor-test", "lidar");
   const auto channel = bus.GetOrCreate(topic);
@@ -929,7 +928,7 @@ TEST(SensorRuntimeTest, CameraCaptureFailureErrorsItsGroupButNotOtherWorkers) {
   config.sensor_streams = {CameraStream("rgb", "rgb"),
                            CameraStream("depth", "depth"), LidarStream()};
   std::string error;
-  ASSERT_TRUE(runtime.Initialize(core.get(), config, &error)) << error;
+  ASSERT_TRUE(runtime.Initialize(*core, config, &error)) << error;
 
   ASSERT_TRUE(Advance(core.get(), &runtime));
   const std::string lidar_topic =
@@ -958,7 +957,7 @@ TEST(SensorRuntimeTest, NoSubscribersAvoidCaptureWork) {
   ServerConfig config = BaseConfig();
   config.sensor_streams = {LidarStream()};
   std::string error;
-  ASSERT_TRUE(runtime.Initialize(core.get(), config, &error)) << error;
+  ASSERT_TRUE(runtime.Initialize(*core, config, &error)) << error;
   for (int step = 0; step < 20; ++step) {
     ASSERT_TRUE(Advance(core.get(), &runtime));
   }
@@ -982,7 +981,7 @@ TEST(SensorRuntimeTest, InitializationFailureRollsBackStartedWorkers) {
   invalid.source = "missing_site";
   config.sensor_streams = {LidarStream("valid"), invalid};
   std::string error;
-  ASSERT_FALSE(runtime.Initialize(core.get(), config, &error));
+  ASSERT_FALSE(runtime.Initialize(*core, config, &error));
   EXPECT_NE(error.find("missing_site"), std::string::npos);
   EXPECT_EQ(runtime.GetCatalog(CatalogRequest()).code(),
             mujoco_sim::v2::FAILED_PRECONDITION);
@@ -1006,7 +1005,7 @@ TEST(SensorRuntimeTest, InitializationExceptionIsReportedWithoutHanging) {
   ServerConfig config = BaseConfig();
   config.sensor_streams = {LidarStream()};
   std::string error;
-  EXPECT_FALSE(runtime.Initialize(core.get(), config, &error));
+  EXPECT_FALSE(runtime.Initialize(*core, config, &error));
   EXPECT_NE(error.find("injected initialization exception"),
             std::string::npos);
 }
@@ -1021,7 +1020,7 @@ TEST(SensorRuntimeTest, PublisherFactoryExceptionIsReported) {
   ServerConfig config = BaseConfig();
   config.sensor_streams = {LidarStream()};
   std::string error;
-  EXPECT_FALSE(runtime.Initialize(core.get(), config, &error));
+  EXPECT_FALSE(runtime.Initialize(*core, config, &error));
   EXPECT_NE(error.find("injected publisher factory exception"),
             std::string::npos);
 }
@@ -1039,35 +1038,35 @@ TEST(SensorRuntimeTest, RejectsUnsafeDirectConfigurationBeforeAllocation) {
   stream.queue_depth = kMaximumSensorStreamQueueDepth + 1;
   config.sensor_streams = {stream};
   std::string error;
-  EXPECT_FALSE(runtime.Initialize(core.get(), config, &error));
+  EXPECT_FALSE(runtime.Initialize(*core, config, &error));
   EXPECT_NE(error.find("queue_depth"), std::string::npos);
 
   config = BaseConfig();
   config.headless = false;
   config.render_backend = "osmesa";
   config.sensor_streams = {CameraStream("rgb", "rgb")};
-  EXPECT_FALSE(runtime.Initialize(core.get(), config, &error));
+  EXPECT_FALSE(runtime.Initialize(*core, config, &error));
   EXPECT_NE(error.find("graphical viewer"), std::string::npos);
 
   config = BaseConfig();
   stream = LidarStream();
   stream.rate_hz = 1e-300;
   config.sensor_streams = {stream};
-  EXPECT_FALSE(runtime.Initialize(core.get(), config, &error));
+  EXPECT_FALSE(runtime.Initialize(*core, config, &error));
   EXPECT_NE(error.find("rate_hz"), std::string::npos);
 
   config = BaseConfig();
   stream = LidarStream();
   stream.queue_mode = "unknown";
   config.sensor_streams = {stream};
-  EXPECT_FALSE(runtime.Initialize(core.get(), config, &error));
+  EXPECT_FALSE(runtime.Initialize(*core, config, &error));
   EXPECT_NE(error.find("queue_mode"), std::string::npos);
 
   config = BaseConfig();
   stream = LidarStream();
   stream.kind = "unknown";
   config.sensor_streams = {stream};
-  EXPECT_FALSE(runtime.Initialize(core.get(), config, &error));
+  EXPECT_FALSE(runtime.Initialize(*core, config, &error));
   EXPECT_NE(error.find("kind"), std::string::npos);
 
   config = BaseConfig();
@@ -1075,34 +1074,34 @@ TEST(SensorRuntimeTest, RejectsUnsafeDirectConfigurationBeforeAllocation) {
   stream.vertical_fov_min_deg =
       std::numeric_limits<double>::quiet_NaN();
   config.sensor_streams = {stream};
-  EXPECT_FALSE(runtime.Initialize(core.get(), config, &error));
+  EXPECT_FALSE(runtime.Initialize(*core, config, &error));
   EXPECT_NE(error.find("vertical_fov_min_deg"), std::string::npos);
 
   config = BaseConfig();
   stream = LidarStream();
   stream.vertical_fov_max_deg = 90.001;
   config.sensor_streams = {stream};
-  EXPECT_FALSE(runtime.Initialize(core.get(), config, &error));
+  EXPECT_FALSE(runtime.Initialize(*core, config, &error));
   EXPECT_NE(error.find("vertical_fov_max_deg"), std::string::npos);
 
   config = BaseConfig();
   stream = LidarStream();
   stream.min_range_m = -0.01;
   config.sensor_streams = {stream};
-  EXPECT_FALSE(runtime.Initialize(core.get(), config, &error));
+  EXPECT_FALSE(runtime.Initialize(*core, config, &error));
   EXPECT_NE(error.find("range"), std::string::npos);
 
   config = BaseConfig();
   stream = LidarStream();
   stream.max_range_m = std::numeric_limits<double>::infinity();
   config.sensor_streams = {stream};
-  EXPECT_FALSE(runtime.Initialize(core.get(), config, &error));
+  EXPECT_FALSE(runtime.Initialize(*core, config, &error));
   EXPECT_NE(error.find("range"), std::string::npos);
 
   config = BaseConfig();
   config.sensor_streams = {LidarStream("duplicate"),
                            LidarStream("duplicate")};
-  EXPECT_FALSE(runtime.Initialize(core.get(), config, &error));
+  EXPECT_FALSE(runtime.Initialize(*core, config, &error));
   EXPECT_NE(error.find("duplicate"), std::string::npos);
 }
 

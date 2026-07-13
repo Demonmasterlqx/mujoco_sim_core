@@ -207,10 +207,9 @@ float32 表示。这些限制在创建 snapshot pool 或渲染资源前校验。
 - `fifo`：有界深度 `1..64`，`fifo_overflow` 可选 `drop_oldest` 或 `drop_newest`。
 - `blocking`：`queue_depth` 范围同样为 `1..64`。每个到期 capture 都阻塞仿真
   completed-step 路径，直到 worker 完成 capture 和全部 eCAL publish 尝试；不等待
-  subscriber 业务处理。等待期间仍持有仿真推进锁以保证 snapshot 和 Observation 发布顺序，
-  但不持有 Server 主状态锁，因此 register、heartbeat 和 status 查询仍可继续；外部
-  `Stop()`、`max_ticks`、`ERROR_PAUSED` 和 eCAL shutdown 都会先唤醒 blocking wait，再等待
-  worker 退出。
+  subscriber 业务处理。等待发生在唯一的 SimulationLoop 线程中，以保证 snapshot 和
+  Observation 发布顺序；期间收到的 register、heartbeat 和 status 查询会在有界事件队列中
+  等待，外部 `RequestStop()` 会唤醒 blocking wait，再等待 worker 退出。
 
 同一 camera/source/frame/shape/rate/queue profile 的多个输出共享一次 render。无任何正常
 Stream subscriber 时不 capture；单个输出的序列化失败只将该输出置为 `STREAM_ERROR`
@@ -221,6 +220,23 @@ subscriber 清零时 Stream 回到 `STREAM_IDLE`。eCAL publisher 创建异常�
 `STREAM_ERROR` 并唤醒 blocking wait，其他输出、worker 和 Server 继续运行。service/topic
 callback 的异常被隔离在 eCAL 线程边界，GUI server thread 的异常转成退出码 `2`，不会触发
 `std::terminate`。
+
+## 运行时线程模型
+
+`ServerApplication::Start()` 完成资源初始化并启动 SimulationLoop 线程；headless 模式下
+`Run()` 只等待该线程，GUI 模式下 `Run()` 在调用线程执行渲染并在窗口关闭后等待仿真线程。
+SimulationLoop 独占 `SimulationCore`、调度状态、Sensor runtime、运行指标和 viewer snapshot，
+所有 Core 查询和修改都在该线程串行执行，不再使用 Core mutex。
+
+eCAL callback 只执行 4 MiB payload 上限校验、一次 Protobuf 解析和类型化事件入队。事件队列
+按 FIFO 处理，最多容纳 1024 个事件和 64 MiB 已解析 payload，每批最多消费 64 个事件后处理
+deadline 和发布调度。队列满或关闭时 registry RPC 返回 `INTERNAL_ERROR`；Commit 和
+Heartbeat 丢弃并计入 queue rejection 指标。所有可能完成 step 的路径统一经过同一套 Sensor、
+Observation、指标和下一 Tick 后处理。
+
+关闭时首先关闭事件队列并完成尚未处理的 RPC promise，然后请求 SimulationLoop、Sensor 和
+Viewer 停止；仿真线程退出后停止 eCAL 输入、排空在途 callback、销毁 transport，最后释放
+runtime 并在需要时 finalize eCAL。
 
 `render_backend: auto` 在 headless 模式按 EGL 后 OSMesa 回退；GUI 模式只尝试 EGL，防止
 MuJoCo 进程级 OpenGL dispatch 在 GLFW viewer 与 OSMesa 间冲突。GUI 配置显式
@@ -525,7 +541,7 @@ mujoco-sim-sample-adapter \
 
 | 退出码 | 主要含义 | 典型场景 |
 |---|---|---|
-| `0` | 正常结束 | `--help`；达到非零 `max_ticks`；调用 `Stop()`；GUI 窗口关闭。 |
+| `0` | 正常结束 | `--help`；达到非零 `max_ticks`；调用 `RequestStop()`；GUI 窗口关闭。 |
 | `1` | 参数/配置/启动或 eCAL 生命周期失败 | CLI/YAML 错误；缺少模型；MJCF 加载失败；eCAL 或 GLFW 初始化失败；GUI 初始加载失败；未请求 Stop 时 eCAL 不再可用。 |
 | `2` | server 已启动后的全局运行错误 | Core 因 server 级致命故障进入 `ERROR_PAUSED`；GUI 快照同步失败。 |
 
@@ -563,7 +579,7 @@ target_link_libraries(my_server PRIVATE mujoco_sim::server)
 可链接库公开
 [`server_config.hpp`](include/mujoco_sim/server/server_config.hpp) 和
 [`server_application.hpp`](include/mujoco_sim/server/server_application.hpp)，提供配置解析以及
-`ServerApplication::Start/Run/Stop`。可执行 target 用于 `$<TARGET_FILE:...>`、测试或部署，
+`ServerApplication::Start/Run/RequestStop`。可执行 target 用于 `$<TARGET_FILE:...>`、测试或部署，
 不作为链接库使用。安装态 package config 会继续查找 `mujoco_sim_config`、eCAL、GLFW、
 `mujoco_sim_core`、`mujoco_sim_protocol`、`mujoco_sim_sensor`、PNG、spdlog 和 Threads；配置包再传递 CLI11 与
 yaml-cpp。
@@ -589,9 +605,10 @@ ctest --test-dir build/mujoco_sim_server --output-on-failure
 
 - `server_test`：生成式 CLI/YAML、日志配置、格式/转义、级别、并发、文件失败、轮转、
   告警限流、payload/send 分类、callback 排空、亚毫秒调度 deadline、全部 Barrier 指标和
-  endpoint 命名，以及标准/非标准 transport 异常边界。
+  transport 命名，以及标准/非标准 transport 异常边界。
+- `server_event_queue_test`：FIFO、批量上限、事件/字节背压、关闭时 RPC 完成和并发生产者。
 - `sensor_runtime_test`：无 DISPLAY 的非空 camera/LiDAR、catalog、simulation-time rate、
-  协议 minor、最大 rate 常数时间调度、latest/FIFO overflow、blocking 在主状态锁外完成
+  协议 minor、最大 rate 常数时间调度、latest/FIFO overflow、blocking 在单写者 loop 中完成
   capture/publish、pending capture failure 解阻、camera-group capture 与单输出 serialization
   隔离、publish 拒绝重试、subscriber 断开/替换/idle 竞态、无 subscriber lazy capture、
   queue/rate/shape/payload 上限、Stop 唤醒 blocking wait 和初始化失败回滚。

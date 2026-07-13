@@ -45,19 +45,19 @@ bool SimViewer::Initialize(std::string* error_message) {
   return true;
 }
 
-bool SimViewer::QueueLoad(mujoco_sim::core::SimulationSnapshot* snapshot,
+bool SimViewer::QueueLoad(mujoco_sim::core::SimulationSnapshot& snapshot,
                           const std::string& displayed_filename,
                           std::string* error_message) {
-  if (impl_->simulate == nullptr || snapshot == nullptr ||
-      snapshot->model() == nullptr || snapshot->data() == nullptr) {
+  if (impl_->simulate == nullptr || snapshot.model() == nullptr ||
+      snapshot.data() == nullptr) {
     if (error_message != nullptr) {
       *error_message = "viewer is not initialized with a valid snapshot";
     }
     return false;
   }
   const mujoco::MutexLock viewer_lock(impl_->simulate->mtx);
-  impl_->simulate->mnew_ = const_cast<mjModel_*>(snapshot->model());
-  impl_->simulate->dnew_ = snapshot->data();
+  impl_->simulate->mnew_ = const_cast<mjModel_*>(snapshot.model());
+  impl_->simulate->dnew_ = snapshot.data();
   std::snprintf(impl_->simulate->filename,
                 sizeof(impl_->simulate->filename), "%s",
                 displayed_filename.c_str());
@@ -65,17 +65,17 @@ bool SimViewer::QueueLoad(mujoco_sim::core::SimulationSnapshot* snapshot,
   return true;
 }
 
-bool SimViewer::Synchronize(mujoco_sim::core::SimulationCore* core,
-                            mujoco_sim::core::SimulationSnapshot* snapshot,
+bool SimViewer::Synchronize(mujoco_sim::core::SimulationCore& core,
+                            mujoco_sim::core::SimulationSnapshot& snapshot,
                             std::string* error_message) {
-  if (impl_->simulate == nullptr || core == nullptr || close_requested()) {
+  if (impl_->simulate == nullptr || close_requested()) {
     return false;
   }
   const mujoco::MutexLock viewer_lock(impl_->simulate->mtx);
   if (impl_->simulate->loadrequest != 0) {
     return true;
   }
-  if (!core->UpdateSnapshot(snapshot, error_message)) {
+  if (!core.UpdateSnapshot(&snapshot, error_message)) {
     return false;
   }
   impl_->simulate->Sync();

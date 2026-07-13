@@ -19,11 +19,11 @@ class SimViewer {
   SimViewer& operator=(const SimViewer&) = delete;
 
   bool Initialize(std::string* error_message);
-  bool QueueLoad(mujoco_sim::core::SimulationSnapshot* snapshot,
+  bool QueueLoad(mujoco_sim::core::SimulationSnapshot& snapshot,
                  const std::string& displayed_filename,
                  std::string* error_message);
-  bool Synchronize(mujoco_sim::core::SimulationCore* core,
-                   mujoco_sim::core::SimulationSnapshot* snapshot,
+  bool Synchronize(mujoco_sim::core::SimulationCore& core,
+                   mujoco_sim::core::SimulationSnapshot& snapshot,
                    std::string* error_message);
   void RenderLoop();
   void RequestScreenshot();

@@ -22,7 +22,7 @@ TEST(SimViewerTest, LoadsSynchronizesAndClosesWindow) {
 
   bool loaded = false;
   std::thread worker([&]() {
-    if (!viewer.QueueLoad(snapshot.get(), MUJOCO_SIM_SERVER_TEST_MODEL,
+    if (!viewer.QueueLoad(*snapshot, MUJOCO_SIM_SERVER_TEST_MODEL,
                           &error)) {
       viewer.RequestClose();
       return;
@@ -35,7 +35,7 @@ TEST(SimViewerTest, LoadsSynchronizesAndClosesWindow) {
     }
     loaded = viewer.model_loaded();
     if (loaded) {
-      loaded = viewer.Synchronize(&core, snapshot.get(), &error);
+      loaded = viewer.Synchronize(core, *snapshot, &error);
       std::this_thread::sleep_for(std::chrono::milliseconds(150));
     }
     viewer.RequestClose();
@@ -56,7 +56,7 @@ TEST(SimViewerTest, ClosesWithPendingModelLoad) {
 
   mujoco_sim::server::SimViewer viewer;
   ASSERT_TRUE(viewer.Initialize(&error)) << error;
-  ASSERT_TRUE(viewer.QueueLoad(snapshot.get(), MUJOCO_SIM_SERVER_TEST_MODEL,
+  ASSERT_TRUE(viewer.QueueLoad(*snapshot, MUJOCO_SIM_SERVER_TEST_MODEL,
                                &error))
       << error;
   viewer.RequestClose();

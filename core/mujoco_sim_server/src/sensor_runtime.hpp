@@ -3,6 +3,7 @@
 #include <cstddef>
 #include <functional>
 #include <memory>
+#include <stop_token>
 #include <string>
 
 #include <mujoco_sim/core/simulation_core.hpp>
@@ -37,11 +38,10 @@ class SensorRuntime {
   SensorRuntime(const SensorRuntime&) = delete;
   SensorRuntime& operator=(const SensorRuntime&) = delete;
 
-  bool Initialize(mujoco_sim::core::SimulationCore* core,
+  bool Initialize(mujoco_sim::core::SimulationCore& core,
                   const ServerConfig& config, std::string* error_message);
-  void OnStepCompleted(mujoco_sim::core::SimulationCore* core);
-  void CompleteBlockingEnqueues(
-      const std::function<bool()>& should_stop = {});
+  void OnStepCompleted(mujoco_sim::core::SimulationCore& core);
+  void CompleteBlockingEnqueues(std::stop_token stop_token = {});
   void RequestStop();
   void Stop();
 

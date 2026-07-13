@@ -186,9 +186,9 @@ struct SensorRuntime::Impl {
       for (auto& stream : streams) stream.dropped += count;
     }
 
-    bool Enqueue(mujoco_sim::core::SimulationCore* core,
+    bool Enqueue(mujoco_sim::core::SimulationCore& core,
                  std::uint64_t capture_id) {
-      const double simulation_time = core->simulation_time();
+      const double simulation_time = core.simulation_time();
       const double period = 1.0 / rate_hz;
       const bool has_live_subscriber = HasLiveSubscriber();
       if (simulation_time + 1e-12 < next_due_time) return true;
@@ -242,7 +242,7 @@ struct SensorRuntime::Impl {
       free.pop_back();
       lock.unlock();
       std::string error;
-      if (!core->UpdateSnapshot(snapshot.get(), &error)) {
+      if (!core.UpdateSnapshot(snapshot.get(), &error)) {
         lock.lock();
         free.push_back(std::move(snapshot));
         for (auto& stream : streams) {
@@ -258,8 +258,8 @@ struct SensorRuntime::Impl {
       job.snapshot = std::move(snapshot);
       job.capture_id = capture_id;
       job.header.set_server_name(server_name);
-      job.header.set_epoch(core->epoch());
-      job.header.set_tick_id(core->current_tick_id());
+      job.header.set_epoch(core.epoch());
+      job.header.set_tick_id(core.current_tick_id());
       job.header.set_timestamp_unix_nanos(NowUnixNanos());
       job.header.set_protocol_major(mujoco_sim::protocol::kProtocolMajor);
       job.header.set_protocol_minor(mujoco_sim::protocol::kProtocolMinor);
@@ -280,8 +280,7 @@ struct SensorRuntime::Impl {
       return true;
     }
 
-    void CompleteBlockingEnqueue(
-        const std::function<bool()>& should_stop) {
+    void CompleteBlockingEnqueue(std::stop_token stop_token) {
       if (queue_mode != QueueMode::kBlocking) return;
       const auto blocked_at = Clock::now();
       std::unique_lock lock(mutex);
@@ -298,7 +297,7 @@ struct SensorRuntime::Impl {
       bool wait_reported = false;
       while (!stopping && !AllStreamsFailedLocked() &&
              completed_capture_id < target_capture_id) {
-        if (should_stop && should_stop()) {
+        if (stop_token.stop_requested()) {
           stopping = true;
           condition.notify_all();
           break;
@@ -601,17 +600,17 @@ struct SensorRuntime::Impl {
   explicit Impl(SensorRuntimeTestHooks runtime_hooks)
       : hooks(std::move(runtime_hooks)) {}
 
-  bool AddWorker(mujoco_sim::core::SimulationCore* core,
+  bool AddWorker(mujoco_sim::core::SimulationCore& core,
                  std::unique_ptr<Worker> worker,
                  std::string* error_message) {
     const std::size_t pool_size =
         worker->queue_depth +
         (worker->queue_mode == QueueMode::kBlocking ? 2U : 1U);
-    auto first = core->CreateSnapshot(error_message);
+    auto first = core.CreateSnapshot(error_message);
     if (!first) return false;
     worker->free.push_back(std::move(first));
     for (std::size_t i = 1; i < pool_size; ++i) {
-      auto snapshot = core->CloneSnapshot(*worker->free.front(), error_message);
+      auto snapshot = core.CloneSnapshot(*worker->free.front(), error_message);
       if (!snapshot) return false;
       worker->free.push_back(std::move(snapshot));
     }
@@ -669,10 +668,10 @@ SensorRuntime::SensorRuntime(SensorRuntimeTestHooks hooks)
     : hooks_(std::move(hooks)), impl_(std::make_unique<Impl>(hooks_)) {}
 SensorRuntime::~SensorRuntime() { Stop(); }
 
-bool SensorRuntime::Initialize(mujoco_sim::core::SimulationCore* core,
+bool SensorRuntime::Initialize(mujoco_sim::core::SimulationCore& core,
                                const ServerConfig& config,
                                std::string* error_message) {
-  if (core == nullptr || error_message == nullptr || !core->IsModelLoaded()) {
+  if (error_message == nullptr || !core.IsModelLoaded()) {
     if (error_message) *error_message = "sensor runtime requires a loaded core";
     return false;
   }
@@ -682,12 +681,12 @@ bool SensorRuntime::Initialize(mujoco_sim::core::SimulationCore* core,
   Stop();
   impl_ = std::make_unique<Impl>(hooks_);
   impl_->server_name = config.server_name;
-  impl_->epoch = core->epoch();
+  impl_->epoch = core.epoch();
   if (config.sensor_streams.empty()) {
     impl_->initialized = true;
     return true;
   }
-  auto validation_snapshot = core->CreateSnapshot(error_message);
+  auto validation_snapshot = core.CreateSnapshot(error_message);
   if (!validation_snapshot) return false;
 
   std::map<CameraGroupKey, std::vector<ServerConfig::SensorStream>> cameras;
@@ -787,19 +786,17 @@ bool SensorRuntime::Initialize(mujoco_sim::core::SimulationCore* core,
   return true;
 }
 
-void SensorRuntime::OnStepCompleted(
-    mujoco_sim::core::SimulationCore* core) {
-  if (!impl_->initialized || core == nullptr) return;
+void SensorRuntime::OnStepCompleted(mujoco_sim::core::SimulationCore& core) {
+  if (!impl_->initialized) return;
   for (auto& worker : impl_->workers) {
     worker->Enqueue(core, impl_->next_capture_id.fetch_add(1));
   }
 }
 
-void SensorRuntime::CompleteBlockingEnqueues(
-    const std::function<bool()>& should_stop) {
+void SensorRuntime::CompleteBlockingEnqueues(std::stop_token stop_token) {
   if (!impl_->initialized) return;
   for (auto& worker : impl_->workers) {
-    worker->CompleteBlockingEnqueue(should_stop);
+    worker->CompleteBlockingEnqueue(stop_token);
   }
 }
 

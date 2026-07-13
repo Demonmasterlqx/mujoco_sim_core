@@ -85,7 +85,7 @@ TEST(SensorRuntimeEcalTest, CaptureErrorReachesStreamClient) {
     throw std::runtime_error("injected runtime capture failure");
   };
   mujoco_sim::server::SensorRuntime runtime(std::move(hooks));
-  ASSERT_TRUE(runtime.Initialize(&core, config, &error)) << error;
+  ASSERT_TRUE(runtime.Initialize(core, config, &error)) << error;
 
   eCAL::CServiceServer registry(
       mujoco_sim::protocol::RegistryServiceName(server_name));
@@ -124,7 +124,7 @@ TEST(SensorRuntimeEcalTest, CaptureErrorReachesStreamClient) {
          std::chrono::steady_clock::now() < error_deadline) {
     core.OpenIssuedTicks();
     ASSERT_TRUE(core.CompleteEmptyBarrier().step_completed.has_value());
-    runtime.OnStepCompleted(&core);
+    runtime.OnStepCompleted(core);
     runtime.CompleteBlockingEnqueues();
     auto status = core.MakeStatus();
     runtime.AppendStatus(&status);

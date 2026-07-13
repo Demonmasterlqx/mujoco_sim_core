@@ -11,7 +11,7 @@ SensorRuntime::SensorRuntime(SensorRuntimeTestHooks hooks)
     : hooks_(std::move(hooks)), impl_(std::make_unique<Impl>()) {}
 SensorRuntime::~SensorRuntime() = default;
 
-bool SensorRuntime::Initialize(core::SimulationCore*, const ServerConfig& config,
+bool SensorRuntime::Initialize(core::SimulationCore&, const ServerConfig& config,
                                std::string* error_message) {
   if (config.sensor_streams.empty()) return true;
   if (error_message != nullptr) {
@@ -19,8 +19,8 @@ bool SensorRuntime::Initialize(core::SimulationCore*, const ServerConfig& config
   }
   return false;
 }
-void SensorRuntime::OnStepCompleted(core::SimulationCore*) {}
-void SensorRuntime::CompleteBlockingEnqueues(const std::function<bool()>&) {}
+void SensorRuntime::OnStepCompleted(core::SimulationCore&) {}
+void SensorRuntime::CompleteBlockingEnqueues(std::stop_token) {}
 void SensorRuntime::RequestStop() {}
 void SensorRuntime::Stop() {}
 mujoco_sim::v2::GetSensorStreamsResponse SensorRuntime::GetCatalog(
