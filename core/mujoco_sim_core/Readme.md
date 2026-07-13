@@ -1,6 +1,6 @@
 # mujoco_sim_core
 
-`mujoco_sim_core` 是与传输层无关的 MuJoCo V1.2 lockstep 仿真核心。它持有真实
+`mujoco_sim_core` 是与传输层无关的 MuJoCo V2.0 lockstep 仿真核心。它持有真实
 `mjModel`/`mjData`，从模型建立资源目录，并在当前 Tick 打开时固定一组 required
 controller；该组完成或被局部隔离后执行一次 `mj_step()`。
 
@@ -51,7 +51,7 @@ controller；该组完成或被局部隔离后执行一次 `mj_step()`。
 | --- | --- |
 | CMake `>= 3.22` | 配置、生成与安装 |
 | 支持 C++20 的编译器 | 编译库和消费者代码 |
-| [mujoco_sim_protocol](../mujoco_sim_protocol/Readme.md) | V1 消息、错误码和版本常量 |
+| [mujoco_sim_protocol](../mujoco_sim_protocol/Readme.md) | V2 消息、错误码和版本常量 |
 | MuJoCo `3.10.0` | 模型加载、状态复制和 `mj_step()`；默认使用包内二进制分发 |
 | GTest | 仅在 `BUILD_TESTING=ON` 时构建测试 |
 | colcon | 仓库工作区的构建入口，不是运行时依赖 |
@@ -81,7 +81,7 @@ config 会创建指向同一安装前缀中 MuJoCo 动态库的 `mujoco::mujoco`
 不能启动。本包只导出库，没有 `main()`、可执行程序或 launch 文件。
 
 它可以在不依赖 eCAL 的进程内程序中直接使用；但调用方必须自行驱动注册、
-`OpenTick()`、commit 收集、超时检查和下一 Tick。需要现成的 eCAL 进程入口、配置和
+`OpenIssuedTicks()`、commit 收集、超时检查和下一 Tick。需要现成的 eCAL 进程入口、配置和
 GUI 时使用 [mujoco_sim_server](../mujoco_sim_server/Readme.md)。
 
 ## 公开 CMake target、头文件与 API
@@ -109,7 +109,7 @@ MuJoCo 库路径。
 | 头文件 | 内容 |
 | --- | --- |
 | `<mujoco_sim/core/simulation_core.hpp>` | Core 的全部手写公开 C++ API |
-| `<mujoco_sim/v1/sync.pb.h>` | 由协议 target 传递的 V1 Protobuf 类型 |
+| `<mujoco_sim/v2/sync.pb.h>` | 由协议 target 传递的 V2 Protobuf 类型 |
 | `<mujoco/mujoco.h>` | 访问快照返回的 `mjModel*`/`mjData*` 具体字段时需要 |
 
 ### 公开类型与方法
@@ -120,25 +120,23 @@ API 位于 `mujoco_sim::core` 命名空间。
 | --- | --- |
 | `CoreOptions` | `server_name` 默认 `default`；Commit timeout 默认 `1000 ms`；激活 timeout 默认 `5000 ms`；默认允许替换同名 `TIMED_OUT` adapter |
 | `ModelLoadOptions` | 可选的 `initial_keyframe`；空字符串保持默认 reset 行为 |
-| `CommitResult` | 返回错误码、说明、duplicate/stepped/recovery pending，以及局部 controller 状态转换信息 |
-| `ControllerTransition`、`DeadlineResult` | 描述 deadline 检查产生的 controller 状态转换及是否因此完成 step |
+| `CommitResult` | 返回错误码、说明、duplicate/recovery pending，以及可选 `step_completed` |
+| `AdapterTransition`、`DeadlineResult` | 描述统一 Adapter deadline 转换，并通过可选 `step_completed` 返回完成的 step |
 | `SimulationSnapshot` | move-only 的隔离 MuJoCo model/data 副本，提供 `model()`、`data()` |
 | `SimulationCore(options)` | 构造 move-only Core；不自动加载模型 |
 | `LoadModel()`、`IsModelLoaded()` | 加载 MJCF XML，可选初始 keyframe；成功后状态为 `RUNNING` |
 | `observations()`、`commands()` | 读取当前模型建立的资源目录 |
 | `GetAvailableResources()` | 校验 server/协议版本并返回资源目录 |
-| `RegisterController()` | 校验并分配资源，返回 session、epoch、layout 和 provisional 状态 |
-| `RegisterAdapter()`、`ActivateAdapter()`、`UnregisterAdapter()` | role-aware API；Controller 转发到既有语义，Observer 只获配 observation 且不加入 Barrier |
-| `ActivateController()` | 在运行期将 provisional controller 设为 active；下一 Tick 才加入 Barrier |
-| `UnregisterController()` | 运行期清零并释放 controller/actuator；若它属于当前 Barrier，移除后可能立即完成 step |
-| `OpenTick()` | 打开 Tick 时固定 required/recipient 集合并保存 immutable Tick；重复调用返回已发出的同一 payload |
-| `CollectObservationFrames()` | drain 已在 completed step 时生成的 post-step 小数据帧；重复调用不重复生成，连续 step 与 unregister 内部 step 不丢帧 |
-| `IsTickIssued()` | 判断一份 Tick 是否仍是当前已发出的精确 payload，供异步传输层避免发送失效快照 |
-| `StepIfBarrierComplete()` | required 集合为空或均已有 Commit 时写命令、执行一步并关闭 Tick |
-| `SubmitCommit()` | 校验正常 Commit、局部 command 错误和 `TIMED_OUT` 恢复证明 |
-| `AcceptHeartbeat()`、`AcceptAdapterHeartbeat()` | 分别处理 Controller 与 Observer keepalive |
-| `CheckControllerDeadlines(now)` | 清理两类 provisional adapter，隔离 Controller Commit timeout 与 Observer keepalive timeout |
-| `CheckTickTimeout(now)` | 兼容包装：执行 deadline 检查并返回本次是否出现 `TIMED_OUT` 转换 |
+| `RegisterAdapter()` | 校验并分配资源，返回 session、epoch、layout 和 provisional 状态 |
+| `RegisterAdapter()`、`ActivateAdapter()`、`UnregisterAdapter()` | Controller/Observer 的唯一生命周期 API；Observer 只获配 observation 且不加入 Barrier |
+| `ActivateAdapter()` | 在运行期将 provisional controller 设为 active；下一 Tick 才加入 Barrier |
+| `UnregisterAdapter()` | 运行期清零并释放 controller/actuator；若它属于当前 Barrier，移除后可能立即完成 step |
+| `OpenIssuedTicks()` | 打开 Tick 时固定 required/recipient 集合并保存 immutable Tick；重复调用返回已发出的同一 payload |
+| `IsIssuedTickCurrent()` | 判断一份 Tick 是否仍是当前已发出的精确 payload，供异步传输层避免发送失效快照 |
+| `SubmitCommit()` | 校验 Commit、局部 command 错误和恢复证明；可能返回 completed step |
+| `CompleteEmptyBarrier()` | required 集合为空时执行一次 step 并返回 completed step |
+| `AcceptHeartbeat()` | 处理 Controller 与 Observer 的统一 Adapter heartbeat |
+| `CheckDeadlines(now)` | 清理 provisional adapter，处理 Commit/keepalive timeout，并可能返回 completed step |
 | `EnterFatalError()`、`MarkStopped()` | 由宿主显式进入全局 `ERROR_PAUSED` 或 `STOPPED`；adapter 局部故障不调用它们 |
 | `MakeStatus()` | 生成当前服务端和控制器状态消息 |
 | `CreateSnapshot()`、`CloneSnapshot()`、`UpdateSnapshot()` | 创建深拷贝 model/data、克隆共享 model 的独立 data，并从 Core 刷新 data |
@@ -185,16 +183,16 @@ actuator transmission 还按线性/转动类型给出 `m`、`rad`、`N` 或 `N*m
 推导的 transmission 不声明 unit。
 
 Controller 仍在每个 `Tick` 中同步收到注册 layout 的这些小数据，并必须 Commit。纯观测方
-使用 protocol minor 2 的 role-aware `RegisterAdapter(OBSERVER)`，配置 `every_n_steps` 或
-`period_s`。Core 在每次 completed step 立即读取 post-step `sensordata` 并将 due frame
-排队，宿主随后用 `CollectObservationFrames()` drain；`period_s` 的 deadline 锁相推进，
+使用 V2 `RegisterAdapter(OBSERVER)`，配置 `every_n_steps` 或 `period_s`。Core 在每次
+completed step 立即读取 post-step `sensordata`，并将 due frame 放进该操作返回的
+`StepCompletedEvent::observer_frames`；`period_s` 的 deadline 锁相推进，
 离散 timestep 晚于 deadline 时不会把下一周期重新锚定到实际交付时刻：
 
 ```cpp
-mujoco_sim::v1::RegisterAdapterRequest request;
+mujoco_sim::v2::RegisterAdapterRequest request;
 request.set_server_name("default");
 request.set_adapter_id("state_logger");
-request.set_role(mujoco_sim::v1::OBSERVER);
+request.set_role(mujoco_sim::v2::OBSERVER);
 request.set_protocol_major(mujoco_sim::protocol::kProtocolMajor);
 request.set_protocol_minor(mujoco_sim::protocol::kProtocolMinor);
 request.add_observation_names("imu_quat");
@@ -202,10 +200,9 @@ request.mutable_delivery()->set_every_n_steps(1);
 
 const auto registered = simulation.RegisterAdapter(request);
 // 使用 returned session/epoch 调用 ActivateAdapter()。
-simulation.OpenTick();
-if (simulation.StepIfBarrierComplete()) {
-  const auto frames = simulation.CollectObservationFrames();
-}
+simulation.OpenIssuedTicks();
+const auto completed = simulation.CompleteEmptyBarrier();
+const auto& frames = completed.step_completed->observer_frames;
 ```
 
 Observer 没有 command、不会进入 Barrier；其 keepalive timeout 只改变自身状态。相机 RGB/
@@ -239,9 +236,10 @@ int main() {
   std::cout << "observations=" << simulation.observations().size()
             << ", commands=" << simulation.commands().size() << '\n';
 
-  mujoco_sim::v1::RegisterControllerRequest register_request;
+  mujoco_sim::v2::RegisterAdapterRequest register_request;
   register_request.set_server_name("default");
-  register_request.set_controller_id("arm");
+  register_request.set_adapter_id("arm");
+  register_request.set_role(mujoco_sim::v2::CONTROLLER);
   register_request.set_protocol_major(mujoco_sim::protocol::kProtocolMajor);
   register_request.set_protocol_minor(mujoco_sim::protocol::kProtocolMinor);
   register_request.add_observation_names("hinge_pos");
@@ -249,61 +247,61 @@ int main() {
   register_request.add_command_names("hinge_motor");
 
   const auto registration =
-      simulation.RegisterController(register_request);
-  if (registration.code() != mujoco_sim::v1::OK) {
+      simulation.RegisterAdapter(register_request);
+  if (registration.code() != mujoco_sim::v2::OK) {
     std::cerr << "register failed: " << registration.message() << '\n';
     return 2;
   }
 
-  mujoco_sim::v1::ActivateControllerRequest activate_request;
-  activate_request.set_controller_id(registration.controller_id());
+  mujoco_sim::v2::ActivateAdapterRequest activate_request;
+  activate_request.set_adapter_id(registration.adapter_id());
   activate_request.set_session_id(registration.session_id());
   activate_request.set_epoch(registration.epoch());
-  const auto activation = simulation.ActivateController(activate_request);
-  if (activation.code() != mujoco_sim::v1::OK) {
+  const auto activation = simulation.ActivateAdapter(activate_request);
+  if (activation.code() != mujoco_sim::v2::OK) {
     std::cerr << "activate failed: " << activation.message() << '\n';
     return 3;
   }
 
-  const auto ticks = simulation.OpenTick();
+  const auto ticks = simulation.OpenIssuedTicks();
   if (ticks.size() != 1) {
     std::cerr << "expected one tick\n";
     return 4;
   }
 
-  mujoco_sim::v1::AdapterCommit commit;
-  *commit.mutable_header() = ticks.front().header();
-  commit.set_controller_id(registration.controller_id());
-  commit.set_status(mujoco_sim::v1::COMMIT_OK);
+  mujoco_sim::v2::AdapterCommit commit;
+  *commit.mutable_header() = ticks.front()->message.header();
+  commit.set_adapter_id(registration.adapter_id());
+  commit.set_status(mujoco_sim::v2::COMMIT_OK);
   auto* command = commit.add_commands();
   command->set_name(registration.layout().commands(0).name());
   command->add_values(0.25);
 
   const auto result = simulation.SubmitCommit(commit);
-  if (result.code != mujoco_sim::v1::OK || !result.stepped) {
+  if (result.code != mujoco_sim::v2::OK || !result.step_completed) {
     std::cerr << "commit failed: " << result.message << '\n';
     return 5;
   }
   std::cout << "tick=" << simulation.current_tick_id()
             << ", simulation_time=" << simulation.simulation_time() << '\n';
 
-  mujoco_sim::v1::UnregisterControllerRequest unregister_request;
-  unregister_request.set_controller_id(registration.controller_id());
+  mujoco_sim::v2::UnregisterAdapterRequest unregister_request;
+  unregister_request.set_adapter_id(registration.adapter_id());
   unregister_request.set_session_id(registration.session_id());
   unregister_request.set_epoch(registration.epoch());
   const auto unregistered =
-      simulation.UnregisterController(unregister_request);
-  return unregistered.code() == mujoco_sim::v1::OK ? 0 : 6;
+      simulation.UnregisterAdapter(unregister_request);
+  return unregistered.code() == mujoco_sim::v2::OK ? 0 : 6;
 }
 ```
 
 多个 controller 时，每个 `SubmitCommit()` 都可能只返回“已接收”；只有当前 Tick 固定的
-required 集合全部满足时，`CommitResult::stepped` 才为 `true`。调用方随后显式调用下一次
-`OpenTick()`。没有 controller 时，`OpenTick()` 仍会打开一个空 Barrier，调用
-`StepIfBarrierComplete()` 会立即执行一步；Core 本身不在后台调度步进频率。
+required 集合全部满足时，`CommitResult::step_completed` 才有值。调用方随后显式调用下一次
+`OpenIssuedTicks()`。没有 controller 时，`OpenIssuedTicks()` 仍会打开一个空 Barrier，调用
+`CompleteEmptyBarrier()` 会立即执行一步；Core 本身不在后台调度步进频率。
 
 adapter 可在模型运行期间注册为 `PROVISIONAL`、激活为 `ACTIVE`，也可在 open Tick 中注销。
-宿主应持续调用 `CheckControllerDeadlines(std::chrono::steady_clock::now())`，以清理未及时激活
+宿主应持续调用 `CheckDeadlines(std::chrono::steady_clock::now())`，以清理未及时激活
 的注册并隔离未及时 Commit 的 controller。注册或激活发生在 open Tick 中时，该 controller
 不改变本 Tick 的 Barrier，从下一 Tick 才参与。
 
@@ -361,7 +359,7 @@ if (!simulation.UpdateSnapshot(snapshot.get(), &error)) {
   下一 completed step 生成，sequence 独立单调递增。
 - `PROVISIONAL` controller 超过 `activation_timeout_ms` 未激活时，deadline 检查将其移除并
   释放 actuator。运行期激活不会加入已经打开的 Tick；每个 Tick 的 required Barrier 集合
-  在 `OpenTick()` 打开时固定。
+  在 `OpenIssuedTicks()` 打开时固定。
 - 注销会立即清零该 controller 的 actuator、释放所有权并从当前 Tick 的 recipient/required
   集合移除；如果剩余 required Commit 已齐，注销操作会使当前 Tick 完成一步。
 - commit 必须来自 active controller，且 server/session/epoch/tick 必须匹配；它必须将
@@ -379,10 +377,8 @@ if (!simulation.UpdateSnapshot(snapshot.get(), &error)) {
 - `TIMED_OUT` controller 不再阻塞 Barrier，但仍是后续 Tick recipient。Core 会继续生成
   Tick，transport 尝试发布但不保证对端收到。与 Core 已 issued、且比上次恢复证明新的 Tick
   对应的完整合法 `COMMIT_OK` 只记录为恢复证明，不应用 command，也不参与当前 Barrier；
-  相同恢复 Commit 的重传按 duplicate success 幂等处理，到下一次 `OpenTick()` 才切回
+  相同恢复 Commit 的重传按 duplicate success 幂等处理，到下一次 `OpenIssuedTicks()` 才切回
   `ACTIVE` 并重新成为 required member。
-- 对协商到协议 minor 0 的 controller，内部 `TIMED_OUT` Tick 在线上降级为旧 SDK 可识别的
-  `ACTIVE` 状态；header 仍为 minor 0，Commit 在 Core 中仍只作为恢复证明。
 - 同名注册仅可替换现有 `TIMED_OUT` controller，默认由
   `allow_timed_out_adapter_replacement=true` 允许；替换会清零旧 actuator、废弃旧 session，
   并创建新的 `PROVISIONAL` session。关闭该选项时返回 `ALREADY_EXISTS`。
@@ -392,7 +388,7 @@ if (!simulation.UpdateSnapshot(snapshot.get(), &error)) {
 - Observer deadline 使用 wall-clock heartbeat 年龄，仅将该 Observer 置为 `TIMED_OUT`；
   Controller Barrier、actuator 和其他 Observer 不受影响。替换开关同样适用于同名超时
   Observer session。
-- `ControllerStatus` 报告 optional 最后 Commit Tick、状态起始 Tick、累计超时数和当前
+- 统一 `AdapterStatus` 报告 optional 最后 Commit Tick、状态起始 Tick、累计超时数和当前
   `required_for_barrier`。全局 `ERROR_PAUSED` 只保留给宿主显式调用 `EnterFatalError()` 等
   server 级致命错误，不再用于 adapter timeout 或局部命令错误。
 - `SimulationCore` 没有声明为线程安全；所有方法的并发访问都应由宿主串行化或加锁。
@@ -415,7 +411,7 @@ colcon test-result \
 
 [simulation_core_test.cpp](test/simulation_core_test.cpp) 当前覆盖默认与 keyframe 模型初始化、
 空 Barrier step、资源/快照及从 source 状态复制的共享-model clone、完整 Sensor
-stage/interval/delay/frame/object/unit/interpolation 元数据、运行期注册激活注销、协商 minor、固定 Barrier、重复 Commit、
+stage/interval/delay/frame/object/unit/interpolation 元数据、运行期注册激活注销、严格 V2.0、固定 Barrier、重复 Commit、
 身份错误的非破坏性拒绝、局部 command `ERROR`、provisional 激活过期、per-controller
 timeout/清零/继续 step、immutable Tick、下一 Tick 恢复、同名 `TIMED_OUT` 替换及禁用替换，
 以及 Controller 同步 observation 回归、Observer 严格注册、非 Barrier post-step 数据、两种
@@ -424,7 +420,7 @@ timeout/清零/继续 step、immutable Tick、下一 Tick 恢复、同名 `TIMED
 ## 相关包
 
 - [仓库总览](../../Readme.md)
-- [mujoco_sim_protocol](../mujoco_sim_protocol/Readme.md)：Core 使用的 V1 消息和命名约定
+- [mujoco_sim_protocol](../mujoco_sim_protocol/Readme.md)：Core 使用的 V2 消息和命名约定
 - [mujoco_sim_server](../mujoco_sim_server/Readme.md)：eCAL composition root、配置、自动 Tick 循环与 GUI
 - [mujoco_sim_adapter_sdk](../mujoco_sim_adapter/mujoco_sim_adapter_sdk/Readme.md)：远端控制器接入 SDK
 - [mujoco_sim_sample_adapter](../mujoco_sim_adapter/mujoco_sim_sample_adapter/Readme.md)：端到端控制器样例

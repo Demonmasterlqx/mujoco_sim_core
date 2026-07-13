@@ -61,7 +61,7 @@ source install/setup.bash
 | `-h`, `--help` | - | 输出用法并以 `0` 退出，不连接 server。 |
 | `--config PATH` | - | 加载严格 YAML 配置；CLI 显式值覆盖 YAML。 |
 | `--server-name NAME` | `default` | registry 和 topic namespace；必须与 server 一致。 |
-| `--controller-id ID` | `sample_controller` | controller 唯一 ID；不能为空。 |
+| `--adapter-id ID` | `sample_controller` | controller 唯一 ID；不能为空。 |
 | `--observations a,b` | `hinge_pos,hinge_vel` | 逗号分隔的唯一 observation 名称；空列表允许。 |
 | `--commands a,b` | `hinge_motor` | 逗号分隔的唯一 actuator 名称；最终必须至少有一个名称。 |
 | `--ticks N` | `0` | 对 N 个已交付 `ACTIVE` Tick 完成本地 Commit 后退出；`0` 表示无限等待。 |
@@ -74,17 +74,16 @@ source install/setup.bash
 
 `--timeout-ms` 在 controller 激活后约束每个 required Tick 的 Commit 等待时间；
 `--service-timeout-ms` 只控制 Adapter 调用 registry service 的等待时间。server 的
-`startup_timeout_ms` 已弃用且忽略；`activation_timeout_ms` 才约束注册后的
-`PROVISIONAL` session 必须多快完成 Activate。
+`activation_timeout_ms` 约束注册后的 `PROVISIONAL` session 必须多快完成 Activate。
 
 ## YAML 配置
 
-YAML 顶层支持 `server_name`、`controller_id`、`observation_names`、`command_names`、
+YAML 顶层支持 `server_name`、`adapter_id`、`observation_names`、`command_names`、
 `max_ticks`、`command_value`、`timeout_ms` 和 `service_timeout_ms`。例如：
 
 ```yaml
 server_name: demo
-controller_id: sample_controller
+adapter_id: sample_controller
 observation_names: [hinge_pos, hinge_vel]
 command_names: [hinge_motor]
 max_ticks: 5
@@ -139,7 +138,7 @@ target_link_libraries(my_target PRIVATE mujoco_sim::sample_adapter)
 source install/setup.bash
 mujoco-sim-sample-adapter \
   --server-name default \
-  --controller-id sample_controller \
+  --adapter-id sample_controller \
   --ticks 5 \
   --command-value 0.1
 ```
@@ -168,7 +167,7 @@ mujoco-sim-server \
 source install/setup.bash
 mujoco-sim-sample-adapter \
   --server-name gui_demo \
-  --controller-id gui_sample \
+  --adapter-id gui_sample \
   --ticks 5 \
   --command-value 0.1 \
   --timeout-ms 1000 \
@@ -198,7 +197,7 @@ mujoco-sim-server \
 source install/setup.bash
 mujoco-sim-sample-adapter \
   --server-name headless_demo \
-  --controller-id headless_sample \
+  --adapter-id headless_sample \
   --ticks 5 \
   --command-value 0.1 \
   --timeout-ms 1000 \
@@ -228,7 +227,7 @@ mujoco-sim-server \
 source install/setup.bash
 mujoco-sim-sample-adapter \
   --server-name force_demo \
-  --controller-id force_sample \
+  --adapter-id force_sample \
   --observations hinge_force \
   --commands hinge_motor \
   --ticks 3 \
@@ -244,7 +243,7 @@ mujoco-sim-sample-adapter \
 成功联调需满足：
 
 - 已构建并加载 install 环境；server 先启动且两端 `server_name` 完全一致。
-- `controller_id` 非空且未注册；资源名存在、列表中无重复项，每个 command actuator
+- `adapter_id` 非空且未注册；资源名存在、列表中无重复项，每个 command actuator
   尚未被其他 controller 认领。
 - server 支持运行期注册、激活和注销；注册后必须在 server 的 `activation_timeout_ms` 内
   调用 Activate。新激活的 Adapter 从下一 Tick 加入固定 Barrier。

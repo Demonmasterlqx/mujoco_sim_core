@@ -8,7 +8,11 @@
 #include <utility>
 #include <vector>
 
+#include <mujoco_sim/protocol/identifier.hpp>
+#include <mujoco_sim/v2/sync.pb.h>
+#if MUJOCO_SIM_HAS_SENSOR_STREAMS
 #include <mujoco_sim/sensor/source_profile.hpp>
+#endif
 
 #include "server_config_generated.hpp"
 
@@ -145,11 +149,11 @@ std::string ToPublicFifoOverflow(
   return value == Overflow::kDropNewest ? "drop_newest" : "drop_oldest";
 }
 
-mujoco_sim::v1::StreamFormat StreamFormatForKind(const std::string& kind) {
-  if (kind == "rgb") return mujoco_sim::v1::RGB8;
-  if (kind == "depth") return mujoco_sim::v1::DEPTH32F;
-  if (kind == "segmentation") return mujoco_sim::v1::SEGMENTATION32U;
-  return mujoco_sim::v1::XYZ32F;
+mujoco_sim::v2::StreamFormat StreamFormatForKind(const std::string& kind) {
+  if (kind == "rgb") return mujoco_sim::v2::RGB8;
+  if (kind == "depth") return mujoco_sim::v2::DEPTH32F;
+  if (kind == "segmentation") return mujoco_sim::v2::SEGMENTATION32U;
+  return mujoco_sim::v2::XYZ32F;
 }
 
 generated::ServerConfig ToGenerated(const ServerConfig& config) {
@@ -159,7 +163,6 @@ generated::ServerConfig ToGenerated(const ServerConfig& config) {
   output.initial_keyframe = config.initial_keyframe;
   output.max_ticks = config.max_ticks;
   output.tick_timeout_ms = config.tick_timeout_ms;
-  output.startup_timeout_ms = config.startup_timeout_ms;
   output.activation_timeout_ms = config.activation_timeout_ms;
   output.allow_timed_out_adapter_replacement =
       config.allow_timed_out_adapter_replacement;
@@ -203,7 +206,6 @@ ServerConfig ToPublic(generated::ServerConfig config) {
   output.initial_keyframe = std::move(config.initial_keyframe);
   output.max_ticks = config.max_ticks;
   output.tick_timeout_ms = config.tick_timeout_ms;
-  output.startup_timeout_ms = config.startup_timeout_ms;
   output.activation_timeout_ms = config.activation_timeout_ms;
   output.allow_timed_out_adapter_replacement =
       config.allow_timed_out_adapter_replacement;
@@ -250,6 +252,13 @@ std::vector<const char*> ConstArgv(int argc, char** argv) {
 
 bool ValidateSensorStreams(const ServerConfig& config,
                            std::string* error_message) {
+#if !MUJOCO_SIM_HAS_SENSOR_STREAMS
+  if (!config.sensor_streams.empty()) {
+    *error_message = "this build does not include sensor streams";
+    return false;
+  }
+  return true;
+#else
   if (config.render_backend != "auto" && config.render_backend != "egl" &&
       config.render_backend != "osmesa") {
     *error_message = "render_backend must be one of: auto, egl, osmesa";
@@ -267,8 +276,12 @@ bool ValidateSensorStreams(const ServerConfig& config,
   const std::vector<std::string> queue_modes = {"latest", "fifo",
                                                  "blocking"};
   for (const auto& stream : config.sensor_streams) {
-    if (stream.name.empty() || stream.source.empty() ||
-        stream.frame_id.empty()) {
+    if (!mujoco_sim::protocol::ValidateIdentifier(
+            stream.name, mujoco_sim::protocol::IdentifierKind::kStream,
+            error_message)) {
+      return false;
+    }
+    if (stream.source.empty() || stream.frame_id.empty()) {
       *error_message =
           "sensor stream name, source, and frame_id must not be empty";
       return false;
@@ -372,6 +385,7 @@ bool ValidateSensorStreams(const ServerConfig& config,
     }
   }
   return true;
+#endif
 }
 
 bool ValidateLogging(const ServerConfig& config, std::string* error_message) {
@@ -407,12 +421,23 @@ bool ValidateFinal(const ServerConfig& config, std::string* error_message) {
   if (!ValidateLogging(config, error_message)) {
     return false;
   }
+#if !MUJOCO_SIM_HAS_GUI
+  if (!config.headless) {
+    *error_message = "this build does not include GUI support; use --headless";
+    return false;
+  }
+#endif
   if (config.model_path.empty()) {
     *error_message = "model path is required";
     return false;
   }
   if (config.server_name.empty()) {
     *error_message = "server name is required";
+    return false;
+  }
+  if (!mujoco_sim::protocol::ValidateIdentifier(
+          config.server_name,
+          mujoco_sim::protocol::IdentifierKind::kServer, error_message)) {
     return false;
   }
   return true;

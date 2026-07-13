@@ -22,7 +22,7 @@ namespace demo = mujoco_sim::sensor_demo;
 
 namespace {
 
-bool AddImuFrame(const mujoco_sim::v1::ObservationFrame& frame,
+bool AddImuFrame(const mujoco_sim::v2::ObservationFrame& frame,
                  const std::string& observation_name,
                  demo::ImuSynchronizer* synchronizer,
                  std::string* error_message) {
@@ -90,7 +90,7 @@ int main(int argc, char** argv) {
   try {
     while (!demo::ProcessStopRequested() && scan_accounting.CanStartScan()) {
       while (true) {
-        mujoco_sim::v1::ObservationFrame frame;
+        mujoco_sim::v2::ObservationFrame frame;
         const auto observation_result = observer.WaitForObservation(
             std::chrono::milliseconds(0), &frame, &message);
         if (observation_result ==
@@ -142,7 +142,7 @@ int main(int argc, char** argv) {
           std::chrono::milliseconds(config.wait_timeout_ms);
       while (!orientation.has_value() && !demo::ProcessStopRequested() &&
              std::chrono::steady_clock::now() < imu_deadline) {
-        mujoco_sim::v1::ObservationFrame frame;
+        mujoco_sim::v2::ObservationFrame frame;
         const auto remaining =
             std::chrono::duration_cast<std::chrono::milliseconds>(
                 imu_deadline - std::chrono::steady_clock::now());

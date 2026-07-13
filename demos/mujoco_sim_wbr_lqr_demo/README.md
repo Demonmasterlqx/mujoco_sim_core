@@ -1,7 +1,7 @@
 # mujoco_sim_wbr_lqr_demo
 
 This package ports the runtime WBR LQR controller from
-`CosmosMount/wbr_mujoco` to the repository's V1 lockstep architecture. It
+`CosmosMount/wbr_mujoco` to the repository's V2 lockstep architecture. It
 ships the imported model, a synchronous controller library, generated YAML/CLI
 configuration, and the executable `mujoco-sim-wbr-lqr-adapter`.
 
@@ -83,7 +83,7 @@ Supported adapter CLI overrides are:
 ```text
 --config
 --server-name
---controller-id
+--adapter-id
 --timeout-ms
 --service-timeout-ms
 --ticks

@@ -121,7 +121,7 @@ bool BuildAppConfig(const generated::SensorDemoConfig& generated_config,
   next.controller.interfaces =
       BuildControllerInterfaces(generated_config.controller.interfaces);
   next.controller.adapter.server_name = next.server_name;
-  next.controller.adapter.controller_id = generated_config.controller.adapter_id;
+  next.controller.adapter.adapter_id = generated_config.controller.adapter_id;
   next.controller.adapter.observation_names =
       ControllerObservationNames(next.controller.interfaces);
   next.controller.adapter.command_names =
@@ -241,7 +241,7 @@ bool BuildAppConfig(const generated::SensorDemoConfig& generated_config,
     return false;
   }
   std::vector<std::string> adapter_ids = {
-      next.controller.adapter.controller_id,
+      next.controller.adapter.adapter_id,
       next.state_observer.observer.observer_id,
       next.mapper.observer.observer_id};
   if (!RequireUnique(adapter_ids, "adapter IDs", error_message)) return false;

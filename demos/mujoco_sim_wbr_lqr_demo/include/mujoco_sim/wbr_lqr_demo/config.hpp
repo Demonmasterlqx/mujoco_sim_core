@@ -43,7 +43,7 @@ struct PipelineConfig {
 // Stable controller DTO populated by the generated-config conversion layer.
 struct AdapterConfig {
   std::string server_name = "default";
-  std::string controller_id = "wbr_lqr_controller";
+  std::string adapter_id = "wbr_lqr_controller";
   std::uint32_t timeout_ms = 1000;
   std::uint32_t service_timeout_ms = 5000;
   std::uint64_t max_ticks = 0;

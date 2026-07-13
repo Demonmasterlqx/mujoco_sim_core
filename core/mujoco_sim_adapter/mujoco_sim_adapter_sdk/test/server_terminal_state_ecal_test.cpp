@@ -7,7 +7,7 @@
 #include <mujoco_sim/adapter_sdk/observer_client.hpp>
 #include <mujoco_sim/adapter_sdk/sensor_stream_client.hpp>
 #include <mujoco_sim/adapter_sdk/sync_adapter_client.hpp>
-#include <mujoco_sim/server/ecal_server.hpp>
+#include <mujoco_sim/server/server_application.hpp>
 
 namespace mujoco_sim::adapter_sdk {
 namespace {
@@ -37,13 +37,13 @@ TEST(ServerTerminalStateEcalTest, StoppedServerWakesAllClientRoles) {
   stream.queue_depth = 1;
   config.sensor_streams = {stream};
 
-  server::EcalServer server(config);
+  server::ServerApplication server(config);
   std::string error;
   ASSERT_TRUE(server.Start(&error)) << error;
 
   AdapterOptions controller_options;
   controller_options.server_name = config.server_name;
-  controller_options.controller_id = "controller";
+  controller_options.adapter_id = "controller";
   controller_options.observation_names = {"hinge_pos"};
   controller_options.command_names = {"hinge_motor"};
   controller_options.service_timeout_ms = 5000;
@@ -68,13 +68,13 @@ TEST(ServerTerminalStateEcalTest, StoppedServerWakesAllClientRoles) {
   SensorStreamClient streams(stream_options);
   ASSERT_TRUE(streams.Start(&error)) << error;
 
-  mujoco_sim::v1::Tick tick;
+  mujoco_sim::v2::Tick tick;
   std::string tick_error;
   auto tick_wait = std::async(std::launch::async, [&] {
     return controller.WaitForTick(std::chrono::milliseconds::max(), &tick,
                                   &tick_error);
   });
-  mujoco_sim::v1::ObservationFrame observation;
+  mujoco_sim::v2::ObservationFrame observation;
   std::string observation_error;
   auto observation_wait = std::async(std::launch::async, [&] {
     return observer.WaitForObservation(std::chrono::milliseconds::max(),
@@ -88,7 +88,7 @@ TEST(ServerTerminalStateEcalTest, StoppedServerWakesAllClientRoles) {
   });
 
   std::this_thread::sleep_for(300ms);
-  server.Stop();
+  server.RequestStop();
   EXPECT_EQ(server.Run(), 0);
 
   ASSERT_EQ(tick_wait.wait_for(3s), std::future_status::ready);

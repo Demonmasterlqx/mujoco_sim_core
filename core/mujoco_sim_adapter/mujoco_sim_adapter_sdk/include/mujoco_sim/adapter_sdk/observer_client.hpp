@@ -17,7 +17,7 @@
 #include <ecal/pubsub/publisher.h>
 #include <ecal/pubsub/subscriber.h>
 #include <ecal/service/client.h>
-#include <mujoco_sim/v1/sync.pb.h>
+#include <mujoco_sim/v2/sync.pb.h>
 
 namespace mujoco_sim::adapter_sdk {
 
@@ -52,7 +52,7 @@ class ObserverClient {
   bool Activate(std::string* error_message);
   ObservationWaitResult WaitForObservation(
       std::chrono::milliseconds timeout,
-      mujoco_sim::v1::ObservationFrame* frame,
+      mujoco_sim::v2::ObservationFrame* frame,
       std::string* error_message);
   void Stop();
   bool Unregister(std::string* error_message);
@@ -60,7 +60,7 @@ class ObserverClient {
   std::uint64_t dropped_frames() const;
   std::string lifecycle_warning() const;
 
-  const mujoco_sim::v1::RegisterAdapterResponse& registration() const {
+  const mujoco_sim::v2::RegisterAdapterResponse& registration() const {
     return registration_;
   }
 
@@ -78,35 +78,35 @@ class ObserverClient {
                    std::string* error_message);
   bool ActivateWith(
       const std::function<bool(
-          const mujoco_sim::v1::ActivateAdapterRequest&,
-          mujoco_sim::v1::ActivateAdapterResponse*, std::string*)>& call,
+          const mujoco_sim::v2::ActivateAdapterRequest&,
+          mujoco_sim::v2::ActivateAdapterResponse*, std::string*)>& call,
       std::chrono::milliseconds discovery_delay,
       std::string* error_message);
   bool WaitBeforeActivation(std::chrono::milliseconds delay);
   bool UnregisterWith(
       const std::function<bool(
-          const mujoco_sim::v1::UnregisterAdapterRequest&,
-          mujoco_sim::v1::UnregisterAdapterResponse*, std::string*)>& call,
+          const mujoco_sim::v2::UnregisterAdapterRequest&,
+          mujoco_sim::v2::UnregisterAdapterResponse*, std::string*)>& call,
       std::string* error_message);
   bool CompleteUnregister(
-      const mujoco_sim::v1::UnregisterAdapterResponse& response,
+      const mujoco_sim::v2::UnregisterAdapterResponse& response,
       std::string* error_message);
   void MarkStoppedLocked();
   void TransitionToStopped();
 
   bool IsExpectedObservation(
-      const mujoco_sim::v1::ObservationFrame& frame) const;
+      const mujoco_sim::v2::ObservationFrame& frame) const;
   void HandleObservationBytes(const void* data, std::size_t size);
   void HandleStatusBytes(const void* data, std::size_t size);
-  void HandleObservation(const mujoco_sim::v1::ObservationFrame& frame);
+  void HandleObservation(const mujoco_sim::v2::ObservationFrame& frame);
   void SetTerminalError(const std::string& error);
   void StopObservationReception();
 
   void StartHeartbeatThread();
   void JoinHeartbeatThread();
   void HeartbeatLoop();
-  mujoco_sim::v1::AdapterHeartbeat BuildHeartbeat() const;
-  void PublishHeartbeat(const mujoco_sim::v1::AdapterHeartbeat& heartbeat);
+  mujoco_sim::v2::AdapterHeartbeat BuildHeartbeat() const;
+  void PublishHeartbeat(const mujoco_sim::v2::AdapterHeartbeat& heartbeat);
 
   struct CallbackState {
     std::mutex mutex;
@@ -129,7 +129,7 @@ class ObserverClient {
   };
 
   ObserverOptions options_;
-  mujoco_sim::v1::RegisterAdapterResponse registration_;
+  mujoco_sim::v2::RegisterAdapterResponse registration_;
   std::unique_ptr<eCAL::CServiceClient> registry_client_;
   std::unique_ptr<eCAL::CPublisher> heartbeat_publisher_;
   std::unique_ptr<eCAL::CSubscriber> observation_subscriber_;
@@ -150,7 +150,7 @@ class ObserverClient {
   bool registered_ = false;
   bool accepting_observations_ = false;
   bool wait_in_progress_ = false;
-  std::deque<mujoco_sim::v1::ObservationFrame> observations_;
+  std::deque<mujoco_sim::v2::ObservationFrame> observations_;
   std::uint64_t last_sequence_ = 0;
   std::uint64_t last_tick_id_ = 0;
   std::uint64_t dropped_frames_ = 0;

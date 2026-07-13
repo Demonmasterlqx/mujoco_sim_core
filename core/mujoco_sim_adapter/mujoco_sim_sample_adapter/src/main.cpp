@@ -33,7 +33,7 @@ int main(int argc, char** argv) {
   int result = 0;
   std::uint64_t handled_ticks = 0;
   while (options.max_ticks == 0 || handled_ticks < options.max_ticks) {
-    mujoco_sim::v1::Tick tick;
+    mujoco_sim::v2::Tick tick;
     const auto wait_result = client.WaitForTick(
         std::chrono::milliseconds(100), &tick, &error);
     if (wait_result == mujoco_sim::adapter_sdk::TickWaitResult::kTimeout) {
@@ -48,14 +48,14 @@ int main(int argc, char** argv) {
     }
 
     const auto commands =
-        mujoco_sim::sample_adapter::ConstantCommandsForTick(
-            tick, options.command_value);
+        mujoco_sim::sample_adapter::ConstantCommandsForLayout(
+            client.registration().layout(), options.command_value);
     if (!client.Commit(tick, commands, &error)) {
       std::cerr << error << '\n';
       result = 1;
       break;
     }
-    if (tick.controller_state() == mujoco_sim::v1::ACTIVE) {
+    if (tick.controller_state() == mujoco_sim::v2::ACTIVE) {
       ++handled_ticks;
     }
   }

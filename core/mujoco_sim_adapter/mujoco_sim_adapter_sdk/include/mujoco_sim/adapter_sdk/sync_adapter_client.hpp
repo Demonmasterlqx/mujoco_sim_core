@@ -14,13 +14,13 @@
 #include <ecal/pubsub/publisher.h>
 #include <ecal/pubsub/subscriber.h>
 #include <ecal/service/client.h>
-#include <mujoco_sim/v1/sync.pb.h>
+#include <mujoco_sim/v2/sync.pb.h>
 
 namespace mujoco_sim::adapter_sdk {
 
 struct AdapterOptions {
   std::string server_name = "default";
-  std::string controller_id;
+  std::string adapter_id;
   std::vector<std::string> observation_names;
   std::vector<std::string> command_names;
   std::uint32_t timeout_ms = 1000;
@@ -50,16 +50,17 @@ class SyncAdapterClient {
   bool Start(std::string* error_message);
   bool Activate(std::string* error_message);
   TickWaitResult WaitForTick(std::chrono::milliseconds timeout,
-                             mujoco_sim::v1::Tick* tick,
+                             mujoco_sim::v2::Tick* tick,
                              std::string* error_message);
-  bool Commit(const mujoco_sim::v1::Tick& tick,
+  bool Commit(const mujoco_sim::v2::Tick& tick,
               const std::vector<CommandValue>& commands,
               std::string* error_message);
   void Stop();
   bool Unregister(std::string* error_message);
   std::string lifecycle_warning() const;
+  std::uint64_t layout_hash_mismatches() const;
 
-  const mujoco_sim::v1::RegisterControllerResponse& registration() const {
+  const mujoco_sim::v2::RegisterAdapterResponse& registration() const {
     return registration_;
   }
 
@@ -76,45 +77,46 @@ class SyncAdapterClient {
                    std::string* error_message);
   bool ActivateWith(
       const std::function<bool(
-          const mujoco_sim::v1::ActivateControllerRequest&,
-          mujoco_sim::v1::ActivateControllerResponse*, std::string*)>& call,
+          const mujoco_sim::v2::ActivateAdapterRequest&,
+          mujoco_sim::v2::ActivateAdapterResponse*, std::string*)>& call,
       std::chrono::milliseconds discovery_delay,
       std::string* error_message);
   bool WaitBeforeActivation(std::chrono::milliseconds delay);
   bool CommitWith(
-      const mujoco_sim::v1::Tick& tick,
+      const mujoco_sim::v2::Tick& tick,
       const std::vector<CommandValue>& commands,
-      const std::function<bool(const mujoco_sim::v1::AdapterCommit&)>& publish,
+      const std::function<bool(const mujoco_sim::v2::AdapterCommit&)>& publish,
       std::string* error_message);
   bool BuildValidatedCommit(
-      const mujoco_sim::v1::Tick& tick,
+      const mujoco_sim::v2::Tick& tick,
       const std::vector<CommandValue>& commands,
-      mujoco_sim::v1::AdapterCommit* commit,
+      mujoco_sim::v2::AdapterCommit* commit,
       std::string* error_message) const;
   bool UnregisterWith(
       const std::function<bool(
-          const mujoco_sim::v1::UnregisterControllerRequest&,
-          mujoco_sim::v1::UnregisterControllerResponse*, std::string*)>& call,
+          const mujoco_sim::v2::UnregisterAdapterRequest&,
+          mujoco_sim::v2::UnregisterAdapterResponse*, std::string*)>& call,
       std::string* error_message);
   bool CompleteUnregister(
-      const mujoco_sim::v1::UnregisterControllerResponse& response,
+      const mujoco_sim::v2::UnregisterAdapterResponse& response,
       std::string* error_message);
   void MarkStoppedLocked();
   void TransitionToStopped();
   void AddLifecycleWarning(const std::string& warning);
   void SetTerminalError(const std::string& error);
   void StopTickReception();
-  bool IsExpectedTick(const mujoco_sim::v1::Tick& tick) const;
+  bool HasExpectedTickIdentity(const mujoco_sim::v2::Tick& tick) const;
+  bool IsExpectedTick(const mujoco_sim::v2::Tick& tick) const;
   void HandleTickBytes(const void* data, std::size_t size);
   void HandleStatusBytes(const void* data, std::size_t size);
   void HandleTick(
-      const mujoco_sim::v1::Tick& tick,
-      const std::function<void(const mujoco_sim::v1::Heartbeat&)>&
+      const mujoco_sim::v2::Tick& tick,
+      const std::function<void(const mujoco_sim::v2::AdapterHeartbeat&)>&
           publish_heartbeat,
-      const std::function<void(const mujoco_sim::v1::AdapterCommit&)>&
+      const std::function<void(const mujoco_sim::v2::AdapterCommit&)>&
           publish_commit);
-  bool PublishCommit(const mujoco_sim::v1::AdapterCommit& commit);
-  void PublishHeartbeat(const mujoco_sim::v1::Heartbeat& heartbeat);
+  bool PublishCommit(const mujoco_sim::v2::AdapterCommit& commit);
+  void PublishHeartbeat(const mujoco_sim::v2::AdapterHeartbeat& heartbeat);
   bool PublishSerialized(const std::function<bool()>& publish);
 
   struct CallbackState {
@@ -138,7 +140,7 @@ class SyncAdapterClient {
   };
 
   AdapterOptions options_;
-  mujoco_sim::v1::RegisterControllerResponse registration_;
+  mujoco_sim::v2::RegisterAdapterResponse registration_;
   std::unique_ptr<eCAL::CServiceClient> registry_client_;
   std::unique_ptr<eCAL::CPublisher> commit_publisher_;
   std::unique_ptr<eCAL::CPublisher> heartbeat_publisher_;
@@ -157,12 +159,13 @@ class SyncAdapterClient {
   bool registered_ = false;
   bool accepting_ticks_ = false;
   bool wait_in_progress_ = false;
-  std::optional<mujoco_sim::v1::Tick> queued_tick_;
-  std::optional<mujoco_sim::v1::Tick> outstanding_tick_;
-  std::optional<mujoco_sim::v1::Tick> committed_tick_;
-  std::optional<mujoco_sim::v1::AdapterCommit> cached_commit_;
+  std::optional<mujoco_sim::v2::Tick> queued_tick_;
+  std::optional<mujoco_sim::v2::Tick> outstanding_tick_;
+  std::optional<mujoco_sim::v2::Tick> committed_tick_;
+  std::optional<mujoco_sim::v2::AdapterCommit> cached_commit_;
   std::string terminal_error_;
   std::string lifecycle_warning_;
+  std::uint64_t layout_hash_mismatches_ = 0;
 };
 
 }  // namespace mujoco_sim::adapter_sdk

@@ -30,9 +30,9 @@ server_pid="$!"
 
 timeout 12s "${probe_bin}" "${instance_name}"
 
-for event in controller_registered controller_activated \
-             controller_timed_out controller_recovery_pending \
-             controller_recovered controller_unregistered; do
+for event in adapter_registered adapter_activated \
+             adapter_timed_out adapter_recovery_pending \
+             adapter_recovered adapter_unregistered; do
   if ! grep -Fq "event=${event}" "${work_dir}/server.err"; then
     echo "server log is missing event=${event}" >&2
     sed -n '1,240p' "${work_dir}/server.err" >&2 || true

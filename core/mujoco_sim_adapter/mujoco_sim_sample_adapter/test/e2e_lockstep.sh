@@ -24,7 +24,6 @@ server_args=(
   --server-name "${instance_name}"
   --model "${model_path}"
   --max-ticks 0
-  --startup-timeout-ms 5000
   --tick-timeout-ms 5000
   --log-level trace
 )
@@ -43,7 +42,7 @@ sleep 0.1
 
 if ! timeout 12s "${adapter_bin}" \
     --server-name "${instance_name}" \
-    --controller-id "sample_${BASHPID}" \
+    --adapter-id "sample_${BASHPID}" \
     --ticks 5 \
     --command-value 0.1 \
     --service-timeout-ms 5000 \
@@ -64,7 +63,7 @@ fi
 grep -Fq "event=tick_published" "${server_log}"
 grep -Fq "event=commit_accepted" "${server_log}"
 grep -Fq "event=barrier_completed" "${server_log}"
-grep -Fq "event=controller_unregistered" "${server_log}"
+grep -Fq "event=adapter_unregistered" "${server_log}"
 
 kill "${server_pid}" 2>/dev/null || true
 set +e

@@ -21,26 +21,22 @@ class ObserverClientTestPeer {
   }
 
   static void Configure(ObserverClient* client,
-                        const mujoco_sim::v1::ObservationFrame& frame,
+                        const mujoco_sim::v2::ObservationFrame& frame,
                         bool activated = true, bool registered = false) {
     client->stop_requested_ = false;
     {
       std::lock_guard lock(client->mutex_);
       auto& registration = client->registration_;
       registration.Clear();
-      registration.set_code(mujoco_sim::v1::OK);
-      registration.set_adapter_id(frame.observer_id());
-      registration.set_role(mujoco_sim::v1::OBSERVER);
+      registration.set_code(mujoco_sim::v2::OK);
+      registration.set_adapter_id(frame.adapter_id());
+      registration.set_role(mujoco_sim::v2::OBSERVER);
       registration.set_session_id(frame.header().session_id());
       registration.set_epoch(frame.header().epoch());
-      registration.set_effective_protocol_major(
-          frame.header().protocol_major());
-      registration.set_effective_protocol_minor(
-          frame.header().protocol_minor());
       for (const auto& block : frame.observations()) {
         auto* descriptor = registration.mutable_layout()->add_observations();
         descriptor->set_name(block.name());
-        descriptor->set_type(mujoco_sim::v1::OBSERVATION_SENSOR);
+        descriptor->set_type(mujoco_sim::v2::OBSERVATION_SENSOR);
         descriptor->set_dimension(block.values_size());
       }
       client->started_ = true;
@@ -65,13 +61,13 @@ class ObserverClientTestPeer {
 
   static void HandleObservationBytes(
       ObserverClient* client,
-      const mujoco_sim::v1::ObservationFrame& frame) {
+      const mujoco_sim::v2::ObservationFrame& frame) {
     const std::string bytes = frame.SerializeAsString();
     client->HandleObservationBytes(bytes.data(), bytes.size());
   }
 
   static void HandleStatusBytes(ObserverClient* client,
-                                const mujoco_sim::v1::ServerStatus& status) {
+                                const mujoco_sim::v2::ServerStatus& status) {
     const std::string bytes = status.SerializeAsString();
     client->HandleStatusBytes(bytes.data(), bytes.size());
   }
@@ -79,8 +75,8 @@ class ObserverClientTestPeer {
   static bool ActivateWith(
       ObserverClient* client,
       const std::function<bool(
-          const mujoco_sim::v1::ActivateAdapterRequest&,
-          mujoco_sim::v1::ActivateAdapterResponse*, std::string*)>& call,
+          const mujoco_sim::v2::ActivateAdapterRequest&,
+          mujoco_sim::v2::ActivateAdapterResponse*, std::string*)>& call,
       std::string* error) {
     std::lock_guard lifecycle_lock(client->lifecycle_mutex_);
     return client->ActivateWith(call, std::chrono::milliseconds(0), error);
@@ -89,13 +85,13 @@ class ObserverClientTestPeer {
   static bool UnregisterWith(
       ObserverClient* client,
       const std::function<bool(
-          const mujoco_sim::v1::UnregisterAdapterRequest&,
-          mujoco_sim::v1::UnregisterAdapterResponse*, std::string*)>& call,
+          const mujoco_sim::v2::UnregisterAdapterRequest&,
+          mujoco_sim::v2::UnregisterAdapterResponse*, std::string*)>& call,
       std::string* error) {
     return client->UnregisterWith(call, error);
   }
 
-  static mujoco_sim::v1::AdapterHeartbeat BuildHeartbeat(
+  static mujoco_sim::v2::AdapterHeartbeat BuildHeartbeat(
       ObserverClient* client) {
     return client->BuildHeartbeat();
   }
@@ -176,8 +172,8 @@ mujoco_sim::adapter_sdk::ObserverOptions MakeOptions(
   return options;
 }
 
-mujoco_sim::v1::ObservationFrame MakeFrame(std::uint64_t sequence) {
-  mujoco_sim::v1::ObservationFrame frame;
+mujoco_sim::v2::ObservationFrame MakeFrame(std::uint64_t sequence) {
+  mujoco_sim::v2::ObservationFrame frame;
   frame.mutable_header()->set_server_name("default");
   frame.mutable_header()->set_session_id(41);
   frame.mutable_header()->set_epoch(7);
@@ -186,7 +182,7 @@ mujoco_sim::v1::ObservationFrame MakeFrame(std::uint64_t sequence) {
       mujoco_sim::protocol::kProtocolMajor);
   frame.mutable_header()->set_protocol_minor(
       mujoco_sim::protocol::kProtocolMinor);
-  frame.set_observer_id("watcher");
+  frame.set_adapter_id("watcher");
   frame.set_sequence(sequence);
   auto* position = frame.add_observations();
   position->set_name("position");
@@ -198,20 +194,20 @@ mujoco_sim::v1::ObservationFrame MakeFrame(std::uint64_t sequence) {
   return frame;
 }
 
-mujoco_sim::v1::ServerStatus MakeStatus(std::uint64_t session_id,
-                                        mujoco_sim::v1::ControllerState state,
+mujoco_sim::v2::ServerStatus MakeStatus(std::uint64_t session_id,
+                                        mujoco_sim::v2::ControllerState state,
                                         std::string message = {}) {
-  mujoco_sim::v1::ServerStatus status;
+  mujoco_sim::v2::ServerStatus status;
   status.mutable_header()->set_server_name("default");
   status.mutable_header()->set_epoch(7);
   status.mutable_header()->set_protocol_major(
       mujoco_sim::protocol::kProtocolMajor);
   status.mutable_header()->set_protocol_minor(
       mujoco_sim::protocol::kProtocolMinor);
-  status.set_state(mujoco_sim::v1::RUNNING);
+  status.set_state(mujoco_sim::v2::RUNNING);
   auto* adapter = status.add_adapters();
   adapter->set_adapter_id("watcher");
-  adapter->set_role(mujoco_sim::v1::OBSERVER);
+  adapter->set_role(mujoco_sim::v2::OBSERVER);
   adapter->set_session_id(session_id);
   adapter->set_state(state);
   adapter->set_message(std::move(message));
@@ -254,7 +250,7 @@ TEST(ObserverClientTest, DropsOldestFramesAndIgnoresStaleSequences) {
   ObserverClientTestPeer::HandleObservationBytes(&client, MakeFrame(3));
 
   EXPECT_EQ(client.dropped_frames(), 1U);
-  mujoco_sim::v1::ObservationFrame output;
+  mujoco_sim::v2::ObservationFrame output;
   std::string error;
   ASSERT_EQ(client.WaitForObservation(0ms, &output, &error),
             ObservationWaitResult::kReceived);
@@ -277,12 +273,12 @@ TEST(ObserverClientTest, RejectsMalformedIdentityAndObservationLayout) {
   wrong_layout.mutable_observations(0)->clear_values();
   ObserverClientTestPeer::HandleObservationBytes(&client, wrong_layout);
 
-  mujoco_sim::v1::ObservationFrame output;
-  output.set_observer_id("unchanged");
+  mujoco_sim::v2::ObservationFrame output;
+  output.set_adapter_id("unchanged");
   std::string error;
   EXPECT_EQ(client.WaitForObservation(0ms, &output, &error),
             ObservationWaitResult::kTimeout);
-  EXPECT_EQ(output.observer_id(), "unchanged");
+  EXPECT_EQ(output.adapter_id(), "unchanged");
 
   ObserverClientTestPeer::HandleObservationBytes(&client, MakeFrame(3));
   ASSERT_EQ(client.WaitForObservation(0ms, &output, &error),
@@ -293,7 +289,7 @@ TEST(ObserverClientTest, RejectsMalformedIdentityAndObservationLayout) {
 TEST(ObserverClientTest, WaitTimesOutAndStopWakesWaiter) {
   ObserverClient client(MakeOptions());
   ObserverClientTestPeer::Configure(&client, MakeFrame(1));
-  mujoco_sim::v1::ObservationFrame output;
+  mujoco_sim::v2::ObservationFrame output;
   std::string error;
   EXPECT_EQ(client.WaitForObservation(1ms, &output, &error),
             ObservationWaitResult::kTimeout);
@@ -331,7 +327,7 @@ TEST(ObserverClientTest,
     return;
   }
 
-  mujoco_sim::v1::ObservationFrame output;
+  mujoco_sim::v2::ObservationFrame output;
   std::string error;
   auto waiting = std::async(std::launch::async, [&] {
     return client.WaitForObservation(std::chrono::milliseconds::max(),
@@ -351,7 +347,7 @@ TEST(ObserverClientTest, ConcurrentWaitIsRejectedAndDeliveryWakesFirstWaiter) {
   std::promise<void> waiting_promise;
   auto waiting_started = waiting_promise.get_future();
   auto first_wait = std::async(std::launch::async, [&] {
-    mujoco_sim::v1::ObservationFrame output;
+    mujoco_sim::v2::ObservationFrame output;
     std::string error;
     waiting_promise.set_value();
     return client.WaitForObservation(1s, &output, &error);
@@ -363,7 +359,7 @@ TEST(ObserverClientTest, ConcurrentWaitIsRejectedAndDeliveryWakesFirstWaiter) {
   }
   ASSERT_TRUE(ObserverClientTestPeer::WaitInProgress(&client));
 
-  mujoco_sim::v1::ObservationFrame output;
+  mujoco_sim::v2::ObservationFrame output;
   std::string error;
   EXPECT_EQ(client.WaitForObservation(0ms, &output, &error),
             ObservationWaitResult::kError);
@@ -377,8 +373,8 @@ TEST(ObserverClientTest, ServerErrorAndReplacementAreTerminal) {
   ObserverClient error_client(MakeOptions());
   ObserverClientTestPeer::Configure(&error_client, MakeFrame(1));
   ObserverClientTestPeer::HandleStatusBytes(
-      &error_client, MakeStatus(41, mujoco_sim::v1::ERROR, "sensor failed"));
-  mujoco_sim::v1::ObservationFrame output;
+      &error_client, MakeStatus(41, mujoco_sim::v2::ERROR, "sensor failed"));
+  mujoco_sim::v2::ObservationFrame output;
   std::string error;
   EXPECT_EQ(error_client.WaitForObservation(0ms, &output, &error),
             ObservationWaitResult::kError);
@@ -389,7 +385,7 @@ TEST(ObserverClientTest, ServerErrorAndReplacementAreTerminal) {
   ObserverClientTestPeer::Configure(&replacement_client, MakeFrame(1));
   ObserverClientTestPeer::HandleStatusBytes(
       &replacement_client,
-      MakeStatus(42, mujoco_sim::v1::ACTIVE));
+      MakeStatus(42, mujoco_sim::v2::ACTIVE));
   EXPECT_EQ(replacement_client.WaitForObservation(0ms, &output, &error),
             ObservationWaitResult::kError);
   EXPECT_EQ(error, "server replaced observer session");
@@ -398,15 +394,15 @@ TEST(ObserverClientTest, ServerErrorAndReplacementAreTerminal) {
 TEST(ObserverClientTest, ServerTerminalStatesWakeInfiniteWait) {
   ObserverClient stopped_client(MakeOptions());
   ObserverClientTestPeer::Configure(&stopped_client, MakeFrame(1));
-  mujoco_sim::v1::ObservationFrame stopped_output;
+  mujoco_sim::v2::ObservationFrame stopped_output;
   std::string stopped_error;
   auto stopped_wait = std::async(std::launch::async, [&] {
     return stopped_client.WaitForObservation(
         std::chrono::milliseconds::max(), &stopped_output, &stopped_error);
   });
   std::this_thread::sleep_for(20ms);
-  auto stopped_status = MakeStatus(41, mujoco_sim::v1::ACTIVE);
-  stopped_status.set_state(mujoco_sim::v1::STOPPED);
+  auto stopped_status = MakeStatus(41, mujoco_sim::v2::ACTIVE);
+  stopped_status.set_state(mujoco_sim::v2::STOPPED);
   ObserverClientTestPeer::HandleStatusBytes(&stopped_client, stopped_status);
   ASSERT_EQ(stopped_wait.wait_for(1s), std::future_status::ready);
   EXPECT_EQ(stopped_wait.get(), ObservationWaitResult::kStopped);
@@ -423,15 +419,15 @@ TEST(ObserverClientTest, ServerTerminalStatesWakeInfiniteWait) {
 
   ObserverClient error_client(MakeOptions());
   ObserverClientTestPeer::Configure(&error_client, MakeFrame(1));
-  mujoco_sim::v1::ObservationFrame error_output;
+  mujoco_sim::v2::ObservationFrame error_output;
   std::string error_message;
   auto error_wait = std::async(std::launch::async, [&] {
     return error_client.WaitForObservation(
         std::chrono::milliseconds::max(), &error_output, &error_message);
   });
   std::this_thread::sleep_for(20ms);
-  auto error_status = MakeStatus(41, mujoco_sim::v1::ACTIVE);
-  error_status.set_state(mujoco_sim::v1::ERROR_PAUSED);
+  auto error_status = MakeStatus(41, mujoco_sim::v2::ACTIVE);
+  error_status.set_state(mujoco_sim::v2::ERROR_PAUSED);
   error_status.set_message("fatal simulation error");
   ObserverClientTestPeer::HandleStatusBytes(&error_client, error_status);
   ASSERT_EQ(error_wait.wait_for(1s), std::future_status::ready);
@@ -439,29 +435,23 @@ TEST(ObserverClientTest, ServerTerminalStatesWakeInfiniteWait) {
   EXPECT_EQ(error_message, "fatal simulation error");
 }
 
-TEST(ObserverClientTest, StatusRequiresNegotiatedProtocolMinor) {
+TEST(ObserverClientTest, StatusRequiresExactProtocolTwoZero) {
   auto frame = MakeFrame(1);
-  const std::uint32_t negotiated_minor =
-      mujoco_sim::protocol::kProtocolMinor == 0
-          ? 1
-          : mujoco_sim::protocol::kProtocolMinor - 1;
-  frame.mutable_header()->set_protocol_minor(negotiated_minor);
   ObserverClient client(MakeOptions());
   ObserverClientTestPeer::Configure(&client, frame);
 
   auto mismatched =
-      MakeStatus(41, mujoco_sim::v1::ERROR, "wrong protocol minor");
-  mismatched.mutable_header()->set_protocol_minor(negotiated_minor + 1);
+      MakeStatus(41, mujoco_sim::v2::ERROR, "wrong protocol minor");
+  mismatched.mutable_header()->set_protocol_minor(1);
   ObserverClientTestPeer::HandleStatusBytes(&client, mismatched);
 
-  mujoco_sim::v1::ObservationFrame output;
+  mujoco_sim::v2::ObservationFrame output;
   std::string error;
   EXPECT_EQ(client.WaitForObservation(0ms, &output, &error),
             ObservationWaitResult::kTimeout);
   EXPECT_TRUE(client.lifecycle_warning().empty());
 
-  auto matching = MakeStatus(41, mujoco_sim::v1::ERROR, "matching error");
-  matching.mutable_header()->set_protocol_minor(negotiated_minor);
+  auto matching = MakeStatus(41, mujoco_sim::v2::ERROR, "matching error");
   ObserverClientTestPeer::HandleStatusBytes(&client, matching);
   EXPECT_EQ(client.WaitForObservation(0ms, &output, &error),
             ObservationWaitResult::kError);
@@ -476,22 +466,22 @@ TEST(ObserverClientTest, ActivateAndUnregisterUseObserverRole) {
       &client,
       [](const auto& request, auto* response, std::string*) {
         EXPECT_EQ(request.adapter_id(), "watcher");
-        EXPECT_EQ(request.role(), mujoco_sim::v1::OBSERVER);
+        EXPECT_EQ(request.role(), mujoco_sim::v2::OBSERVER);
         EXPECT_EQ(request.session_id(), 41U);
-        response->set_code(mujoco_sim::v1::OK);
-        response->set_state(mujoco_sim::v1::ACTIVE);
+        response->set_code(mujoco_sim::v2::OK);
+        response->set_state(mujoco_sim::v2::ACTIVE);
         return true;
       },
       &error))
       << error;
-  EXPECT_EQ(client.registration().role(), mujoco_sim::v1::OBSERVER);
+  EXPECT_EQ(client.registration().role(), mujoco_sim::v2::OBSERVER);
 
   EXPECT_TRUE(ObserverClientTestPeer::UnregisterWith(
       &client,
       [](const auto& request, auto* response, std::string*) {
         EXPECT_EQ(request.adapter_id(), "watcher");
-        EXPECT_EQ(request.role(), mujoco_sim::v1::OBSERVER);
-        response->set_code(mujoco_sim::v1::NOT_FOUND);
+        EXPECT_EQ(request.role(), mujoco_sim::v2::OBSERVER);
+        response->set_code(mujoco_sim::v2::NOT_FOUND);
         return true;
       },
       &error));
@@ -500,7 +490,7 @@ TEST(ObserverClientTest, ActivateAndUnregisterUseObserverRole) {
 TEST(ObserverClientTest, SuccessfulUnregisterWakesConcurrentWaitAsStopped) {
   ObserverClient client(MakeOptions());
   ObserverClientTestPeer::Configure(&client, MakeFrame(1), true, true);
-  mujoco_sim::v1::ObservationFrame output;
+  mujoco_sim::v2::ObservationFrame output;
   std::string wait_error;
   auto waiting = std::async(std::launch::async, [&] {
     return client.WaitForObservation(std::chrono::milliseconds::max(),
@@ -521,7 +511,7 @@ TEST(ObserverClientTest, SuccessfulUnregisterWakesConcurrentWaitAsStopped) {
   const bool unregistered = ObserverClientTestPeer::UnregisterWith(
       &client,
       [](const auto&, auto* response, std::string*) {
-        response->set_code(mujoco_sim::v1::OK);
+        response->set_code(mujoco_sim::v2::OK);
         return true;
       },
       &unregister_error);
@@ -550,8 +540,8 @@ TEST(ObserverClientTest, StopWinsRaceWithSuccessfulActivationResponse) {
         [&](const auto&, auto* response, std::string*) {
           entered_promise.set_value();
           release.wait();
-          response->set_code(mujoco_sim::v1::OK);
-          response->set_state(mujoco_sim::v1::ACTIVE);
+          response->set_code(mujoco_sim::v2::OK);
+          response->set_state(mujoco_sim::v2::ACTIVE);
           return true;
         },
         &error);
@@ -569,7 +559,7 @@ TEST(ObserverClientTest, HeartbeatTracksLatestAcceptedObservation) {
   ObserverClientTestPeer::HandleObservationBytes(&client, MakeFrame(5));
   const auto heartbeat = ObserverClientTestPeer::BuildHeartbeat(&client);
   EXPECT_EQ(heartbeat.adapter_id(), "watcher");
-  EXPECT_EQ(heartbeat.role(), mujoco_sim::v1::OBSERVER);
+  EXPECT_EQ(heartbeat.role(), mujoco_sim::v2::OBSERVER);
   EXPECT_EQ(heartbeat.header().session_id(), 41U);
   EXPECT_EQ(heartbeat.header().tick_id(), 105U);
   EXPECT_EQ(heartbeat.last_observation_sequence(), 5U);

@@ -7,7 +7,7 @@
 
 #include <mujoco_sim/core/simulation_core.hpp>
 #include <mujoco_sim/server/server_config.hpp>
-#include <mujoco_sim/v1/sync.pb.h>
+#include <mujoco_sim/v2/sync.pb.h>
 
 namespace mujoco_sim::server {
 
@@ -23,7 +23,7 @@ struct SensorRuntimeTestHooks {
   std::function<void(const std::string& source_name)> before_capture;
   std::function<void(const std::string& source_name)>
       on_blocking_wait_started;
-  std::function<void(mujoco_sim::v1::StreamFrameHeader*)>
+  std::function<void(mujoco_sim::v2::StreamFrameHeader*)>
       before_serialize;
   std::function<void(const std::string& source_name)> before_initialize;
 };
@@ -45,9 +45,9 @@ class SensorRuntime {
   void RequestStop();
   void Stop();
 
-  mujoco_sim::v1::GetSensorStreamsResponse GetCatalog(
-      const mujoco_sim::v1::GetSensorStreamsRequest& request) const;
-  void AppendStatus(mujoco_sim::v1::ServerStatus* status) const;
+  mujoco_sim::v2::GetSensorStreamsResponse GetCatalog(
+      const mujoco_sim::v2::GetSensorStreamsRequest& request) const;
+  void AppendStatus(mujoco_sim::v2::ServerStatus* status) const;
 
  private:
   struct Impl;

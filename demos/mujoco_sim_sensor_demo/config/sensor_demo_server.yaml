@@ -4,7 +4,7 @@ max_ticks: 0
 tick_timeout_ms: 5000
 activation_timeout_ms: 10000
 status_period_ms: 100
-headless: true
+headless: false
 render_backend: auto
 log_level: info
 sensor_streams:

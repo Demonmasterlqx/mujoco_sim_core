@@ -88,6 +88,22 @@ void RuntimeMetrics::RecordTickPublishBatch(
   tick_retransmissions_ += retransmissions;
 }
 
+void RuntimeMetrics::RecordTickCache(
+    std::uint64_t serializations, std::uint64_t hits, std::uint64_t misses,
+    std::uint64_t cached_bytes, std::uint64_t layout_bytes_avoided) {
+  tick_serializations_ += serializations;
+  tick_cache_hits_ += hits;
+  tick_cache_misses_ += misses;
+  tick_cached_bytes_ += cached_bytes;
+  layout_bytes_avoided_ += layout_bytes_avoided;
+}
+
+void RuntimeMetrics::RecordBlockingWait(double elapsed_ms) {
+  ++blocking_wait_count_;
+  blocking_wait_total_ms_ += elapsed_ms;
+  blocking_wait_max_ms_ = std::max(blocking_wait_max_ms_, elapsed_ms);
+}
+
 double RuntimeMetrics::RecordCommit(bool duplicate, bool rejected,
                                     bool stepped, TimePoint now) {
   ++commits_;
@@ -132,6 +148,17 @@ RuntimeMetricsSnapshot RuntimeMetrics::TakeSummary(
       tick_send_rejected_with_subscribers_;
   snapshot.tick_no_subscribers = tick_no_subscribers_;
   snapshot.tick_retransmissions = tick_retransmissions_;
+  snapshot.tick_serializations = tick_serializations_;
+  snapshot.tick_cache_hits = tick_cache_hits_;
+  snapshot.tick_cache_misses = tick_cache_misses_;
+  snapshot.tick_cached_bytes = tick_cached_bytes_;
+  snapshot.layout_bytes_avoided = layout_bytes_avoided_;
+  snapshot.layout_hash_mismatches = layout_hash_mismatches_;
+  snapshot.blocking_wait_count = blocking_wait_count_;
+  snapshot.blocking_wait_total_ms = blocking_wait_total_ms_;
+  snapshot.blocking_wait_max_ms = blocking_wait_max_ms_;
+  snapshot.scheduler_wakeups = scheduler_wakeups_;
+  snapshot.scheduler_late_wakeups = scheduler_late_wakeups_;
   snapshot.commits = commits_;
   snapshot.duplicate_commits = duplicate_commits_;
   snapshot.rejected_commits = rejected_commits_;
@@ -163,6 +190,17 @@ void RuntimeMetrics::ResetWindow(TimePoint now, std::uint64_t tick_id,
   tick_send_rejected_with_subscribers_ = 0;
   tick_no_subscribers_ = 0;
   tick_retransmissions_ = 0;
+  tick_serializations_ = 0;
+  tick_cache_hits_ = 0;
+  tick_cache_misses_ = 0;
+  tick_cached_bytes_ = 0;
+  layout_bytes_avoided_ = 0;
+  layout_hash_mismatches_ = 0;
+  blocking_wait_count_ = 0;
+  blocking_wait_total_ms_ = 0.0;
+  blocking_wait_max_ms_ = 0.0;
+  scheduler_wakeups_ = 0;
+  scheduler_late_wakeups_ = 0;
   commits_ = 0;
   duplicate_commits_ = 0;
   rejected_commits_ = 0;

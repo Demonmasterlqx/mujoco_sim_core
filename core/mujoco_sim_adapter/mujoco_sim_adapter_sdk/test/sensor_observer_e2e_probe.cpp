@@ -32,7 +32,7 @@ float ReadFloat32LittleEndian(const std::byte* source) {
   return std::bit_cast<float>(bits);
 }
 
-bool ValidateObservation(const mujoco_sim::v1::ObservationFrame& frame,
+bool ValidateObservation(const mujoco_sim::v2::ObservationFrame& frame,
                          std::uint64_t previous_sequence,
                          double previous_time) {
   if (frame.sequence() <= previous_sequence || !frame.has_header() ||
@@ -64,7 +64,7 @@ bool ValidateObservation(const mujoco_sim::v1::ObservationFrame& frame,
 }
 
 bool ValidateRgb(const mujoco_sim::adapter_sdk::OwnedStreamSample& sample) {
-  if (sample.header.format() != mujoco_sim::v1::RGB8 ||
+  if (sample.header.format() != mujoco_sim::v2::RGB8 ||
       sample.header.width() != 64 || sample.header.height() != 48 ||
       sample.payload.size() != 64U * 48U * 3U) {
     std::cerr << "RGB sample shape or format mismatch\n";
@@ -80,7 +80,7 @@ bool ValidateRgb(const mujoco_sim::adapter_sdk::OwnedStreamSample& sample) {
 }
 
 bool ValidateLidar(const mujoco_sim::adapter_sdk::OwnedStreamSample& sample) {
-  if (sample.header.format() != mujoco_sim::v1::XYZ32F ||
+  if (sample.header.format() != mujoco_sim::v2::XYZ32F ||
       sample.header.width() != 72 || sample.header.height() != 4 ||
       sample.payload.size() != 72U * 4U * 3U * sizeof(float)) {
     std::cerr << "LiDAR sample shape or format mismatch\n";
@@ -170,7 +170,7 @@ bool WaitForPipelineTick(
   std::string error;
   bool observed = false;
   while (!observed && std::chrono::steady_clock::now() < deadline) {
-    mujoco_sim::v1::ObservationFrame frame;
+    mujoco_sim::v2::ObservationFrame frame;
     const auto remaining = std::chrono::duration_cast<std::chrono::milliseconds>(
         deadline - std::chrono::steady_clock::now());
     const auto result = observer->WaitForObservation(
@@ -252,24 +252,18 @@ bool WaitForPipelineAtTick(
 }
 
 mujoco_sim::adapter_sdk::AdapterOptions ControllerOptions(
-    const std::string& server_name, std::string controller_id,
+    const std::string& server_name, std::string adapter_id,
     std::uint32_t timeout_ms = 2000,
     std::string observation_name = "hinge_pos",
     std::string command_name = "hinge_motor") {
   mujoco_sim::adapter_sdk::AdapterOptions options;
   options.server_name = server_name;
-  options.controller_id = std::move(controller_id);
+  options.adapter_id = std::move(adapter_id);
   options.observation_names = {std::move(observation_name)};
   options.command_names = {std::move(command_name)};
   options.timeout_ms = timeout_ms;
   options.service_timeout_ms = 5000;
   return options;
-}
-
-eCAL::SServiceMethodInformation MethodInfo(const std::string& method) {
-  eCAL::SServiceMethodInformation info;
-  info.method_name = method;
-  return info;
 }
 
 template <typename Request, typename Response>
@@ -305,7 +299,7 @@ bool StartController(mujoco_sim::adapter_sdk::SyncAdapterClient* controller,
 
 bool WaitForControllerTick(
     mujoco_sim::adapter_sdk::SyncAdapterClient* controller,
-    mujoco_sim::v1::ControllerState expected, mujoco_sim::v1::Tick* tick,
+    mujoco_sim::v2::ControllerState expected, mujoco_sim::v2::Tick* tick,
     std::string* error) {
   const auto result = controller->WaitForTick(5s, tick, error);
   if (result == mujoco_sim::adapter_sdk::TickWaitResult::kReceived &&
@@ -320,7 +314,7 @@ bool WaitForControllerTick(
 }
 
 bool CommitCommand(mujoco_sim::adapter_sdk::SyncAdapterClient* controller,
-                   const mujoco_sim::v1::Tick& tick,
+                   const mujoco_sim::v2::Tick& tick,
                    const std::string& command_name, double value,
                    std::string* error) {
   return controller->Commit(
@@ -334,17 +328,17 @@ bool JoinTargetOnNextTick(
     mujoco_sim::adapter_sdk::SyncAdapterClient* target,
     mujoco_sim::adapter_sdk::ObserverClient* observer,
     mujoco_sim::adapter_sdk::SensorStreamClient* streams,
-    mujoco_sim::v1::Tick* pending_gate_tick,
-    mujoco_sim::v1::Tick* target_tick, PipelineCursor* cursor,
+    mujoco_sim::v2::Tick* pending_gate_tick,
+    mujoco_sim::v2::Tick* target_tick, PipelineCursor* cursor,
     const std::string& stage, std::string* error) {
   const std::uint64_t transition_tick =
       pending_gate_tick->header().tick_id() + 1;
   if (!CommitCommand(gate, *pending_gate_tick, "gate_motor", 0.0, error) ||
       !WaitForPipelineAtTick(observer, streams, transition_tick,
                              stage + " join transition", cursor) ||
-      !WaitForControllerTick(gate, mujoco_sim::v1::ACTIVE,
+      !WaitForControllerTick(gate, mujoco_sim::v2::ACTIVE,
                              pending_gate_tick, error) ||
-      !WaitForControllerTick(target, mujoco_sim::v1::ACTIVE, target_tick,
+      !WaitForControllerTick(target, mujoco_sim::v2::ACTIVE, target_tick,
                              error)) {
     return false;
   }
@@ -356,38 +350,13 @@ bool JoinTargetOnNextTick(
   return true;
 }
 
-bool UnregisterController(
+bool UnregisterAdapter(
     mujoco_sim::adapter_sdk::SyncAdapterClient* controller,
     const std::string& stage) {
   std::string error;
   if (controller->Unregister(&error)) return true;
   std::cerr << stage << " unregister failed: " << error << '\n';
   return false;
-}
-
-bool UnregisterControllerWithGenericApi(
-    const std::string& server_name,
-    const mujoco_sim::v1::RegisterControllerResponse& registration,
-    std::string* error) {
-  eCAL::ServiceMethodInformationSetT methods;
-  methods.insert(MethodInfo(mujoco_sim::protocol::kUnregisterAdapterMethod));
-  eCAL::CServiceClient registry(
-      mujoco_sim::protocol::RegistryServiceName(server_name), methods);
-  mujoco_sim::v1::UnregisterAdapterRequest request;
-  request.set_adapter_id(registration.controller_id());
-  request.set_role(mujoco_sim::v1::CONTROLLER);
-  request.set_session_id(registration.session_id());
-  request.set_epoch(registration.epoch());
-  mujoco_sim::v1::UnregisterAdapterResponse response;
-  if (!CallService(&registry, mujoco_sim::protocol::kUnregisterAdapterMethod,
-                   request, &response, error)) {
-    return false;
-  }
-  if (response.code() != mujoco_sim::v1::OK) {
-    *error = response.message();
-    return false;
-  }
-  return true;
 }
 
 }  // namespace
@@ -454,10 +423,10 @@ int main(int argc, char** argv) {
   mujoco_sim::adapter_sdk::SyncAdapterClient gate_controller(
       ControllerOptions(server_name, "sensor_gate_controller", 10000,
                         "gate_pos", "gate_motor"));
-  mujoco_sim::v1::Tick gate_tick;
+  mujoco_sim::v2::Tick gate_tick;
   if (valid &&
       (!StartController(&gate_controller, &error) ||
-       !WaitForControllerTick(&gate_controller, mujoco_sim::v1::ACTIVE,
+       !WaitForControllerTick(&gate_controller, mujoco_sim::v2::ACTIVE,
                               &gate_tick, &error))) {
     std::cerr << "gate controller startup failed: " << error << '\n';
     valid = false;
@@ -465,7 +434,7 @@ int main(int argc, char** argv) {
 
   mujoco_sim::adapter_sdk::SyncAdapterClient commit_controller(
       ControllerOptions(server_name, "sensor_commit_controller", 10000));
-  mujoco_sim::v1::Tick commit_tick;
+  mujoco_sim::v2::Tick commit_tick;
   if (valid &&
       (!StartController(&commit_controller, &error) ||
        !JoinTargetOnNextTick(&gate_controller, &commit_controller, &observer,
@@ -485,12 +454,12 @@ int main(int argc, char** argv) {
     std::cerr << "commit completion failed: " << error << '\n';
     valid = false;
   }
-  if (valid && !UnregisterController(&commit_controller,
+  if (valid && !UnregisterAdapter(&commit_controller,
                                      "commit controller")) {
     valid = false;
   }
   if (valid && !WaitForControllerTick(&gate_controller,
-                                      mujoco_sim::v1::ACTIVE, &gate_tick,
+                                      mujoco_sim::v2::ACTIVE, &gate_tick,
                                       &error)) {
     std::cerr << "gate Tick after commit failed: " << error << '\n';
     valid = false;
@@ -498,12 +467,12 @@ int main(int argc, char** argv) {
 
   mujoco_sim::adapter_sdk::SyncAdapterClient unregister_controller(
       ControllerOptions(server_name, "sensor_unregister_controller", 10000));
-  mujoco_sim::v1::Tick unregister_tick;
+  mujoco_sim::v2::Tick unregister_tick;
   if (valid &&
       (!StartController(&unregister_controller, &error) ||
        !JoinTargetOnNextTick(
            &gate_controller, &unregister_controller, &observer, &streams,
-           &gate_tick, &unregister_tick, &cursor, "legacy unregister",
+           &gate_tick, &unregister_tick, &cursor, "unregister",
            &error))) {
     std::cerr << "unregister controller join failed: " << error << '\n';
     valid = false;
@@ -511,15 +480,15 @@ int main(int argc, char** argv) {
   if (valid &&
       (!CommitCommand(&gate_controller, gate_tick, "gate_motor", 0.0,
                       &error) ||
-       !UnregisterController(&unregister_controller, "active controller") ||
+       !UnregisterAdapter(&unregister_controller, "active controller") ||
        !WaitForPipelineAtTick(&observer, &streams,
                               unregister_tick.header().tick_id() + 1,
-                              "legacy unregister completion", &cursor))) {
-    std::cerr << "legacy unregister completion failed: " << error << '\n';
+                              "unregister completion", &cursor))) {
+    std::cerr << "unregister completion failed: " << error << '\n';
     valid = false;
   }
   if (valid && !WaitForControllerTick(&gate_controller,
-                                      mujoco_sim::v1::ACTIVE, &gate_tick,
+                                      mujoco_sim::v2::ACTIVE, &gate_tick,
                                       &error)) {
     std::cerr << "gate Tick after unregister failed: " << error << '\n';
     valid = false;
@@ -527,7 +496,7 @@ int main(int argc, char** argv) {
 
   mujoco_sim::adapter_sdk::SyncAdapterClient timeout_controller(
       ControllerOptions(server_name, "sensor_timeout_controller", 250));
-  mujoco_sim::v1::Tick timeout_tick;
+  mujoco_sim::v2::Tick timeout_tick;
   if (valid &&
       (!StartController(&timeout_controller, &error) ||
        !JoinTargetOnNextTick(&gate_controller, &timeout_controller, &observer,
@@ -546,47 +515,16 @@ int main(int argc, char** argv) {
     valid = false;
   }
   if (valid &&
-      (!UnregisterController(&timeout_controller, "timeout controller") ||
-       !WaitForControllerTick(&gate_controller, mujoco_sim::v1::ACTIVE,
+      (!UnregisterAdapter(&timeout_controller, "timeout controller") ||
+       !WaitForControllerTick(&gate_controller, mujoco_sim::v2::ACTIVE,
                               &gate_tick, &error))) {
     std::cerr << "timeout cleanup failed: " << error << '\n';
     valid = false;
   }
 
-  mujoco_sim::adapter_sdk::SyncAdapterClient generic_controller(
-      ControllerOptions(server_name, "sensor_generic_controller", 10000));
-  mujoco_sim::v1::Tick generic_tick;
-  if (valid &&
-      (!StartController(&generic_controller, &error) ||
-       !JoinTargetOnNextTick(&gate_controller, &generic_controller, &observer,
-                             &streams, &gate_tick, &generic_tick, &cursor,
-                             "generic unregister", &error))) {
-    std::cerr << "generic controller join failed: " << error << '\n';
-    valid = false;
-  }
-  if (valid &&
-      (!CommitCommand(&gate_controller, gate_tick, "gate_motor", 0.0,
-                      &error) ||
-       !UnregisterControllerWithGenericApi(
-           server_name, generic_controller.registration(), &error) ||
-       !WaitForPipelineAtTick(&observer, &streams,
-                              generic_tick.header().tick_id() + 1,
-                              "generic unregister completion", &cursor))) {
-    std::cerr << "generic unregister completion failed: " << error << '\n';
-    valid = false;
-  }
-  generic_controller.Stop();
-  if (valid && !WaitForControllerTick(&gate_controller,
-                                      mujoco_sim::v1::ACTIVE, &gate_tick,
-                                      &error)) {
-    std::cerr << "gate Tick after generic unregister failed: " << error
-              << '\n';
-    valid = false;
-  }
-
   mujoco_sim::adapter_sdk::SyncAdapterClient faulty_controller(
       ControllerOptions(server_name, "sensor_faulty_controller", 10000));
-  mujoco_sim::v1::Tick fault_tick;
+  mujoco_sim::v2::Tick fault_tick;
   if (valid &&
       (!StartController(&faulty_controller, &error) ||
        !JoinTargetOnNextTick(&gate_controller, &faulty_controller, &observer,
@@ -601,10 +539,10 @@ int main(int argc, char** argv) {
     valid = false;
   }
   if (valid) {
-    mujoco_sim::v1::AdapterCommit invalid;
+    mujoco_sim::v2::AdapterCommit invalid;
     *invalid.mutable_header() = fault_tick.header();
-    invalid.set_controller_id(fault_tick.controller_id());
-    invalid.set_status(mujoco_sim::v1::COMMIT_OK);
+    invalid.set_adapter_id(fault_tick.adapter_id());
+    invalid.set_status(mujoco_sim::v2::COMMIT_OK);
     auto* command = invalid.add_commands();
     command->set_name("hinge_motor");
     command->add_values(std::numeric_limits<double>::quiet_NaN());
@@ -637,11 +575,11 @@ int main(int argc, char** argv) {
       valid = false;
     }
   }
-  if (valid && !UnregisterController(&faulty_controller,
+  if (valid && !UnregisterAdapter(&faulty_controller,
                                      "faulty controller")) {
     valid = false;
   }
-  if (!UnregisterController(&gate_controller, "gate controller")) {
+  if (!UnregisterAdapter(&gate_controller, "gate controller")) {
     valid = false;
   }
 

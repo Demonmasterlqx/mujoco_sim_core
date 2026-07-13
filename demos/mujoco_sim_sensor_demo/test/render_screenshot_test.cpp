@@ -35,7 +35,7 @@ TEST(RenderScreenshotTest, EglHeadlessRenderProducesVerifiablePng) {
   profile.height = 120;
   profile.rate_hz = 10.0;
   profile.frame_id = "front_camera_optical";
-  profile.outputs = {{mujoco_sim::v1::RGB8, "test_rgb"}};
+  profile.outputs = {{mujoco_sim::v2::RGB8, "test_rgb"}};
   sensor::OffscreenRendererOptions options;
   options.backend = sensor::BackendPreference::kEglOnly;
   auto renderer = sensor::OffscreenRenderer::Create(*snapshot, profile,

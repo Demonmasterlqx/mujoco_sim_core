@@ -59,13 +59,13 @@ class SignalHandlerGuard {
   Handler previous_terminate_ = SIG_DFL;
 };
 
-std::string ServerStateName(mujoco_sim::v1::ServerState state) {
-  const std::string name = mujoco_sim::v1::ServerState_Name(state);
+std::string ServerStateName(mujoco_sim::v2::ServerState state) {
+  const std::string name = mujoco_sim::v2::ServerState_Name(state);
   return name.empty() ? "UNKNOWN(" + std::to_string(state) + ")" : name;
 }
 
-std::string ControllerStateName(mujoco_sim::v1::ControllerState state) {
-  const std::string name = mujoco_sim::v1::ControllerState_Name(state);
+std::string ControllerStateName(mujoco_sim::v2::ControllerState state) {
+  const std::string name = mujoco_sim::v2::ControllerState_Name(state);
   return name.empty() ? "UNKNOWN(" + std::to_string(state) + ")" : name;
 }
 
@@ -90,14 +90,9 @@ std::string FormatTimestamp(std::uint64_t unix_nanos) {
   return output.str();
 }
 
-mujoco_sim::v1::ServerStatus NormalizeStatus(
-    const mujoco_sim::v1::ServerStatus& input) {
+mujoco_sim::v2::ServerStatus NormalizeStatus(
+    const mujoco_sim::v2::ServerStatus& input) {
   auto output = input;
-  std::sort(output.mutable_controllers()->begin(),
-            output.mutable_controllers()->end(),
-            [](const auto& lhs, const auto& rhs) {
-              return lhs.controller_id() < rhs.controller_id();
-            });
   std::sort(output.mutable_adapters()->begin(),
             output.mutable_adapters()->end(),
             [](const auto& lhs, const auto& rhs) {
@@ -111,8 +106,8 @@ mujoco_sim::v1::ServerStatus NormalizeStatus(
   return output;
 }
 
-mujoco_sim::v1::GetAvailableResourcesResponse NormalizeResources(
-    const mujoco_sim::v1::GetAvailableResourcesResponse& input) {
+mujoco_sim::v2::GetAvailableResourcesResponse NormalizeResources(
+    const mujoco_sim::v2::GetAvailableResourcesResponse& input) {
   auto output = input;
   const auto by_name = [](const auto& lhs, const auto& rhs) {
     return lhs.name() < rhs.name();
@@ -153,7 +148,7 @@ bool SameProcess(const PublisherIdentity& publisher,
 }
 
 struct ResourceQueryResult {
-  std::optional<mujoco_sim::v1::GetAvailableResourcesResponse> response;
+  std::optional<mujoco_sim::v2::GetAvailableResourcesResponse> response;
   std::string error;
 };
 
@@ -164,7 +159,7 @@ ResourceQueryResult QueryResources(eCAL::CServiceClient* client,
   if (client == nullptr || !client->IsConnected()) {
     return {std::nullopt, "registry service is unavailable"};
   }
-  mujoco_sim::v1::GetAvailableResourcesRequest request;
+  mujoco_sim::v2::GetAvailableResourcesRequest request;
   request.set_server_name(server_name);
   request.set_protocol_major(mujoco_sim::protocol::kProtocolMajor);
   request.set_protocol_minor(mujoco_sim::protocol::kProtocolMinor);
@@ -176,7 +171,7 @@ ResourceQueryResult QueryResources(eCAL::CServiceClient* client,
   eCAL::ServiceResponseVecT responses;
   client->CallWithResponse(mujoco_sim::protocol::kGetAvailableResourcesMethod,
                            bytes, responses, kResourceCallTimeoutMs);
-  std::vector<mujoco_sim::v1::GetAvailableResourcesResponse> valid;
+  std::vector<mujoco_sim::v2::GetAvailableResourcesResponse> valid;
   std::string matching_error;
   for (const auto& response : responses) {
     if (!SameProcess(publisher, response.server_id)) continue;
@@ -191,14 +186,14 @@ ResourceQueryResult QueryResources(eCAL::CServiceClient* client,
                        std::to_string(response.ret_state);
       continue;
     }
-    mujoco_sim::v1::GetAvailableResourcesResponse parsed;
+    mujoco_sim::v2::GetAvailableResourcesResponse parsed;
     if (!parsed.ParseFromString(response.response)) {
       matching_error = "failed to parse resource response";
       continue;
     }
-    if (parsed.code() != mujoco_sim::v1::OK) {
+    if (parsed.code() != mujoco_sim::v2::OK) {
       matching_error = parsed.message().empty()
-                           ? mujoco_sim::v1::ErrorCode_Name(parsed.code())
+                           ? mujoco_sim::v2::ErrorCode_Name(parsed.code())
                            : parsed.message();
       continue;
     }
@@ -243,7 +238,7 @@ class StatusMonitor {
                        const eCAL::SReceiveCallbackData& data) {
             const auto state = weak_state.lock();
             if (!state) return;
-            mujoco_sim::v1::ServerStatus status;
+            mujoco_sim::v2::ServerStatus status;
             if (!ParseStatusPayload(data.buffer, data.buffer_size,
                                     state->options.server_name, &status)) {
               return;
@@ -417,7 +412,7 @@ class StatusMonitor {
     StatusTracker tracker;
     std::mutex mutex;
     std::condition_variable condition;
-    std::optional<mujoco_sim::v1::GetAvailableResourcesResponse> resources;
+    std::optional<mujoco_sim::v2::GetAvailableResourcesResponse> resources;
     std::string resource_error = "resource query pending";
     std::uint64_t resource_generation = 0;
     std::uint32_t resource_attempts = 0;
@@ -549,12 +544,14 @@ StatusTracker::StatusTracker(std::string server_name,
 
 StatusUpdate StatusTracker::Accept(
     const PublisherIdentity& publisher, std::int64_t send_clock,
-    const mujoco_sim::v1::ServerStatus& status,
+    const mujoco_sim::v2::ServerStatus& status,
     std::chrono::steady_clock::time_point received_at) {
   StatusUpdate update;
   if (status.header().server_name() != server_name_ ||
       status.header().protocol_major() !=
-          mujoco_sim::protocol::kProtocolMajor) {
+          mujoco_sim::protocol::kProtocolMajor ||
+      status.header().protocol_minor() !=
+          mujoco_sim::protocol::kProtocolMinor) {
     return update;
   }
   if (latest_ && latest_->publisher != publisher) {
@@ -582,17 +579,19 @@ bool StatusTracker::stale(std::chrono::steady_clock::time_point now) const {
 
 bool ParseStatusPayload(const void* data, std::size_t size,
                         const std::string& server_name,
-                        mujoco_sim::v1::ServerStatus* status) {
+                        mujoco_sim::v2::ServerStatus* status) {
   if (data == nullptr || status == nullptr || size == 0 ||
       size > kMaximumStatusPayloadSize ||
       size > static_cast<std::size_t>(std::numeric_limits<int>::max())) {
     return false;
   }
-  mujoco_sim::v1::ServerStatus parsed;
+  mujoco_sim::v2::ServerStatus parsed;
   if (!parsed.ParseFromArray(data, static_cast<int>(size)) ||
       parsed.header().server_name() != server_name ||
       parsed.header().protocol_major() !=
-          mujoco_sim::protocol::kProtocolMajor) {
+          mujoco_sim::protocol::kProtocolMajor ||
+      parsed.header().protocol_minor() !=
+          mujoco_sim::protocol::kProtocolMinor) {
     return false;
   }
   *status = std::move(parsed);
@@ -630,96 +629,30 @@ std::string FormatHuman(const StatusReport& report) {
     }
     output << '\n';
   }
-  const auto controller_for = [&status](const auto& adapter) {
-    const auto found = std::find_if(
-        status.controllers().begin(), status.controllers().end(),
-        [&adapter](const auto& controller) {
-          return adapter.role() == mujoco_sim::v1::CONTROLLER &&
-                 adapter.adapter_id() == controller.controller_id() &&
-                 adapter.session_id() == controller.session_id();
-        });
-    return found == status.controllers().end() ? nullptr : &*found;
-  };
-  const auto has_adapter_for = [&status](const auto& controller) {
-    return std::any_of(
-        status.adapters().begin(), status.adapters().end(),
-        [&controller](const auto& adapter) {
-          return adapter.role() == mujoco_sim::v1::CONTROLLER &&
-                 adapter.adapter_id() == controller.controller_id() &&
-                 adapter.session_id() == controller.session_id();
-        });
-  };
-  struct AdapterRow {
-    const mujoco_sim::v1::AdapterStatus* adapter = nullptr;
-    const mujoco_sim::v1::ControllerStatus* controller = nullptr;
-  };
-  std::vector<AdapterRow> adapter_rows;
-  adapter_rows.reserve(status.adapters_size() + status.controllers_size());
-  for (const auto& adapter : status.adapters()) {
-    adapter_rows.push_back({&adapter, controller_for(adapter)});
-  }
-  for (const auto& controller : status.controllers()) {
-    if (!has_adapter_for(controller)) {
-      adapter_rows.push_back({nullptr, &controller});
-    }
-  }
-  std::sort(adapter_rows.begin(), adapter_rows.end(),
-            [](const AdapterRow& lhs, const AdapterRow& rhs) {
-              const auto lhs_role = lhs.adapter == nullptr
-                                        ? mujoco_sim::v1::CONTROLLER
-                                        : lhs.adapter->role();
-              const auto rhs_role = rhs.adapter == nullptr
-                                        ? mujoco_sim::v1::CONTROLLER
-                                        : rhs.adapter->role();
-              if (lhs_role != rhs_role) return lhs_role < rhs_role;
-              const auto& lhs_id = lhs.adapter == nullptr
-                                       ? lhs.controller->controller_id()
-                                       : lhs.adapter->adapter_id();
-              const auto& rhs_id = rhs.adapter == nullptr
-                                       ? rhs.controller->controller_id()
-                                       : rhs.adapter->adapter_id();
-              return lhs_id < rhs_id;
-            });
-  output << "Adapters (" << adapter_rows.size() << "):\n"
+  output << "Adapters (" << status.adapters_size() << "):\n"
          << "ID\tRole\tState\tSession\tLast delivery\tLast commit"
             "\tSequence\tState since\tTimeouts\tBarrier\tMessage\n";
-  for (const auto& row : adapter_rows) {
-    if (row.adapter == nullptr) {
-      const auto& controller = *row.controller;
-      output << controller.controller_id() << "\tCONTROLLER\t"
-             << ControllerStateName(controller.state()) << '\t'
-             << controller.session_id() << "\t-\t"
-             << (controller.has_last_commit_tick_id()
-                     ? std::to_string(controller.last_commit_tick_id())
-                     : "-")
-             << "\t-\t" << controller.state_since_tick_id() << '\t'
-             << controller.timeout_count() << '\t'
-             << (controller.required_for_barrier() ? "yes" : "no") << '\t'
-             << DisplayMessage(controller.message()) << '\n';
-      continue;
-    }
-    const auto& adapter = *row.adapter;
+  for (const auto& adapter : status.adapters()) {
     output << adapter.adapter_id() << '\t'
-           << mujoco_sim::v1::AdapterRole_Name(adapter.role()) << '\t'
+           << mujoco_sim::v2::AdapterRole_Name(adapter.role()) << '\t'
            << ControllerStateName(adapter.state()) << '\t'
            << adapter.session_id() << '\t'
            << (adapter.has_last_delivery_tick_id()
                    ? std::to_string(adapter.last_delivery_tick_id())
                    : "-")
            << '\t'
-           << (row.controller != nullptr &&
-                       row.controller->has_last_commit_tick_id()
-                   ? std::to_string(row.controller->last_commit_tick_id())
+           << (adapter.has_last_commit_tick_id()
+                   ? std::to_string(adapter.last_commit_tick_id())
                    : "-")
            << '\t'
-           << (adapter.role() == mujoco_sim::v1::OBSERVER
+           << (adapter.role() == mujoco_sim::v2::OBSERVER
                    ? std::to_string(adapter.last_observation_sequence())
                    : "-")
            << '\t' << adapter.state_since_tick_id() << '\t'
            << adapter.timeout_count() << '\t'
-           << (row.controller == nullptr
-                   ? "-"
-                   : (row.controller->required_for_barrier() ? "yes" : "no"))
+           << (adapter.role() == mujoco_sim::v2::CONTROLLER
+                   ? (adapter.required_for_barrier() ? "yes" : "no")
+                   : "-")
            << '\t' << DisplayMessage(adapter.message()) << '\n';
   }
   output << "Sensor streams (" << status.streams_size() << "):\n"
@@ -727,7 +660,7 @@ std::string FormatHuman(const StatusReport& report) {
             "\tErrors\tBlocked ms\tMessage\n";
   for (const auto& stream : status.streams()) {
     output << stream.name() << '\t'
-           << mujoco_sim::v1::StreamState_Name(stream.state()) << '\t'
+           << mujoco_sim::v2::StreamState_Name(stream.state()) << '\t'
            << stream.subscriber_count() << '\t' << stream.captures() << '\t'
            << stream.published() << '\t' << stream.dropped() << '\t'
            << stream.publish_errors() << '\t' << stream.blocked_time_ms()

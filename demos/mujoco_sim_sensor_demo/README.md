@@ -1,5 +1,8 @@
 # mujoco_sim_sensor_demo
 
+All processes use strict Protocol V2.0 endpoints and the unified Adapter
+lifecycle. Server, SDK, and demo binaries are rebuilt and deployed together.
+
 `mujoco_sim_sensor_demo` is a pure eCAL and PCL demonstration of synchronous
 vehicle control, non-barrier observation, asynchronous camera/LiDAR transport,
 and LiDAR/IMU mapping. It does not require a ROS 2 runtime.

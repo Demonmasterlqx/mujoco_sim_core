@@ -1,5 +1,8 @@
 # mujoco_sim_sensor
 
+The package is used by the strict Protocol V2.0 Server build and contains only
+the V2 stream contract.
+
 `mujoco_sim_sensor` is the transport-free sensor capture package for immutable
 `mujoco_sim::core::SimulationSnapshot` inputs. It provides configured camera
 and 360-degree ray-lidar sources, protocol stream descriptors, and raw frame

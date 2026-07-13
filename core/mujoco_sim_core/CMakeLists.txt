@@ -6,21 +6,29 @@ include(CMakePackageConfigHelpers)
 
 find_package(mujoco_sim_protocol CONFIG REQUIRED)
 
-set(MUJOCO_ROOT
-  "${CMAKE_CURRENT_SOURCE_DIR}/mujoco/linux/x86/mujoco-3.10.0"
-  CACHE PATH "Path to the vendored MuJoCo distribution"
-)
-set(MUJOCO_LIBRARY "${MUJOCO_ROOT}/lib/libmujoco.so.3.10.0")
-if(NOT EXISTS "${MUJOCO_LIBRARY}")
-  message(FATAL_ERROR "MuJoCo library not found: ${MUJOCO_LIBRARY}")
-endif()
+option(MUJOCO_SIM_USE_BUNDLED_MUJOCO
+  "Use the MuJoCo distribution bundled in this repository" ON)
+option(MUJOCO_SIM_BUILD_PERFORMANCE_BENCHMARK
+  "Build the phase-one deterministic performance benchmark" OFF)
 
-add_library(mujoco_vendor SHARED IMPORTED GLOBAL)
-add_library(mujoco::mujoco ALIAS mujoco_vendor)
-set_target_properties(mujoco_vendor PROPERTIES
-  IMPORTED_LOCATION "${MUJOCO_LIBRARY}"
-  INTERFACE_INCLUDE_DIRECTORIES "${MUJOCO_ROOT}/include"
-)
+if(MUJOCO_SIM_USE_BUNDLED_MUJOCO)
+  set(MUJOCO_ROOT
+    "${CMAKE_CURRENT_SOURCE_DIR}/mujoco/linux/x86/mujoco-3.10.0"
+    CACHE PATH "Path to the bundled MuJoCo distribution"
+  )
+  set(MUJOCO_LIBRARY "${MUJOCO_ROOT}/lib/libmujoco.so.3.10.0")
+  if(NOT EXISTS "${MUJOCO_LIBRARY}")
+    message(FATAL_ERROR "MuJoCo library not found: ${MUJOCO_LIBRARY}")
+  endif()
+  add_library(mujoco_vendor SHARED IMPORTED GLOBAL)
+  add_library(mujoco::mujoco ALIAS mujoco_vendor)
+  set_target_properties(mujoco_vendor PROPERTIES
+    IMPORTED_LOCATION "${MUJOCO_LIBRARY}"
+    INTERFACE_INCLUDE_DIRECTORIES "${MUJOCO_ROOT}/include"
+  )
+else()
+  find_package(mujoco CONFIG REQUIRED)
+endif()
 
 add_library(${PROJECT_NAME}
   src/simulation_core.cpp
@@ -39,9 +47,11 @@ target_link_libraries(${PROJECT_NAME}
 )
 set_target_properties(${PROJECT_NAME} PROPERTIES
   EXPORT_NAME core
-  BUILD_RPATH "${MUJOCO_ROOT}/lib"
   INSTALL_RPATH "$ORIGIN"
 )
+if(MUJOCO_SIM_USE_BUNDLED_MUJOCO)
+  set_property(TARGET ${PROJECT_NAME} PROPERTY BUILD_RPATH "${MUJOCO_ROOT}/lib")
+endif()
 
 install(TARGETS ${PROJECT_NAME}
   EXPORT ${PROJECT_NAME}Targets
@@ -50,10 +60,12 @@ install(TARGETS ${PROJECT_NAME}
   RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR}
 )
 install(DIRECTORY include/ DESTINATION ${CMAKE_INSTALL_INCLUDEDIR})
-install(DIRECTORY "${MUJOCO_ROOT}/include/mujoco"
-  DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}
-)
-install(FILES "${MUJOCO_LIBRARY}" DESTINATION ${CMAKE_INSTALL_LIBDIR})
+if(MUJOCO_SIM_USE_BUNDLED_MUJOCO)
+  install(DIRECTORY "${MUJOCO_ROOT}/include/mujoco"
+    DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}
+  )
+  install(FILES "${MUJOCO_LIBRARY}" DESTINATION ${CMAKE_INSTALL_LIBDIR})
+endif()
 
 write_basic_package_version_file(
   "${CMAKE_CURRENT_BINARY_DIR}/${PROJECT_NAME}ConfigVersion.cmake"
@@ -89,6 +101,18 @@ if(BUILD_TESTING)
     MUJOCO_SIM_CORE_TEST_MODEL="${CMAKE_CURRENT_SOURCE_DIR}/test/testdata/simple_actuator.xml"
     MUJOCO_SIM_CORE_DUAL_TEST_MODEL="${CMAKE_CURRENT_SOURCE_DIR}/test/testdata/dual_actuator.xml"
   )
-  set_target_properties(core_test PROPERTIES BUILD_RPATH "${MUJOCO_ROOT}/lib")
+  if(MUJOCO_SIM_USE_BUNDLED_MUJOCO)
+    set_target_properties(core_test PROPERTIES BUILD_RPATH "${MUJOCO_ROOT}/lib")
+  endif()
   add_test(NAME core_test COMMAND core_test)
+endif()
+
+if(MUJOCO_SIM_BUILD_PERFORMANCE_BENCHMARK)
+  add_executable(core_performance_benchmark test/performance_benchmark.cpp)
+  target_link_libraries(core_performance_benchmark PRIVATE
+    ${PROJECT_NAME} mujoco::mujoco)
+  if(MUJOCO_SIM_USE_BUNDLED_MUJOCO)
+    set_target_properties(core_performance_benchmark PROPERTIES
+      BUILD_RPATH "${MUJOCO_ROOT}/lib")
+  endif()
 endif()

@@ -45,7 +45,7 @@ void ExpectOptionsEqual(
     const mujoco_sim::sample_adapter::SampleOptions& actual,
     const mujoco_sim::sample_adapter::SampleOptions& expected) {
   EXPECT_EQ(actual.adapter.server_name, expected.adapter.server_name);
-  EXPECT_EQ(actual.adapter.controller_id, expected.adapter.controller_id);
+  EXPECT_EQ(actual.adapter.adapter_id, expected.adapter.adapter_id);
   EXPECT_EQ(actual.adapter.observation_names,
             expected.adapter.observation_names);
   EXPECT_EQ(actual.adapter.command_names, expected.adapter.command_names);
@@ -65,14 +65,14 @@ TEST(SampleAdapterTest, ParsesNameList) {
   EXPECT_EQ(names[2], "imu");
 }
 
-TEST(SampleAdapterTest, BuildsConstantCommandsFromTickLayout) {
-  mujoco_sim::v1::Tick tick;
-  auto* command = tick.mutable_layout()->add_commands();
+TEST(SampleAdapterTest, BuildsConstantCommandsFromRegistrationLayout) {
+  mujoco_sim::v2::ResourceLayout layout;
+  auto* command = layout.add_commands();
   command->set_name("hinge_motor");
-  command->set_type(mujoco_sim::v1::COMMAND_ACTUATOR);
+  command->set_type(mujoco_sim::v2::COMMAND_ACTUATOR);
 
   const auto commands =
-      mujoco_sim::sample_adapter::ConstantCommandsForTick(tick, 0.25);
+      mujoco_sim::sample_adapter::ConstantCommandsForLayout(layout, 0.25);
   ASSERT_EQ(commands.size(), 1);
   EXPECT_EQ(commands[0].name, "hinge_motor");
   EXPECT_DOUBLE_EQ(commands[0].value, 0.25);
@@ -82,7 +82,7 @@ TEST(SampleAdapterTest, ParsesCommandLineDefaultsAndOverrides) {
   const char* argv[] = {"mujoco-sim-sample-adapter",
                         "--server-name",
                         "sim",
-                        "--controller-id",
+                        "--adapter-id",
                         "arm",
                         "--ticks",
                         "4",
@@ -95,7 +95,7 @@ TEST(SampleAdapterTest, ParsesCommandLineDefaultsAndOverrides) {
       &error))
       << error;
   EXPECT_EQ(options.adapter.server_name, "sim");
-  EXPECT_EQ(options.adapter.controller_id, "arm");
+  EXPECT_EQ(options.adapter.adapter_id, "arm");
   EXPECT_EQ(options.max_ticks, 4);
   EXPECT_DOUBLE_EQ(options.command_value, 0.1);
   ASSERT_EQ(options.adapter.command_names.size(), 1);
@@ -125,7 +125,7 @@ TEST(SampleAdapterTest, RejectsInvalidNumericValuesAndDuplicateOptions) {
 TEST(SampleAdapterTest, ParsingFailureIsTransactional) {
   mujoco_sim::sample_adapter::SampleOptions options;
   options.adapter.server_name = "unchanged";
-  options.adapter.controller_id = "original";
+  options.adapter.adapter_id = "original";
   options.adapter.observation_names = {"one"};
   options.adapter.command_names = {"motor"};
   options.adapter.timeout_ms = 123;
@@ -156,7 +156,7 @@ TEST(SampleAdapterTest, LoadsYamlAndAppliesCommandLineOverrides) {
   ScopedConfigFile file(
       "mujoco_sim_sample_adapter.yaml",
       "server_name: yaml_server\n"
-      "controller_id: yaml_controller\n"
+      "adapter_id: yaml_controller\n"
       "observation_names: [one, two]\n"
       "command_names: [motor_a, motor_b]\n"
       "max_ticks: 10\n"
@@ -172,7 +172,7 @@ TEST(SampleAdapterTest, LoadsYamlAndAppliesCommandLineOverrides) {
                         &options, &error))
       << error;
   EXPECT_EQ(options.adapter.server_name, "cli_server");
-  EXPECT_EQ(options.adapter.controller_id, "yaml_controller");
+  EXPECT_EQ(options.adapter.adapter_id, "yaml_controller");
   EXPECT_EQ(options.adapter.observation_names,
             (std::vector<std::string>{"one", "two"}));
   EXPECT_EQ(options.adapter.command_names,
@@ -198,7 +198,7 @@ TEST(SampleAdapterTest, RejectsInvalidYamlTransactionally) {
                           invalid[i].first);
     mujoco_sim::sample_adapter::SampleOptions options;
     options.adapter.server_name = "unchanged";
-    options.adapter.controller_id = "original";
+    options.adapter.adapter_id = "original";
     options.adapter.command_names = {"motor"};
     const auto expected = options;
     std::string error;

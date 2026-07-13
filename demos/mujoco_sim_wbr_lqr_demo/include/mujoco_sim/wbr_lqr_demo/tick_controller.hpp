@@ -5,7 +5,7 @@
 
 #include <control/msgs.hpp>
 #include <mujoco_sim/adapter_sdk/sync_adapter_client.hpp>
-#include <mujoco_sim/v1/sync.pb.h>
+#include <mujoco_sim/v2/sync.pb.h>
 #include <mujoco_sim/wbr_lqr_demo/config.hpp>
 #include <mujoco_sim/wbr_lqr_demo/controller_pipeline.hpp>
 #include <mujoco_sim/wbr_lqr_demo/input_script.hpp>
@@ -18,18 +18,18 @@ mujoco_sim::adapter_sdk::AdapterOptions MakeAdapterOptions(
 
 class TickController {
  public:
-  TickController(const mujoco_sim::v1::ResourceLayout& registered_layout,
+  TickController(const mujoco_sim::v2::ResourceLayout& registered_layout,
                  PipelineConfig pipeline_config = {},
                  InputScript input_script = {});
-  TickController(const mujoco_sim::v1::ResourceLayout& registered_layout,
+  TickController(const mujoco_sim::v2::ResourceLayout& registered_layout,
                  InterfaceConfig interface_config,
                  PipelineConfig pipeline_config,
                  InputScript input_script);
 
   std::vector<mujoco_sim::adapter_sdk::CommandValue> HandleTick(
-      const mujoco_sim::v1::Tick& tick);
+      const mujoco_sim::v2::Tick& tick);
   std::vector<mujoco_sim::adapter_sdk::CommandValue> HandleTick(
-      const mujoco_sim::v1::Tick& tick,
+      const mujoco_sim::v2::Tick& tick,
       const control::input_snapshot_t& input);
 
   void Reset();

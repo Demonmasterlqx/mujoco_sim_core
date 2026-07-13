@@ -1,6 +1,6 @@
 syntax = "proto3";
 
-package mujoco_sim.v1;
+package mujoco_sim.v2;
 
 enum ErrorCode {
   ERROR_CODE_UNSPECIFIED = 0;
@@ -111,6 +111,7 @@ message ResourceDescriptor {
 message ResourceLayout {
   repeated ResourceDescriptor observations = 1;
   repeated ResourceDescriptor commands = 2;
+  bytes layout_hash = 3;
 }
 
 message GetAvailableResourcesRequest {
@@ -123,32 +124,8 @@ message GetAvailableResourcesResponse {
   ErrorCode code = 1;
   string message = 2;
   uint64 epoch = 3;
-  uint32 effective_protocol_major = 4;
-  uint32 effective_protocol_minor = 5;
-  repeated ResourceDescriptor observations = 6;
-  repeated ResourceDescriptor commands = 7;
-}
-
-message RegisterControllerRequest {
-  string server_name = 1;
-  string controller_id = 2;
-  uint32 protocol_major = 3;
-  uint32 protocol_minor = 4;
-  repeated string observation_names = 5;
-  repeated string command_names = 6;
-  uint32 timeout_ms = 7;
-}
-
-message RegisterControllerResponse {
-  ErrorCode code = 1;
-  string message = 2;
-  string controller_id = 3;
-  uint64 session_id = 4;
-  uint64 epoch = 5;
-  uint32 effective_protocol_major = 6;
-  uint32 effective_protocol_minor = 7;
-  ResourceLayout layout = 8;
-  ControllerState state = 9;
+  repeated ResourceDescriptor observations = 4;
+  repeated ResourceDescriptor commands = 5;
 }
 
 message ObservationDelivery {
@@ -177,10 +154,8 @@ message RegisterAdapterResponse {
   AdapterRole role = 4;
   uint64 session_id = 5;
   uint64 epoch = 6;
-  uint32 effective_protocol_major = 7;
-  uint32 effective_protocol_minor = 8;
-  ResourceLayout layout = 9;
-  ControllerState state = 10;
+  ResourceLayout layout = 7;
+  ControllerState state = 8;
 }
 
 message ActivateAdapterRequest {
@@ -209,30 +184,6 @@ message UnregisterAdapterResponse {
   ControllerState state = 3;
 }
 
-message ActivateControllerRequest {
-  string controller_id = 1;
-  uint64 session_id = 2;
-  uint64 epoch = 3;
-}
-
-message ActivateControllerResponse {
-  ErrorCode code = 1;
-  string message = 2;
-  ControllerState state = 3;
-}
-
-message UnregisterControllerRequest {
-  string controller_id = 1;
-  uint64 session_id = 2;
-  uint64 epoch = 3;
-}
-
-message UnregisterControllerResponse {
-  ErrorCode code = 1;
-  string message = 2;
-  ControllerState state = 3;
-}
-
 message ObservationBlock {
   string name = 1;
   repeated double values = 2;
@@ -245,30 +196,25 @@ message ActuatorCommandBlock {
 
 message Tick {
   Header header = 1;
-  string controller_id = 2;
-  ResourceLayout layout = 3;
+  string adapter_id = 2;
+  bytes layout_hash = 3;
   repeated ObservationBlock observations = 4;
   ControllerState controller_state = 5;
 }
 
 message ObservationFrame {
   Header header = 1;
-  string observer_id = 2;
+  string adapter_id = 2;
   uint64 sequence = 3;
   repeated ObservationBlock observations = 4;
 }
 
 message AdapterCommit {
   Header header = 1;
-  string controller_id = 2;
+  string adapter_id = 2;
   CommitStatus status = 3;
   repeated ActuatorCommandBlock commands = 4;
   string error_message = 5;
-}
-
-message Heartbeat {
-  Header header = 1;
-  string controller_id = 2;
 }
 
 message AdapterHeartbeat {
@@ -276,18 +222,6 @@ message AdapterHeartbeat {
   string adapter_id = 2;
   AdapterRole role = 3;
   uint64 last_observation_sequence = 4;
-}
-
-message ControllerStatus {
-  string controller_id = 1;
-  uint64 session_id = 2;
-  uint64 last_tick_id = 3;
-  ControllerState state = 4;
-  string message = 5;
-  optional uint64 last_commit_tick_id = 6;
-  uint64 state_since_tick_id = 7;
-  uint64 timeout_count = 8;
-  bool required_for_barrier = 9;
 }
 
 message AdapterStatus {
@@ -301,6 +235,9 @@ message AdapterStatus {
   optional uint64 last_delivery_tick_id = 8;
   uint64 last_observation_sequence = 9;
   uint64 dropped_observation_frames = 10;
+  optional uint64 last_heartbeat_tick_id = 11;
+  optional uint64 last_commit_tick_id = 12;
+  bool required_for_barrier = 13;
 }
 
 message CameraIntrinsics {
@@ -343,9 +280,7 @@ message GetSensorStreamsResponse {
   ErrorCode code = 1;
   string message = 2;
   uint64 epoch = 3;
-  uint32 effective_protocol_major = 4;
-  uint32 effective_protocol_minor = 5;
-  repeated StreamDescriptor streams = 6;
+  repeated StreamDescriptor streams = 4;
 }
 
 message StreamFrameHeader {
@@ -380,7 +315,6 @@ message ServerStatus {
   Header header = 1;
   ServerState state = 2;
   string message = 3;
-  repeated ControllerStatus controllers = 4;
-  repeated AdapterStatus adapters = 5;
-  repeated StreamStatus streams = 6;
+  repeated AdapterStatus adapters = 4;
+  repeated StreamStatus streams = 5;
 }

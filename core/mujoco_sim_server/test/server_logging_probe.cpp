@@ -7,7 +7,7 @@
 #include <ecal/pubsub/publisher.h>
 #include <ecal/service/client.h>
 #include <mujoco_sim/protocol/topics.hpp>
-#include <mujoco_sim/v1/sync.pb.h>
+#include <mujoco_sim/v2/sync.pb.h>
 
 namespace {
 
@@ -48,13 +48,13 @@ int main(int argc, char** argv) {
   {
     eCAL::ServiceMethodInformationSetT methods;
     methods.insert(
-        MethodInfo(mujoco_sim::protocol::kRegisterControllerMethod));
+        MethodInfo(mujoco_sim::protocol::kRegisterAdapterMethod));
     eCAL::CServiceClient client(
         mujoco_sim::protocol::RegistryServiceName(server_name), methods);
     eCAL::CPublisher commit(
         mujoco_sim::protocol::CommitTopicName(server_name));
     eCAL::CPublisher heartbeat(
-        mujoco_sim::protocol::HeartbeatTopicName(server_name));
+        mujoco_sim::protocol::AdapterHeartbeatTopicName(server_name));
 
     const auto deadline = std::chrono::steady_clock::now() +
                           std::chrono::seconds(5);
@@ -67,8 +67,9 @@ int main(int argc, char** argv) {
       result = 1;
     } else {
       const std::string malformed(1, static_cast<char>(0xff));
-      mujoco_sim::v1::RegisterControllerRequest rejected;
+      mujoco_sim::v2::RegisterAdapterRequest rejected;
       rejected.set_server_name(server_name);
+      rejected.set_role(mujoco_sim::v2::CONTROLLER);
       rejected.set_protocol_major(mujoco_sim::protocol::kProtocolMajor);
       rejected.set_protocol_minor(mujoco_sim::protocol::kProtocolMinor);
       rejected.add_command_names("hinge_motor");
@@ -76,10 +77,10 @@ int main(int argc, char** argv) {
 
       for (int index = 0; index < 3; ++index) {
         if (!Call(&client,
-                  mujoco_sim::protocol::kRegisterControllerMethod,
+                  mujoco_sim::protocol::kRegisterAdapterMethod,
                   malformed) ||
             !Call(&client,
-                  mujoco_sim::protocol::kRegisterControllerMethod,
+                  mujoco_sim::protocol::kRegisterAdapterMethod,
                   rejected_bytes)) {
           result = 1;
         }
@@ -87,9 +88,9 @@ int main(int argc, char** argv) {
         heartbeat.Send(malformed);
       }
       std::this_thread::sleep_for(std::chrono::milliseconds(1100));
-      Call(&client, mujoco_sim::protocol::kRegisterControllerMethod,
+      Call(&client, mujoco_sim::protocol::kRegisterAdapterMethod,
            malformed);
-      Call(&client, mujoco_sim::protocol::kRegisterControllerMethod,
+      Call(&client, mujoco_sim::protocol::kRegisterAdapterMethod,
            rejected_bytes);
       commit.Send(malformed);
       heartbeat.Send(malformed);
@@ -97,7 +98,7 @@ int main(int argc, char** argv) {
       const auto traffic_deadline = std::chrono::steady_clock::now() +
                                     std::chrono::seconds(2);
       while (std::chrono::steady_clock::now() < traffic_deadline) {
-        Call(&client, mujoco_sim::protocol::kRegisterControllerMethod,
+        Call(&client, mujoco_sim::protocol::kRegisterAdapterMethod,
              malformed);
         commit.Send(malformed);
         heartbeat.Send(malformed);

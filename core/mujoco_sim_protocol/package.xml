@@ -2,7 +2,7 @@
 <package format="3">
   <name>mujoco_sim_protocol</name>
   <version>0.1.0</version>
-  <description>Protobuf protocol definitions for the MuJoCo simulator V1 lockstep API.</description>
+  <description>Protobuf protocol definitions for the MuJoCo simulator V2 lockstep API.</description>
   <maintainer email="pnx@example.com">pnx</maintainer>
   <license>Apache-2.0</license>
 

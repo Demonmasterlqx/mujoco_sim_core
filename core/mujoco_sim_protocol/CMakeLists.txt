@@ -7,12 +7,14 @@ include(CMakePackageConfigHelpers)
 find_package(Protobuf REQUIRED)
 
 set(PROTO_FILES
-  "${CMAKE_CURRENT_SOURCE_DIR}/proto/mujoco_sim/v1/sync.proto"
+  "${CMAKE_CURRENT_SOURCE_DIR}/proto/mujoco_sim/v2/sync.proto"
 )
 file(MAKE_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}/generated/proto")
 
 add_library(${PROJECT_NAME}
   ${PROTO_FILES}
+  src/identifier.cpp
+  src/layout_hash.cpp
   src/stream_frame.cpp
 )
 add_library(mujoco_sim::protocol ALIAS ${PROJECT_NAME})

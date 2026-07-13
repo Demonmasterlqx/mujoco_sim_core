@@ -25,7 +25,7 @@
 namespace demo = mujoco_sim::sensor_demo;
 namespace {
 
-void SetHeader(mujoco_sim::v1::Header* header, double time) {
+void SetHeader(mujoco_sim::v2::Header* header, double time) {
   header->set_server_name("test");
   header->set_session_id(1);
   header->set_epoch(2);
@@ -36,7 +36,7 @@ void SetHeader(mujoco_sim::v1::Header* header, double time) {
 }
 
 void AddObservation(
-    google::protobuf::RepeatedPtrField<mujoco_sim::v1::ObservationBlock>* blocks,
+    google::protobuf::RepeatedPtrField<mujoco_sim::v2::ObservationBlock>* blocks,
     const std::string& name, std::initializer_list<double> values) {
   auto* block = blocks->Add();
   block->set_name(name);
@@ -51,8 +51,8 @@ demo::ControllerInterfaces ControllerNames() {
 }
 
 mujoco_sim::adapter_sdk::OwnedStreamSample MakeStreamSample(
-    const std::string& name, mujoco_sim::v1::StreamFormat format,
-    mujoco_sim::v1::FrameConvention convention, std::uint32_t width,
+    const std::string& name, mujoco_sim::v2::StreamFormat format,
+    mujoco_sim::v2::FrameConvention convention, std::uint32_t width,
     std::uint32_t height, std::uint32_t stride,
     std::vector<std::byte> payload) {
   mujoco_sim::adapter_sdk::OwnedStreamSample sample;
@@ -71,9 +71,9 @@ mujoco_sim::adapter_sdk::OwnedStreamSample MakeStreamSample(
   return sample;
 }
 
-mujoco_sim::v1::StreamDescriptor DescriptorFor(
+mujoco_sim::v2::StreamDescriptor DescriptorFor(
     const mujoco_sim::adapter_sdk::OwnedStreamSample& sample) {
-  mujoco_sim::v1::StreamDescriptor descriptor;
+  mujoco_sim::v2::StreamDescriptor descriptor;
   descriptor.set_name(sample.header.stream_name());
   descriptor.set_format(sample.header.format());
   descriptor.set_width(sample.header.width());
@@ -113,7 +113,7 @@ std::filesystem::path TemporaryPng() {
 
 TEST(DataPipelineTest, DecodesControllerTickByConfiguredNames) {
   const auto interfaces = ControllerNames();
-  mujoco_sim::v1::Tick tick;
+  mujoco_sim::v2::Tick tick;
   SetHeader(tick.mutable_header(), 4.5);
   AddObservation(tick.mutable_observations(), "gyro", {0.1, 0.2, 0.3});
   AddObservation(tick.mutable_observations(), "rr_pos", {4.0});
@@ -136,7 +136,7 @@ TEST(DataPipelineTest, DecodesControllerTickByConfiguredNames) {
 }
 
 TEST(DataPipelineTest, ObservationDecodeFailureIsTransactional) {
-  mujoco_sim::v1::Tick tick;
+  mujoco_sim::v2::Tick tick;
   SetHeader(tick.mutable_header(), 1.0);
   AddObservation(tick.mutable_observations(), "fl_pos", {1.0});
   demo::VehicleSample sample;
@@ -155,7 +155,7 @@ TEST(DataPipelineTest, DecodesObserverJointStateAndImuWithoutBarrierData) {
       "quat",
       "gyro",
       "accel"};
-  mujoco_sim::v1::ObservationFrame frame;
+  mujoco_sim::v2::ObservationFrame frame;
   SetHeader(frame.mutable_header(), 2.5);
   AddObservation(frame.mutable_observations(), "fl_pos", {1.0});
   AddObservation(frame.mutable_observations(), "fr_pos", {2.0});
@@ -217,8 +217,8 @@ TEST(DataPipelineTest, ValidatesAllCameraFormatsAndWritesRgbPng) {
   std::vector<std::byte> rgb = {
       std::byte{10}, std::byte{20}, std::byte{30},
       std::byte{40}, std::byte{50}, std::byte{60}};
-  auto rgb_sample = MakeStreamSample("rgb", mujoco_sim::v1::RGB8,
-                                     mujoco_sim::v1::ROS_OPTICAL, 2, 1, 6,
+  auto rgb_sample = MakeStreamSample("rgb", mujoco_sim::v2::RGB8,
+                                     mujoco_sim::v2::ROS_OPTICAL, 2, 1, 6,
                                      std::move(rgb));
   auto descriptor = DescriptorFor(rgb_sample);
   ASSERT_TRUE(demo::ValidateCameraSample(
@@ -229,7 +229,7 @@ TEST(DataPipelineTest, ValidatesAllCameraFormatsAndWritesRgbPng) {
   AppendFloat32LittleEndian(1.0F, &depth);
   AppendFloat32LittleEndian(2.0F, &depth);
   auto depth_sample = MakeStreamSample(
-      "depth", mujoco_sim::v1::DEPTH32F, mujoco_sim::v1::ROS_OPTICAL, 2, 1,
+      "depth", mujoco_sim::v2::DEPTH32F, mujoco_sim::v2::ROS_OPTICAL, 2, 1,
       8, std::move(depth));
   descriptor = DescriptorFor(depth_sample);
   ASSERT_TRUE(demo::ValidateCameraSample(
@@ -241,8 +241,8 @@ TEST(DataPipelineTest, ValidatesAllCameraFormatsAndWritesRgbPng) {
   AppendUint32LittleEndian(0, &segmentation);
   AppendUint32LittleEndian(4, &segmentation);
   auto segmentation_sample = MakeStreamSample(
-      "seg", mujoco_sim::v1::SEGMENTATION32U,
-      mujoco_sim::v1::ROS_OPTICAL, 2, 1, 8, std::move(segmentation));
+      "seg", mujoco_sim::v2::SEGMENTATION32U,
+      mujoco_sim::v2::ROS_OPTICAL, 2, 1, 8, std::move(segmentation));
   descriptor = DescriptorFor(segmentation_sample);
   ASSERT_TRUE(demo::ValidateCameraSample(
       segmentation_sample, descriptor,
@@ -254,7 +254,7 @@ TEST(DataPipelineTest, ValidatesAllCameraFormatsAndWritesRgbPng) {
     AppendFloat32LittleEndian(value, &points);
   }
   auto point_sample = MakeStreamSample(
-      "points", mujoco_sim::v1::XYZ32F, mujoco_sim::v1::ROS_OPTICAL, 2, 1,
+      "points", mujoco_sim::v2::XYZ32F, mujoco_sim::v2::ROS_OPTICAL, 2, 1,
       24, std::move(points));
   descriptor = DescriptorFor(point_sample);
   ASSERT_TRUE(demo::ValidateCameraSample(
@@ -288,21 +288,21 @@ TEST(DataPipelineTest, OversizedScreenshotShapesFailTransactionally) {
   const std::uint32_t overflow_width =
       std::numeric_limits<std::uint32_t>::max() / 3U + 1U;
   auto width_overflow = MakeStreamSample(
-      "rgb", mujoco_sim::v1::RGB8, mujoco_sim::v1::ROS_OPTICAL,
+      "rgb", mujoco_sim::v2::RGB8, mujoco_sim::v2::ROS_OPTICAL,
       overflow_width, 1, 2, std::vector<std::byte>(2));
   std::string error;
   EXPECT_FALSE(demo::SaveRgbScreenshot(output, width_overflow, &error));
   EXPECT_NE(error.find("invalid shape"), std::string::npos);
 
   auto png_limit = MakeStreamSample(
-      "rgb", mujoco_sim::v1::RGB8, mujoco_sim::v1::ROS_OPTICAL,
+      "rgb", mujoco_sim::v2::RGB8, mujoco_sim::v2::ROS_OPTICAL,
       static_cast<std::uint32_t>(PNG_UINT_31_MAX) + 1U, 1, 3,
       std::vector<std::byte>(3));
   EXPECT_FALSE(demo::SaveRgbScreenshot(output, png_limit, &error));
   EXPECT_NE(error.find("libpng limits"), std::string::npos);
 
   auto oversized_payload = MakeStreamSample(
-      "rgb", mujoco_sim::v1::RGB8, mujoco_sim::v1::ROS_OPTICAL, 1,
+      "rgb", mujoco_sim::v2::RGB8, mujoco_sim::v2::ROS_OPTICAL, 1,
       static_cast<std::uint32_t>(PNG_UINT_31_MAX), 3,
       std::vector<std::byte>(3));
   EXPECT_FALSE(demo::SaveRgbScreenshot(output, oversized_payload, &error));
@@ -325,8 +325,8 @@ TEST(DataPipelineTest, LidarDecodeDropsNanMissesAndIsTransactional) {
                       std::numeric_limits<float>::quiet_NaN()}) {
     AppendFloat32LittleEndian(value, &points);
   }
-  auto sample = MakeStreamSample("lidar", mujoco_sim::v1::XYZ32F,
-                                 mujoco_sim::v1::ROS_BODY, 2, 1, 24,
+  auto sample = MakeStreamSample("lidar", mujoco_sim::v2::XYZ32F,
+                                 mujoco_sim::v2::ROS_BODY, 2, 1, 24,
                                  std::move(points));
   auto descriptor = DescriptorFor(sample);
   demo::PointCloud cloud;
@@ -337,7 +337,7 @@ TEST(DataPipelineTest, LidarDecodeDropsNanMissesAndIsTransactional) {
   EXPECT_FLOAT_EQ(cloud[0].x, 1.0F);
   EXPECT_TRUE(cloud.is_dense);
 
-  descriptor.set_frame_convention(mujoco_sim::v1::ROS_OPTICAL);
+  descriptor.set_frame_convention(mujoco_sim::v2::ROS_OPTICAL);
   cloud[0].x = 42.0F;
   EXPECT_FALSE(
       demo::DecodeXyzPointCloud(sample, descriptor, &cloud, &error));
@@ -348,8 +348,8 @@ TEST(DataPipelineTest, DecodesNumericPayloadsAsLittleEndian) {
   std::vector<std::byte> segmentation = {
       std::byte{0x04}, std::byte{0x03}, std::byte{0x02}, std::byte{0x01}};
   auto segmentation_sample = MakeStreamSample(
-      "seg", mujoco_sim::v1::SEGMENTATION32U,
-      mujoco_sim::v1::ROS_OPTICAL, 1, 1, 4, std::move(segmentation));
+      "seg", mujoco_sim::v2::SEGMENTATION32U,
+      mujoco_sim::v2::ROS_OPTICAL, 1, 1, 4, std::move(segmentation));
   auto descriptor = DescriptorFor(segmentation_sample);
   demo::StreamValidationSummary summary;
   std::string error;
@@ -365,7 +365,7 @@ TEST(DataPipelineTest, DecodesNumericPayloadsAsLittleEndian) {
       std::byte{0x00}, std::byte{0x00}, std::byte{0x00}, std::byte{0x40},
       std::byte{0x00}, std::byte{0x00}, std::byte{0x40}, std::byte{0x40}};
   auto point_sample = MakeStreamSample(
-      "lidar", mujoco_sim::v1::XYZ32F, mujoco_sim::v1::ROS_BODY, 1, 1, 12,
+      "lidar", mujoco_sim::v2::XYZ32F, mujoco_sim::v2::ROS_BODY, 1, 1, 12,
       point);
   descriptor = DescriptorFor(point_sample);
   demo::PointCloud cloud;

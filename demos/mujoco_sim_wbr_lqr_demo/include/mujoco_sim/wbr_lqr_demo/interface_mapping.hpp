@@ -8,7 +8,7 @@
 
 #include <control/msgs.hpp>
 #include <mujoco_sim/adapter_sdk/sync_adapter_client.hpp>
-#include <mujoco_sim/v1/sync.pb.h>
+#include <mujoco_sim/v2/sync.pb.h>
 #include <mujoco_sim/wbr_lqr_demo/config.hpp>
 
 namespace mujoco_sim::wbr_lqr_demo {
@@ -25,29 +25,29 @@ std::vector<std::string> WbrObservationNames();
 std::vector<std::string> WbrObservationNames(const InterfaceConfig& config);
 std::vector<std::string> WbrCommandNames();
 std::vector<std::string> WbrCommandNames(const InterfaceConfig& config);
-void ValidateWbrLayout(const mujoco_sim::v1::ResourceLayout& layout);
+void ValidateWbrLayout(const mujoco_sim::v2::ResourceLayout& layout);
 void ValidateWbrLayout(const InterfaceConfig& config,
-                       const mujoco_sim::v1::ResourceLayout& layout);
+                       const mujoco_sim::v2::ResourceLayout& layout);
 
 class TickDecoder {
  public:
-  explicit TickDecoder(const mujoco_sim::v1::ResourceLayout& registered_layout);
+  explicit TickDecoder(const mujoco_sim::v2::ResourceLayout& registered_layout);
   TickDecoder(InterfaceConfig config,
-              const mujoco_sim::v1::ResourceLayout& registered_layout);
+              const mujoco_sim::v2::ResourceLayout& registered_layout);
 
-  control::msg_raw_state_t Decode(const mujoco_sim::v1::Tick& tick) const;
+  control::msg_raw_state_t Decode(const mujoco_sim::v2::Tick& tick) const;
 
  private:
   InterfaceConfig config_;
-  mujoco_sim::v1::ResourceLayout registered_layout_;
+  std::string registered_layout_hash_;
 };
 
 class TorqueCommandMapper {
  public:
   explicit TorqueCommandMapper(
-      const mujoco_sim::v1::ResourceLayout& registered_layout);
+      const mujoco_sim::v2::ResourceLayout& registered_layout);
   TorqueCommandMapper(InterfaceConfig config,
-                      const mujoco_sim::v1::ResourceLayout& registered_layout);
+                      const mujoco_sim::v2::ResourceLayout& registered_layout);
 
   std::vector<mujoco_sim::adapter_sdk::CommandValue> Map(
       const std::array<float, 6>& raw_torque) const;

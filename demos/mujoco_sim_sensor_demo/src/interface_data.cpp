@@ -12,7 +12,7 @@ namespace mujoco_sim::sensor_demo {
 namespace {
 
 using ObservationIndex =
-    std::unordered_map<std::string, const mujoco_sim::v1::ObservationBlock*>;
+    std::unordered_map<std::string, const mujoco_sim::v2::ObservationBlock*>;
 
 bool Fail(const std::string& message, std::string* error_message) {
   if (error_message != nullptr) *error_message = message;
@@ -21,7 +21,7 @@ bool Fail(const std::string& message, std::string* error_message) {
 
 bool BuildIndex(
     const google::protobuf::RepeatedPtrField<
-        mujoco_sim::v1::ObservationBlock>& observations,
+        mujoco_sim::v2::ObservationBlock>& observations,
     ObservationIndex* index, std::string* error_message) {
   index->clear();
   for (const auto& observation : observations) {
@@ -71,7 +71,7 @@ bool CopyScalar(const ObservationIndex& index, const std::string& name,
   return true;
 }
 
-bool SimulationTime(const mujoco_sim::v1::Header& header, double* output,
+bool SimulationTime(const mujoco_sim::v2::Header& header, double* output,
                     std::string* error_message) {
   if (!header.has_simulation_time_s() ||
       !std::isfinite(header.simulation_time_s()) ||
@@ -119,7 +119,7 @@ std::vector<std::string> StateObservationNames(
   return result;
 }
 
-bool DecodeVehicleSample(const mujoco_sim::v1::Tick& tick,
+bool DecodeVehicleSample(const mujoco_sim::v2::Tick& tick,
                          const ControllerInterfaces& interfaces,
                          VehicleSample* sample,
                          std::string* error_message) {
@@ -150,7 +150,7 @@ bool DecodeVehicleSample(const mujoco_sim::v1::Tick& tick,
   return true;
 }
 
-bool DecodeStateSample(const mujoco_sim::v1::ObservationFrame& frame,
+bool DecodeStateSample(const mujoco_sim::v2::ObservationFrame& frame,
                        const StateObserverInterfaces& interfaces,
                        StateSample* sample,
                        std::string* error_message) {
@@ -185,7 +185,7 @@ bool DecodeStateSample(const mujoco_sim::v1::ObservationFrame& frame,
   return true;
 }
 
-bool DecodeImuOrientation(const mujoco_sim::v1::ObservationFrame& frame,
+bool DecodeImuOrientation(const mujoco_sim::v2::ObservationFrame& frame,
                           const std::string& observation_name,
                           ImuOrientationSample* sample,
                           std::string* error_message) {

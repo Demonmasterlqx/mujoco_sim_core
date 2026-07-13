@@ -64,7 +64,7 @@ TEST(InterfaceMappingTest, RejectsBadTickDimensionsAndNonFiniteValues) {
   EXPECT_THROW(decoder.Decode(non_finite), demo::InterfaceError);
 
   auto changed_layout = test::MakeValidTick(layout);
-  changed_layout.mutable_layout()->mutable_commands(0)->set_ctrl_max(19.0);
+  changed_layout.set_layout_hash(std::string(16, '\0'));
   EXPECT_THROW(decoder.Decode(changed_layout), demo::InterfaceError);
 }
 
@@ -112,11 +112,11 @@ TEST(InterfaceMappingTest, DecodesAndMapsFullyRenamedResources) {
   std::reverse(observations.begin(), observations.end());
   std::reverse(commands.begin(), commands.end());
 
-  mujoco_sim::v1::ResourceLayout layout;
+  mujoco_sim::v2::ResourceLayout layout;
   for (const auto& name : observations) {
     auto* descriptor = layout.add_observations();
     descriptor->set_name(name);
-    descriptor->set_type(mujoco_sim::v1::OBSERVATION_SENSOR);
+    descriptor->set_type(mujoco_sim::v2::OBSERVATION_SENSOR);
     descriptor->set_dimension(name == config.imu.quaternion
                                   ? 4
                                   : (name == config.imu.angular_velocity ||
@@ -135,16 +135,17 @@ TEST(InterfaceMappingTest, DecodesAndMapsFullyRenamedResources) {
         static_cast<std::size_t>(motor - config.motors.begin());
     auto* descriptor = layout.add_commands();
     descriptor->set_name(name);
-    descriptor->set_type(mujoco_sim::v1::COMMAND_ACTUATOR);
+    descriptor->set_type(mujoco_sim::v2::COMMAND_ACTUATOR);
     descriptor->set_dimension(1);
     descriptor->set_has_ctrl_range(true);
     descriptor->set_ctrl_min(-static_cast<double>(index + 1));
     descriptor->set_ctrl_max(static_cast<double>(index + 1));
   }
 
-  mujoco_sim::v1::Tick tick;
+  layout.set_layout_hash(mujoco_sim::protocol::ComputeLayoutHash(layout));
+  mujoco_sim::v2::Tick tick;
   tick.mutable_header()->set_tick_id(23);
-  *tick.mutable_layout() = layout;
+  tick.set_layout_hash(layout.layout_hash());
   for (const auto& name : observations) {
     auto* block = tick.add_observations();
     block->set_name(name);
@@ -198,10 +199,10 @@ TEST(InterfaceMappingTest, DecodesAndMapsFullyRenamedResources) {
 TEST(InterfaceMappingTest, BuildsFixedAdapterRegistrationOptions) {
   demo::AdapterConfig config;
   config.server_name = "sim";
-  config.controller_id = "wbr";
+  config.adapter_id = "wbr";
   const auto options = demo::MakeAdapterOptions(config);
   EXPECT_EQ(options.server_name, "sim");
-  EXPECT_EQ(options.controller_id, "wbr");
+  EXPECT_EQ(options.adapter_id, "wbr");
   EXPECT_EQ(options.observation_names.size(), 21U);
   EXPECT_EQ(options.command_names.size(), 6U);
 }

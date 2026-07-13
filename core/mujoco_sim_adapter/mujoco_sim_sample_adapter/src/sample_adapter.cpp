@@ -31,7 +31,7 @@ generated::SampleConfig ToGenerated(const SampleOptions& options) {
 SampleOptions ToPublic(generated::SampleConfig config) {
   SampleOptions output;
   output.adapter.server_name = std::move(config.server_name);
-  output.adapter.controller_id = std::move(config.controller_id);
+  output.adapter.adapter_id = std::move(config.adapter_id);
   output.adapter.observation_names = std::move(config.observation_names);
   output.adapter.command_names = std::move(config.command_names);
   output.adapter.timeout_ms = config.timeout_ms;
@@ -56,11 +56,11 @@ std::vector<std::string> ParseNameList(const std::string& value) {
   return names;
 }
 
-std::vector<mujoco_sim::adapter_sdk::CommandValue> ConstantCommandsForTick(
-    const mujoco_sim::v1::Tick& tick, double value) {
+std::vector<mujoco_sim::adapter_sdk::CommandValue> ConstantCommandsForLayout(
+    const mujoco_sim::v2::ResourceLayout& layout, double value) {
   std::vector<mujoco_sim::adapter_sdk::CommandValue> commands;
-  commands.reserve(static_cast<std::size_t>(tick.layout().commands_size()));
-  for (const auto& command : tick.layout().commands()) {
+  commands.reserve(static_cast<std::size_t>(layout.commands_size()));
+  for (const auto& command : layout.commands()) {
     commands.push_back({command.name(), value});
   }
   return commands;
@@ -84,7 +84,7 @@ bool ParseCommandLine(int argc, char** argv, SampleOptions* options,
     return false;
   }
   SampleOptions output = ToPublic(std::move(parsed));
-  if (output.adapter.controller_id.empty()) {
+  if (output.adapter.adapter_id.empty()) {
     *error_message = "controller id is required";
     return false;
   }

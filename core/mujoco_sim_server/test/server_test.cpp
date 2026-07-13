@@ -100,7 +100,6 @@ void ExpectConfigEquals(const mujoco_sim::server::ServerConfig& actual,
   EXPECT_EQ(actual.initial_keyframe, expected.initial_keyframe);
   EXPECT_EQ(actual.max_ticks, expected.max_ticks);
   EXPECT_EQ(actual.tick_timeout_ms, expected.tick_timeout_ms);
-  EXPECT_EQ(actual.startup_timeout_ms, expected.startup_timeout_ms);
   EXPECT_EQ(actual.status_period_ms, expected.status_period_ms);
   EXPECT_EQ(actual.headless, expected.headless);
   EXPECT_EQ(actual.log_level, expected.log_level);
@@ -143,8 +142,6 @@ TEST(ServerConfigTest, ParsesCommandLine) {
                          "10",
                          "--tick-timeout-ms",
                          "50",
-                         "--startup-timeout-ms",
-                         "250",
                          "--activation-timeout-ms",
                          "750",
                          "--deny-timed-out-adapter-replacement",
@@ -166,7 +163,6 @@ TEST(ServerConfigTest, ParsesCommandLine) {
   EXPECT_EQ(config.initial_keyframe, "home");
   EXPECT_EQ(config.max_ticks, 10);
   EXPECT_EQ(config.tick_timeout_ms, 50);
-  EXPECT_EQ(config.startup_timeout_ms, 250);
   EXPECT_EQ(config.activation_timeout_ms, 750U);
   EXPECT_FALSE(config.allow_timed_out_adapter_replacement);
   EXPECT_EQ(config.status_period_ms, 100);
@@ -187,11 +183,10 @@ TEST(ServerConfigTest, KeepsDefaultsForUnspecifiedCommandLineOptions) {
   EXPECT_EQ(config.server_name, "default");
   EXPECT_EQ(config.max_ticks, 0);
   EXPECT_EQ(config.tick_timeout_ms, 1000);
-  EXPECT_EQ(config.startup_timeout_ms, 5000);
   EXPECT_EQ(config.activation_timeout_ms, 5000U);
   EXPECT_TRUE(config.allow_timed_out_adapter_replacement);
   EXPECT_EQ(config.status_period_ms, 100);
-  EXPECT_FALSE(config.headless);
+  EXPECT_EQ(config.headless, !static_cast<bool>(MUJOCO_SIM_HAS_GUI));
   EXPECT_EQ(config.log_level, "info");
   EXPECT_TRUE(config.log_file.empty());
   EXPECT_EQ(config.log_file_max_size_mb, 10U);
@@ -199,26 +194,11 @@ TEST(ServerConfigTest, KeepsDefaultsForUnspecifiedCommandLineOptions) {
   EXPECT_EQ(config.log_summary_period_ms, 5000U);
 }
 
-TEST(ServerConfigTest, PreservesLegacyAggregateInitializationOrder) {
-  const mujoco_sim::server::ServerConfig config{
-      "legacy", "robot.xml", 7, 8, 9, 10, true};
-  EXPECT_EQ(config.server_name, "legacy");
-  EXPECT_EQ(config.model_path, "robot.xml");
-  EXPECT_EQ(config.max_ticks, 7U);
-  EXPECT_EQ(config.tick_timeout_ms, 8U);
-  EXPECT_EQ(config.startup_timeout_ms, 9U);
-  EXPECT_EQ(config.status_period_ms, 10U);
-  EXPECT_TRUE(config.headless);
-  EXPECT_TRUE(config.initial_keyframe.empty());
-  EXPECT_EQ(config.log_level, "info");
-}
-
 TEST(ServerConfigTest, ReturnsGeneratedHelp) {
   mujoco_sim::server::ServerConfig config;
   std::string error;
   EXPECT_FALSE(ParseArgs({"mujoco-sim-server", "--help"}, &config, &error));
   EXPECT_EQ(error, mujoco_sim::server::Usage());
-  EXPECT_NE(error.find("--startup-timeout-ms"), std::string::npos);
   EXPECT_NE(error.find("--activation-timeout-ms"), std::string::npos);
   EXPECT_NE(error.find("--allow-timed-out-adapter-replacement"),
             std::string::npos);
@@ -305,7 +285,6 @@ TEST(ServerConfigTest, LoadsStrictYamlWithAllFields) {
       "initial_keyframe: home\n"
       "max_ticks: 18446744073709551615\n"
       "tick_timeout_ms: 4294967295\n"
-      "startup_timeout_ms: 6000\n"
       "activation_timeout_ms: 7000\n"
       "allow_timed_out_adapter_replacement: false\n"
       "status_period_ms: 25\n"
@@ -342,6 +321,13 @@ TEST(ServerConfigTest, LoadsStrictYamlWithAllFields) {
 
   mujoco_sim::server::ServerConfig config;
   std::string error;
+#if !MUJOCO_SIM_HAS_SENSOR_STREAMS
+  EXPECT_FALSE(
+      mujoco_sim::server::LoadConfigFile(file.path(), &config, &error));
+  EXPECT_NE(error.find("does not include sensor streams"), std::string::npos)
+      << error;
+  return;
+#endif
   ASSERT_TRUE(
       mujoco_sim::server::LoadConfigFile(file.path(), &config, &error))
       << error;
@@ -352,7 +338,6 @@ TEST(ServerConfigTest, LoadsStrictYamlWithAllFields) {
   EXPECT_EQ(config.max_ticks, std::numeric_limits<std::uint64_t>::max());
   EXPECT_EQ(config.tick_timeout_ms,
             std::numeric_limits<std::uint32_t>::max());
-  EXPECT_EQ(config.startup_timeout_ms, 6000);
   EXPECT_EQ(config.activation_timeout_ms, 7000U);
   EXPECT_FALSE(config.allow_timed_out_adapter_replacement);
   EXPECT_EQ(config.status_period_ms, 25);
@@ -379,6 +364,19 @@ TEST(ServerConfigTest, LoadsStrictYamlWithAllFields) {
 }
 
 TEST(ServerConfigTest, RejectsInvalidSensorStreamConfigurationTransactionally) {
+#if !MUJOCO_SIM_HAS_SENSOR_STREAMS
+  ScopedConfigFile file(
+      "sensor_streams_unsupported.yaml",
+      "sensor_streams:\n"
+      "  - {name: rgb, source: cam, frame_id: optical}\n");
+  mujoco_sim::server::ServerConfig config;
+  std::string error;
+  EXPECT_FALSE(
+      mujoco_sim::server::LoadConfigFile(file.path(), &config, &error));
+  EXPECT_NE(error.find("does not include sensor streams"), std::string::npos)
+      << error;
+  return;
+#endif
   const std::vector<std::pair<std::string, std::string>> invalid = {
       {"sensor_streams:\n"
        "  - {name: same, source: cam, frame_id: optical}\n"
@@ -405,11 +403,13 @@ TEST(ServerConfigTest, RejectsInvalidSensorStreamConfigurationTransactionally) {
        "  - {name: rgb, source: cam, frame_id: optical, "
        "queue_mode: fifo, queue_depth: 65}\n",
        "queue_depth must be <= 64"},
+#if MUJOCO_SIM_HAS_GUI
       {"headless: false\n"
        "render_backend: osmesa\n"
        "sensor_streams:\n"
        "  - {name: rgb, source: cam, frame_id: optical}\n",
        "osmesa is incompatible with the graphical viewer"},
+#endif
   };
   for (std::size_t i = 0; i < invalid.size(); ++i) {
     ScopedConfigFile file("invalid_sensor_stream_" + std::to_string(i) +
@@ -532,9 +532,12 @@ TEST(ServerConfigTest, CommandLineOverridesYamlRegardlessOfArgumentOrder) {
       "model_path: yaml.xml\n"
       "max_ticks: 10\n"
       "tick_timeout_ms: 20\n"
-      "startup_timeout_ms: 30\n"
       "status_period_ms: 40\n"
+#if MUJOCO_SIM_HAS_GUI
       "headless: false\n"
+#else
+      "headless: true\n"
+#endif
       "log_level: warn\n"
       "log_file: yaml.log\n"
       "log_summary_period_ms: 9000\n");
@@ -542,10 +545,10 @@ TEST(ServerConfigTest, CommandLineOverridesYamlRegardlessOfArgumentOrder) {
   const std::vector<std::vector<std::string>> argument_orders = {
       {"mujoco-sim-server", "--config", file.path(), "--model", "cli.xml",
        "--server-name", "cli", "--max-ticks", "11", "--tick-timeout-ms",
-       "21", "--startup-timeout-ms", "31"},
+       "21"},
       {"mujoco-sim-server", "--model", "cli.xml", "--server-name", "cli",
        "--max-ticks", "11", "--tick-timeout-ms", "21",
-       "--startup-timeout-ms", "31", "--config", file.path(),
+       "--config", file.path(),
        "--headless", "--log-level", "debug", "--log-file", "cli.log",
        "--log-summary-period-ms", "2500"},
   };
@@ -558,10 +561,11 @@ TEST(ServerConfigTest, CommandLineOverridesYamlRegardlessOfArgumentOrder) {
     EXPECT_EQ(config.server_name, "cli");
     EXPECT_EQ(config.max_ticks, 11);
     EXPECT_EQ(config.tick_timeout_ms, 21);
-    EXPECT_EQ(config.startup_timeout_ms, 31);
     EXPECT_EQ(config.status_period_ms, 40);
-    EXPECT_EQ(config.headless, arguments.back() != "31");
-    if (arguments.back() == "31") {
+    EXPECT_EQ(config.headless,
+              !static_cast<bool>(MUJOCO_SIM_HAS_GUI) ||
+                  arguments.back() != "21");
+    if (arguments.back() == "21") {
       EXPECT_EQ(config.log_level, "warn");
       EXPECT_EQ(config.log_file,
                 (std::filesystem::temp_directory_path() / "yaml.log").string());
@@ -579,11 +583,18 @@ TEST(ServerConfigTest, CommandLineGuiOverridesYamlHeadless) {
                         "model_path: robot.xml\nheadless: true\n");
   mujoco_sim::server::ServerConfig config;
   std::string error;
-  ASSERT_TRUE(ParseArgs({"mujoco-sim-server", "--config", file.path(),
-                         "--gui"},
-                        &config, &error))
-      << error;
+#if MUJOCO_SIM_HAS_GUI
+  ASSERT_TRUE(ParseArgs(
+      {"mujoco-sim-server", "--config", file.path(), "--gui"}, &config,
+      &error)) << error;
   EXPECT_FALSE(config.headless);
+#else
+  EXPECT_FALSE(ParseArgs(
+      {"mujoco-sim-server", "--config", file.path(), "--gui"}, &config,
+      &error));
+  EXPECT_NE(error.find("does not include GUI support"), std::string::npos)
+      << error;
+#endif
 }
 
 TEST(ServerConfigTest, LoadFailureDoesNotModifyConfig) {
@@ -760,6 +771,12 @@ TEST(ServerRuntimeTest, AggregatesAndResetsDeterministicWindows) {
 
   metrics.RecordTickOpened(start + 100ms);
   metrics.RecordTickPublishBatch(10, 2, 4, 1, 3, 8);
+  metrics.RecordTickCache(2, 7, 2, 4096, 1024);
+  metrics.RecordLayoutHashMismatch();
+  metrics.RecordBlockingWait(1.25);
+  metrics.RecordBlockingWait(3.5);
+  metrics.RecordSchedulerWakeup(false);
+  metrics.RecordSchedulerWakeup(true);
   EXPECT_DOUBLE_EQ(metrics.RecordCommit(true, false, false, start + 150ms),
                    0.0);
   EXPECT_DOUBLE_EQ(metrics.RecordCommit(false, true, false, start + 200ms),
@@ -782,6 +799,17 @@ TEST(ServerRuntimeTest, AggregatesAndResetsDeterministicWindows) {
   EXPECT_EQ(first.tick_send_rejected_with_subscribers, 1U);
   EXPECT_EQ(first.tick_no_subscribers, 3U);
   EXPECT_EQ(first.tick_retransmissions, 8U);
+  EXPECT_EQ(first.tick_serializations, 2U);
+  EXPECT_EQ(first.tick_cache_hits, 7U);
+  EXPECT_EQ(first.tick_cache_misses, 2U);
+  EXPECT_EQ(first.tick_cached_bytes, 4096U);
+  EXPECT_EQ(first.layout_bytes_avoided, 1024U);
+  EXPECT_EQ(first.layout_hash_mismatches, 1U);
+  EXPECT_EQ(first.blocking_wait_count, 2U);
+  EXPECT_DOUBLE_EQ(first.blocking_wait_total_ms, 4.75);
+  EXPECT_DOUBLE_EQ(first.blocking_wait_max_ms, 3.5);
+  EXPECT_EQ(first.scheduler_wakeups, 2U);
+  EXPECT_EQ(first.scheduler_late_wakeups, 1U);
   EXPECT_EQ(first.commits, 3U);
   EXPECT_EQ(first.duplicate_commits, 1U);
   EXPECT_EQ(first.rejected_commits, 1U);
@@ -799,6 +827,11 @@ TEST(ServerRuntimeTest, AggregatesAndResetsDeterministicWindows) {
   const auto second = metrics.TakeSummary(start + 3s, 15, 1.5);
   EXPECT_EQ(second.ticks_opened, 1U);
   EXPECT_EQ(second.completed_barriers, 0U);
+  EXPECT_EQ(second.tick_serializations, 0U);
+  EXPECT_EQ(second.tick_cache_hits, 0U);
+  EXPECT_EQ(second.layout_hash_mismatches, 0U);
+  EXPECT_EQ(second.blocking_wait_count, 0U);
+  EXPECT_EQ(second.scheduler_wakeups, 0U);
   EXPECT_DOUBLE_EQ(
       metrics.RecordCommit(false, false, true, start + 3100ms), 1000.0);
   const auto third = metrics.TakeSummary(start + 4s, 16, 1.6);
@@ -985,9 +1018,9 @@ TEST(ServerLoggingTest, RotatesWithinConfiguredTotalFileCount) {
 
 TEST(ServerTopicsTest, UsesDocumentedRegistryName) {
   EXPECT_EQ(mujoco_sim::protocol::RegistryServiceName("sim"),
-            "mujoco_sim.sim.registry");
+            "mujoco_sim.v2.sim.registry");
   EXPECT_EQ(mujoco_sim::protocol::CommitTopicName("sim"),
-            "mujoco_sim/sim/commit");
+            "mujoco_sim/v2/sim/commit");
 }
 
 }  // namespace

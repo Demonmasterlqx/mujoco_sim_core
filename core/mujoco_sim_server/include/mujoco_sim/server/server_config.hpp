@@ -6,6 +6,10 @@
 
 namespace mujoco_sim::server {
 
+#ifndef MUJOCO_SIM_HAS_GUI
+#define MUJOCO_SIM_HAS_GUI 1
+#endif
+
 inline constexpr double kMinimumSensorStreamRateHz = 0.000001;
 inline constexpr double kMaximumSensorStreamRateHz = 1'000'000.0;
 inline constexpr std::uint32_t kMaximumSensorStreamQueueDepth = 64;
@@ -34,9 +38,8 @@ struct ServerConfig {
   std::string model_path;
   std::uint64_t max_ticks = 0;
   std::uint32_t tick_timeout_ms = 1000;
-  std::uint32_t startup_timeout_ms = 5000;
   std::uint32_t status_period_ms = 100;
-  bool headless = false;
+  bool headless = !MUJOCO_SIM_HAS_GUI;
   std::string initial_keyframe;
   std::string log_level = "info";
   std::string log_file;

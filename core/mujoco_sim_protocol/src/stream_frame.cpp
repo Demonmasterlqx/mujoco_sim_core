@@ -40,7 +40,7 @@ bool Fail(const std::string& message, std::string* error_message) {
 
 }  // namespace
 
-bool SerializeStreamFrame(const mujoco_sim::v1::StreamFrameHeader& header,
+bool SerializeStreamFrame(const mujoco_sim::v2::StreamFrameHeader& header,
                           std::span<const std::byte> payload,
                           std::string* output,
                           std::string* error_message) {

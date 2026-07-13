@@ -433,7 +433,7 @@ class NativeContext {
 };
 
 bool WantsFormat(const CameraProfile& profile,
-                 mujoco_sim::v1::StreamFormat format) {
+                 mujoco_sim::v2::StreamFormat format) {
   return std::any_of(profile.outputs.begin(), profile.outputs.end(),
                      [format](const CameraOutput& output) {
                        return output.format == format;
@@ -478,7 +478,7 @@ std::vector<float> MetricDepthTopLeft(const std::vector<float>& depth,
 
 std::vector<float> MakePointCloud(
     std::span<const float> depth, std::uint32_t width, std::uint32_t height,
-    const mujoco_sim::v1::CameraIntrinsics& intrinsics) {
+    const mujoco_sim::v2::CameraIntrinsics& intrinsics) {
   std::vector<float> points(depth.size() * 3U);
   for (std::size_t row = 0; row < height; ++row) {
     for (std::size_t column = 0; column < width; ++column) {
@@ -597,7 +597,7 @@ struct OffscreenRenderer::Impl {
   }
 
   CameraProfile profile;
-  std::vector<mujoco_sim::v1::StreamDescriptor> descriptors;
+  std::vector<mujoco_sim::v2::StreamDescriptor> descriptors;
   const mjModel* model = nullptr;
   int camera_id = -1;
   NativeContext native_context;
@@ -642,7 +642,7 @@ std::unique_ptr<OffscreenRenderer> OffscreenRenderer::Create(
   }
 
   detail::StreamShape context_shape;
-  if (!detail::StreamShapeFor(mujoco_sim::v1::DEPTH32F,
+  if (!detail::StreamShapeFor(mujoco_sim::v2::DEPTH32F,
                               impl->profile.width, impl->profile.height,
                               &context_shape, error_message)) {
     return nullptr;
@@ -704,7 +704,7 @@ const CameraProfile& OffscreenRenderer::profile() const noexcept {
   return impl_->profile;
 }
 
-const std::vector<mujoco_sim::v1::StreamDescriptor>&
+const std::vector<mujoco_sim::v2::StreamDescriptor>&
 OffscreenRenderer::descriptors() const noexcept {
   return impl_->descriptors;
 }
@@ -748,10 +748,10 @@ bool OffscreenRenderer::Capture(const core::SimulationSnapshot& snapshot,
 
   const std::size_t pixel_count =
       static_cast<std::size_t>(impl_->profile.width) * impl_->profile.height;
-  const bool wants_rgb = WantsFormat(impl_->profile, mujoco_sim::v1::RGB8);
+  const bool wants_rgb = WantsFormat(impl_->profile, mujoco_sim::v2::RGB8);
   const bool wants_depth =
-      WantsFormat(impl_->profile, mujoco_sim::v1::DEPTH32F) ||
-      WantsFormat(impl_->profile, mujoco_sim::v1::XYZ32F);
+      WantsFormat(impl_->profile, mujoco_sim::v2::DEPTH32F) ||
+      WantsFormat(impl_->profile, mujoco_sim::v2::XYZ32F);
   std::vector<unsigned char> rgb(wants_rgb ? 3U * pixel_count : 0U);
   std::vector<float> raw_depth(wants_depth ? pixel_count : 0U);
   if (wants_rgb || wants_depth) {
@@ -788,7 +788,7 @@ bool OffscreenRenderer::Capture(const core::SimulationSnapshot& snapshot,
   }
 
   std::vector<std::uint32_t> segmentation;
-  if (WantsFormat(impl_->profile, mujoco_sim::v1::SEGMENTATION32U)) {
+  if (WantsFormat(impl_->profile, mujoco_sim::v2::SEGMENTATION32U)) {
     segmentation = MakeSegmentation(
         impl_->model, snapshot.data(), impl_->option, impl_->scene,
         impl_->profile.width, impl_->profile.height);
@@ -796,7 +796,7 @@ bool OffscreenRenderer::Capture(const core::SimulationSnapshot& snapshot,
 
   const auto& intrinsics = impl_->descriptors.front().camera_intrinsics();
   std::vector<float> point_cloud;
-  if (WantsFormat(impl_->profile, mujoco_sim::v1::XYZ32F)) {
+  if (WantsFormat(impl_->profile, mujoco_sim::v2::XYZ32F)) {
     point_cloud = MakePointCloud(metric_depth, impl_->profile.width,
                                  impl_->profile.height, intrinsics);
   }
@@ -805,16 +805,16 @@ bool OffscreenRenderer::Capture(const core::SimulationSnapshot& snapshot,
   for (const auto& descriptor : impl_->descriptors) {
     std::vector<std::byte> payload;
     switch (descriptor.format()) {
-      case mujoco_sim::v1::RGB8:
+      case mujoco_sim::v2::RGB8:
         payload = rgb_payload;
         break;
-      case mujoco_sim::v1::DEPTH32F:
+      case mujoco_sim::v2::DEPTH32F:
         payload = detail::ToBytes<float>(metric_depth);
         break;
-      case mujoco_sim::v1::SEGMENTATION32U:
+      case mujoco_sim::v2::SEGMENTATION32U:
         payload = detail::ToBytes<std::uint32_t>(segmentation);
         break;
-      case mujoco_sim::v1::XYZ32F:
+      case mujoco_sim::v2::XYZ32F:
         payload = detail::ToBytes<float>(point_cloud);
         break;
       default:

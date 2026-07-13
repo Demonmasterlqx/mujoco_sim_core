@@ -7,7 +7,7 @@
 #include <optional>
 #include <string>
 
-#include <mujoco_sim/v1/sync.pb.h>
+#include <mujoco_sim/v2/sync.pb.h>
 
 namespace mujoco_sim::server::status_tool {
 
@@ -35,7 +35,7 @@ struct PublisherIdentity {
 };
 
 struct ReceivedStatus {
-  mujoco_sim::v1::ServerStatus status;
+  mujoco_sim::v2::ServerStatus status;
   PublisherIdentity publisher;
   std::int64_t send_clock = 0;
   std::chrono::steady_clock::time_point received_at;
@@ -55,7 +55,7 @@ class StatusTracker {
                 std::chrono::milliseconds stale_after);
   StatusUpdate Accept(const PublisherIdentity& publisher,
                       std::int64_t send_clock,
-                      const mujoco_sim::v1::ServerStatus& status,
+                      const mujoco_sim::v2::ServerStatus& status,
                       std::chrono::steady_clock::time_point received_at);
   bool stale(std::chrono::steady_clock::time_point now) const;
   const std::optional<ReceivedStatus>& latest() const { return latest_; }
@@ -69,11 +69,11 @@ class StatusTracker {
 
 bool ParseStatusPayload(const void* data, std::size_t size,
                         const std::string& server_name,
-                        mujoco_sim::v1::ServerStatus* status);
+                        mujoco_sim::v2::ServerStatus* status);
 
 struct StatusReport {
-  mujoco_sim::v1::ServerStatus status;
-  std::optional<mujoco_sim::v1::GetAvailableResourcesResponse> resources;
+  mujoco_sim::v2::ServerStatus status;
+  std::optional<mujoco_sim::v2::GetAvailableResourcesResponse> resources;
   std::string resource_error;
 };
 

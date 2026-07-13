@@ -38,8 +38,8 @@ for event in adapter_registered adapter_activated adapter_unregistered; do
     exit 1
   fi
 done
-for event in controller_timed_out controller_unregistered \
-             controller_local_error; do
+for event in adapter_timed_out adapter_unregistered \
+             adapter_local_error; do
   if ! grep -Fq "event=${event}" "${work_dir}/server.err"; then
     echo "server log is missing event=${event}" >&2
     sed -n '1,260p' "${work_dir}/server.err" >&2 || true

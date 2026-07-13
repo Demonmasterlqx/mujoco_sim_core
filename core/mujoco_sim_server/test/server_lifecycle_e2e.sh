@@ -25,10 +25,10 @@ server_pid="$!"
 
 timeout 20s "${probe_bin}" "${instance_name}"
 
-for event in controller_timed_out controller_recovery_pending \
-             controller_recovered \
-             controller_registered controller_replaced controller_activated \
-             controller_unregistered controller_local_error; do
+for event in adapter_timed_out adapter_recovery_pending \
+             adapter_recovered \
+             adapter_registered adapter_activated \
+             adapter_unregistered adapter_local_error; do
   grep -Fq "event=${event}" "${work_dir}/server.err"
 done
 

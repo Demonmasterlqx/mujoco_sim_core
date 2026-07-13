@@ -26,7 +26,6 @@ server_args=(
   --config "${server_config}"
   --server-name "${instance_name}"
   --max-ticks 0
-  --startup-timeout-ms 10000
   --tick-timeout-ms 5000
 )
 if [[ "${mode}" == "headless" ]]; then
@@ -45,7 +44,7 @@ sleep 0.1
 if ! timeout 45s "${adapter_bin}" \
     --config "${adapter_config}" \
     --server-name "${instance_name}" \
-    --controller-id "wbr_${BASHPID}" \
+    --adapter-id "wbr_${BASHPID}" \
     --ticks "${ticks}" \
     --log-every-ticks 0 \
     >"${adapter_log}" 2>&1; then
@@ -75,8 +74,8 @@ if [[ "${server_status}" -ne 143 ]]; then
 fi
 
 for event in server_starting model_loaded server_started \
-             controller_registered controller_activated \
-             controller_unregistered; do
+             adapter_registered adapter_activated \
+             adapter_unregistered; do
   if ! grep -Fq "event=${event}" "${server_log}"; then
     echo "server log is missing event=${event}" >&2
     sed -n '1,240p' "${server_log}" >&2 || true

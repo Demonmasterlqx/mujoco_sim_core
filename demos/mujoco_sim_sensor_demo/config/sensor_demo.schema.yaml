@@ -37,7 +37,7 @@ fields:
         type: string
         default: perimeter_controller
         non_empty: true
-        cli: [--controller-id]
+        cli: [--adapter-id]
       timeout_ms: {type: uint32, default: 5000, min: 1}
       log_every_ticks: {type: uint64, default: 250}
       max_simulation_time_s:

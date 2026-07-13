@@ -29,11 +29,6 @@ fields:
     description: Default Controller barrier or Observer keepalive timeout in milliseconds
     default: 1000
     cli: [--tick-timeout-ms]
-  startup_timeout_ms:
-    type: uint32
-    description: Deprecated compatibility option; ignored
-    default: 5000
-    cli: [--startup-timeout-ms]
   activation_timeout_ms:
     type: uint32
     description: Maximum time a provisional adapter may wait before activation

@@ -401,7 +401,7 @@ TEST(ModelContractTest, CoreCatalogMatchesModelAndServerStreamCatalog) {
       &error))
       << error;
   EXPECT_EQ(server_config.sensor_streams.size(), 5U);
-  EXPECT_TRUE(server_config.headless);
+  EXPECT_FALSE(server_config.headless);
   EXPECT_EQ(server_config.render_backend, "auto");
   EXPECT_EQ(server_config.max_ticks, 0U);
   EXPECT_EQ(std::filesystem::weakly_canonical(server_config.model_path),

@@ -11,6 +11,7 @@
 #include <vector>
 
 #include <mujoco_sim/adapter_sdk/sync_adapter_client.hpp>
+#include <mujoco_sim/protocol/layout_hash.hpp>
 #include <mujoco_sim/protocol/topics.hpp>
 
 namespace mujoco_sim::adapter_sdk {
@@ -18,20 +19,29 @@ namespace mujoco_sim::adapter_sdk {
 class SyncAdapterClientTestPeer {
  public:
   static void Configure(SyncAdapterClient* client,
-                        const mujoco_sim::v1::Tick& tick,
+                        const mujoco_sim::v2::Tick& tick,
                         bool activated = true) {
     client->stop_requested_ = false;
     {
       std::lock_guard lock(client->mutex_);
-      client->registration_.set_code(mujoco_sim::v1::OK);
-      client->registration_.set_controller_id(tick.controller_id());
+      client->registration_.set_code(mujoco_sim::v2::OK);
+      client->registration_.set_adapter_id(tick.adapter_id());
       client->registration_.set_session_id(tick.header().session_id());
       client->registration_.set_epoch(tick.header().epoch());
-      client->registration_.set_effective_protocol_major(
-          tick.header().protocol_major());
-      client->registration_.set_effective_protocol_minor(
-          tick.header().protocol_minor());
-      *client->registration_.mutable_layout() = tick.layout();
+      auto* observation = client->registration_.mutable_layout()->add_observations();
+      observation->set_name("position");
+      observation->set_dimension(1);
+      auto* motor_a = client->registration_.mutable_layout()->add_commands();
+      motor_a->set_name("motor_a");
+      motor_a->set_dimension(1);
+      motor_a->set_has_ctrl_range(true);
+      motor_a->set_ctrl_min(-1.0);
+      motor_a->set_ctrl_max(1.0);
+      auto* motor_b = client->registration_.mutable_layout()->add_commands();
+      motor_b->set_name("motor_b");
+      motor_b->set_dimension(1);
+      client->registration_.mutable_layout()->set_layout_hash(
+          mujoco_sim::protocol::ComputeLayoutHash(client->registration_.layout()));
       client->started_ = true;
       client->activated_ = activated;
       client->registered_ = false;
@@ -46,45 +56,51 @@ class SyncAdapterClientTestPeer {
   }
 
   static void HandleTick(
-      SyncAdapterClient* client, const mujoco_sim::v1::Tick& tick,
-      const std::function<void(const mujoco_sim::v1::Heartbeat&)>&
+      SyncAdapterClient* client, const mujoco_sim::v2::Tick& tick,
+      const std::function<void(const mujoco_sim::v2::AdapterHeartbeat&)>&
           publish_heartbeat,
-      const std::function<void(const mujoco_sim::v1::AdapterCommit&)>&
+      const std::function<void(const mujoco_sim::v2::AdapterCommit&)>&
           publish_commit) {
     client->HandleTick(tick, publish_heartbeat, publish_commit);
   }
 
+  static void SetFirstCommandDimension(SyncAdapterClient* client,
+                                       std::uint32_t dimension) {
+    client->registration_.mutable_layout()->mutable_commands(0)->set_dimension(
+        dimension);
+  }
+
   static void HandleTickBytes(SyncAdapterClient* client,
-                              const mujoco_sim::v1::Tick& tick) {
+                              const mujoco_sim::v2::Tick& tick) {
     const std::string bytes = tick.SerializeAsString();
     client->HandleTickBytes(bytes.data(), bytes.size());
   }
 
   static void HandleStatusBytes(SyncAdapterClient* client,
-                                const mujoco_sim::v1::ServerStatus& status) {
+                                const mujoco_sim::v2::ServerStatus& status) {
     const std::string bytes = status.SerializeAsString();
     client->HandleStatusBytes(bytes.data(), bytes.size());
   }
 
   static bool CommitWith(
-      SyncAdapterClient* client, const mujoco_sim::v1::Tick& tick,
+      SyncAdapterClient* client, const mujoco_sim::v2::Tick& tick,
       const std::vector<CommandValue>& commands,
-      const std::function<bool(const mujoco_sim::v1::AdapterCommit&)>& publish,
+      const std::function<bool(const mujoco_sim::v2::AdapterCommit&)>& publish,
       std::string* error) {
     return client->CommitWith(tick, commands, publish, error);
   }
 
   static bool CommitSerializedWith(
-      SyncAdapterClient* client, const mujoco_sim::v1::Tick& tick,
+      SyncAdapterClient* client, const mujoco_sim::v2::Tick& tick,
       const std::vector<CommandValue>& commands,
-      const std::function<bool(const mujoco_sim::v1::AdapterCommit&)>& publish,
+      const std::function<bool(const mujoco_sim::v2::AdapterCommit&)>& publish,
       std::string* error) {
     std::lock_guard lifecycle_lock(client->lifecycle_mutex_);
     return client->CommitWith(tick, commands, publish, error);
   }
 
   static bool IsExpectedTick(SyncAdapterClient* client,
-                             const mujoco_sim::v1::Tick& tick) {
+                             const mujoco_sim::v2::Tick& tick) {
     return client->IsExpectedTick(tick);
   }
 
@@ -123,8 +139,8 @@ class SyncAdapterClientTestPeer {
   static bool ActivateWith(
       SyncAdapterClient* client,
       const std::function<bool(
-          const mujoco_sim::v1::ActivateControllerRequest&,
-          mujoco_sim::v1::ActivateControllerResponse*, std::string*)>& call,
+          const mujoco_sim::v2::ActivateAdapterRequest&,
+          mujoco_sim::v2::ActivateAdapterResponse*, std::string*)>& call,
       std::chrono::milliseconds discovery_delay, std::string* error) {
     std::lock_guard lifecycle_lock(client->lifecycle_mutex_);
     return client->ActivateWith(call, discovery_delay, error);
@@ -159,8 +175,8 @@ class SyncAdapterClientTestPeer {
   static bool UnregisterWith(
       SyncAdapterClient* client,
       const std::function<bool(
-          const mujoco_sim::v1::UnregisterControllerRequest&,
-          mujoco_sim::v1::UnregisterControllerResponse*, std::string*)>& call,
+          const mujoco_sim::v2::UnregisterAdapterRequest&,
+          mujoco_sim::v2::UnregisterAdapterResponse*, std::string*)>& call,
       std::string* error) {
     return client->UnregisterWith(call, error);
   }
@@ -168,8 +184,8 @@ class SyncAdapterClientTestPeer {
   static bool UnregisterSerializedWith(
       SyncAdapterClient* client,
       const std::function<bool(
-          const mujoco_sim::v1::UnregisterControllerRequest&,
-          mujoco_sim::v1::UnregisterControllerResponse*, std::string*)>& call,
+          const mujoco_sim::v2::UnregisterAdapterRequest&,
+          mujoco_sim::v2::UnregisterAdapterResponse*, std::string*)>& call,
       std::string* error) {
     std::lock_guard lifecycle_lock(client->lifecycle_mutex_);
     return client->UnregisterWith(call, error);
@@ -229,15 +245,15 @@ using mujoco_sim::adapter_sdk::TickWaitResult;
 mujoco_sim::adapter_sdk::AdapterOptions MakeOptions() {
   mujoco_sim::adapter_sdk::AdapterOptions options;
   options.server_name = "default";
-  options.controller_id = "arm";
+  options.adapter_id = "arm";
   options.command_names = {"motor_a", "motor_b"};
   return options;
 }
 
-mujoco_sim::v1::Tick MakeTick(
+mujoco_sim::v2::Tick MakeTick(
     std::uint64_t tick_id,
-    mujoco_sim::v1::ControllerState state = mujoco_sim::v1::ACTIVE) {
-  mujoco_sim::v1::Tick tick;
+    mujoco_sim::v2::ControllerState state = mujoco_sim::v2::ACTIVE) {
+  mujoco_sim::v2::Tick tick;
   tick.mutable_header()->set_server_name("default");
   tick.mutable_header()->set_session_id(4);
   tick.mutable_header()->set_epoch(2);
@@ -247,25 +263,26 @@ mujoco_sim::v1::Tick MakeTick(
       mujoco_sim::protocol::kProtocolMajor);
   tick.mutable_header()->set_protocol_minor(
       mujoco_sim::protocol::kProtocolMinor);
-  tick.set_controller_id("arm");
+  tick.set_adapter_id("arm");
   tick.set_controller_state(state);
-
-  auto* observation_descriptor = tick.mutable_layout()->add_observations();
+  mujoco_sim::v2::ResourceLayout layout;
+  auto* observation_descriptor = layout.add_observations();
   observation_descriptor->set_name("position");
   observation_descriptor->set_dimension(1);
   auto* observation = tick.add_observations();
   observation->set_name("position");
   observation->add_values(static_cast<double>(tick_id));
 
-  auto* motor_a = tick.mutable_layout()->add_commands();
+  auto* motor_a = layout.add_commands();
   motor_a->set_name("motor_a");
   motor_a->set_dimension(1);
   motor_a->set_has_ctrl_range(true);
   motor_a->set_ctrl_min(-1.0);
   motor_a->set_ctrl_max(1.0);
-  auto* motor_b = tick.mutable_layout()->add_commands();
+  auto* motor_b = layout.add_commands();
   motor_b->set_name("motor_b");
   motor_b->set_dimension(1);
+  tick.set_layout_hash(mujoco_sim::protocol::ComputeLayoutHash(layout));
   return tick;
 }
 
@@ -277,27 +294,27 @@ const std::vector<CommandValue>& ValidCommands() {
 
 struct Publications {
   std::mutex mutex;
-  std::vector<mujoco_sim::v1::Heartbeat> heartbeats;
-  std::vector<mujoco_sim::v1::AdapterCommit> commits;
+  std::vector<mujoco_sim::v2::AdapterHeartbeat> heartbeats;
+  std::vector<mujoco_sim::v2::AdapterCommit> commits;
 
-  void Heartbeat(const mujoco_sim::v1::Heartbeat& heartbeat) {
+  void AdapterHeartbeat(const mujoco_sim::v2::AdapterHeartbeat& heartbeat) {
     std::lock_guard lock(mutex);
     heartbeats.push_back(heartbeat);
   }
 
-  bool Commit(const mujoco_sim::v1::AdapterCommit& commit) {
+  bool Commit(const mujoco_sim::v2::AdapterCommit& commit) {
     std::lock_guard lock(mutex);
     commits.push_back(commit);
     return true;
   }
 };
 
-void Deliver(SyncAdapterClient* client, const mujoco_sim::v1::Tick& tick,
+void Deliver(SyncAdapterClient* client, const mujoco_sim::v2::Tick& tick,
              Publications* publications) {
   SyncAdapterClientTestPeer::HandleTick(
       client, tick,
       [publications](const auto& heartbeat) {
-        publications->Heartbeat(heartbeat);
+        publications->AdapterHeartbeat(heartbeat);
       },
       [publications](const auto& commit) { publications->Commit(commit); });
 }
@@ -307,7 +324,7 @@ TEST(SyncAdapterClientTest, RequiresExplicitActivationBeforeWaiting) {
   const auto tick = MakeTick(9);
   SyncAdapterClientTestPeer::Configure(&client, tick, false);
 
-  mujoco_sim::v1::Tick output;
+  mujoco_sim::v2::Tick output;
   std::string error;
   EXPECT_EQ(client.WaitForTick(0ms, &output, &error), TickWaitResult::kError);
   EXPECT_EQ(error, "adapter client must be activated before waiting");
@@ -322,13 +339,13 @@ TEST(SyncAdapterClientTest, WaitTimesOutTransactionallyAndRejectsBadArguments) {
   const auto session = MakeTick(9);
   SyncAdapterClientTestPeer::Configure(&client, session);
 
-  mujoco_sim::v1::Tick output;
-  output.set_controller_id("unchanged");
+  mujoco_sim::v2::Tick output;
+  output.set_adapter_id("unchanged");
   std::string error = "old";
   EXPECT_EQ(client.WaitForTick(1ms, &output, &error),
             TickWaitResult::kTimeout);
   EXPECT_TRUE(error.empty());
-  EXPECT_EQ(output.controller_id(), "unchanged");
+  EXPECT_EQ(output.adapter_id(), "unchanged");
 
   EXPECT_EQ(client.WaitForTick(-1ms, &output, &error),
             TickWaitResult::kError);
@@ -344,7 +361,7 @@ TEST(SyncAdapterClientTest, EnforcesOneOutstandingTick) {
   Publications publications;
   Deliver(&client, tick, &publications);
 
-  mujoco_sim::v1::Tick received;
+  mujoco_sim::v2::Tick received;
   std::string error;
   ASSERT_EQ(client.WaitForTick(0ms, &received, &error),
             TickWaitResult::kReceived);
@@ -375,7 +392,7 @@ TEST(SyncAdapterClientTest, DuplicateTickIsDeliveredOnceAndResendsCommit) {
   timestamp_only_duplicate.mutable_header()->set_timestamp_unix_nanos(9999);
   Deliver(&client, timestamp_only_duplicate, &publications);
 
-  mujoco_sim::v1::Tick received;
+  mujoco_sim::v2::Tick received;
   std::string error;
   ASSERT_EQ(client.WaitForTick(0ms, &received, &error),
             TickWaitResult::kReceived);
@@ -416,29 +433,36 @@ TEST(SyncAdapterClientTest, DuplicateTickIsDeliveredOnceAndResendsCommit) {
             std::string::npos);
 }
 
-TEST(SyncAdapterClientTest, FailedPublishKeepsCommitForTickDrivenRetry) {
+TEST(SyncAdapterClientTest, FailedPublishIsReportedAndCommitCanBeRetried) {
   SyncAdapterClient client(MakeOptions());
   const auto tick = MakeTick(9);
   SyncAdapterClientTestPeer::Configure(&client, tick);
   Publications publications;
   Deliver(&client, tick, &publications);
 
-  mujoco_sim::v1::Tick received;
+  mujoco_sim::v2::Tick received;
   std::string error;
   ASSERT_EQ(client.WaitForTick(0ms, &received, &error),
             TickWaitResult::kReceived);
   int publish_attempts = 0;
-  ASSERT_TRUE(SyncAdapterClientTestPeer::CommitWith(
+  ASSERT_FALSE(SyncAdapterClientTestPeer::CommitWith(
       &client, received, ValidCommands(),
       [&publish_attempts](const auto&) {
         ++publish_attempts;
         return false;
       },
-      &error))
-      << error;
+      &error));
+  EXPECT_EQ(error, "failed to publish Commit");
   EXPECT_EQ(publish_attempts, 1);
 
-  Deliver(&client, tick, &publications);
+  ASSERT_TRUE(SyncAdapterClientTestPeer::CommitWith(
+      &client, received, ValidCommands(),
+      [&publications](const auto& commit) {
+        return publications.Commit(commit);
+      },
+      &error))
+      << error;
+
   std::lock_guard lock(publications.mutex);
   ASSERT_EQ(publications.commits.size(), 1U);
   EXPECT_EQ(publications.commits.front().header().tick_id(), 9U);
@@ -447,17 +471,17 @@ TEST(SyncAdapterClientTest, FailedPublishKeepsCommitForTickDrivenRetry) {
 
 TEST(SyncAdapterClientTest, TimedOutTicksUseLatestValueMailbox) {
   SyncAdapterClient client(MakeOptions());
-  const auto tick9 = MakeTick(9, mujoco_sim::v1::TIMED_OUT);
+  const auto tick9 = MakeTick(9, mujoco_sim::v2::TIMED_OUT);
   SyncAdapterClientTestPeer::Configure(&client, tick9);
   Publications publications;
   Deliver(&client, tick9, &publications);
 
-  mujoco_sim::v1::Tick received;
+  mujoco_sim::v2::Tick received;
   std::string error;
   ASSERT_EQ(client.WaitForTick(0ms, &received, &error),
             TickWaitResult::kReceived);
-  Deliver(&client, MakeTick(10, mujoco_sim::v1::TIMED_OUT), &publications);
-  Deliver(&client, MakeTick(11, mujoco_sim::v1::TIMED_OUT), &publications);
+  Deliver(&client, MakeTick(10, mujoco_sim::v2::TIMED_OUT), &publications);
+  Deliver(&client, MakeTick(11, mujoco_sim::v2::TIMED_OUT), &publications);
   ASSERT_TRUE(SyncAdapterClientTestPeer::CommitWith(
       &client, received, ValidCommands(), [](const auto&) { return true; },
       &error))
@@ -466,7 +490,7 @@ TEST(SyncAdapterClientTest, TimedOutTicksUseLatestValueMailbox) {
   ASSERT_EQ(client.WaitForTick(0ms, &received, &error),
             TickWaitResult::kReceived);
   EXPECT_EQ(received.header().tick_id(), 11U);
-  EXPECT_EQ(received.controller_state(), mujoco_sim::v1::TIMED_OUT);
+  EXPECT_EQ(received.controller_state(), mujoco_sim::v2::TIMED_OUT);
   ASSERT_TRUE(SyncAdapterClientTestPeer::CommitWith(
       &client, received, ValidCommands(), [](const auto&) { return true; },
       &error))
@@ -480,7 +504,7 @@ TEST(SyncAdapterClientTest, CommitCanonicalizesOrderAndIsIdempotent) {
   Publications publications;
   Deliver(&client, tick, &publications);
 
-  mujoco_sim::v1::Tick received;
+  mujoco_sim::v2::Tick received;
   std::string error;
   ASSERT_EQ(client.WaitForTick(0ms, &received, &error),
             TickWaitResult::kReceived);
@@ -518,14 +542,14 @@ TEST(SyncAdapterClientTest, InvalidCommandCanBeCorrectedBeforeCommit) {
                            const std::string& expected_error,
                            bool non_scalar = false) {
     auto tick = MakeTick(9);
-    if (non_scalar) {
-      tick.mutable_layout()->mutable_commands(0)->set_dimension(2);
-    }
     SyncAdapterClient client(MakeOptions());
     SyncAdapterClientTestPeer::Configure(&client, tick);
+    if (non_scalar) {
+      SyncAdapterClientTestPeer::SetFirstCommandDimension(&client, 2);
+    }
     Publications publications;
     Deliver(&client, tick, &publications);
-    mujoco_sim::v1::Tick received;
+    mujoco_sim::v2::Tick received;
     std::string error;
     EXPECT_EQ(client.WaitForTick(0ms, &received, &error),
               TickWaitResult::kReceived);
@@ -573,11 +597,28 @@ TEST(SyncAdapterClientTest, RejectsTickOutsideRegistrationIdentityAndLayout) {
   changed.mutable_header()->set_epoch(3);
   EXPECT_FALSE(SyncAdapterClientTestPeer::IsExpectedTick(&client, changed));
   changed = tick;
-  changed.mutable_layout()->mutable_commands(0)->set_name("other");
+  changed.set_layout_hash(std::string(mujoco_sim::protocol::kLayoutHashSize,
+                                      '\xff'));
   EXPECT_FALSE(SyncAdapterClientTestPeer::IsExpectedTick(&client, changed));
   changed = tick;
-  changed.set_controller_state(mujoco_sim::v1::PROVISIONAL);
+  changed.set_controller_state(mujoco_sim::v2::PROVISIONAL);
   EXPECT_FALSE(SyncAdapterClientTestPeer::IsExpectedTick(&client, changed));
+}
+
+TEST(SyncAdapterClientTest, LayoutHashMismatchIsATerminalProtocolError) {
+  SyncAdapterClient client(MakeOptions());
+  auto tick = MakeTick(9);
+  SyncAdapterClientTestPeer::Configure(&client, tick);
+  tick.set_layout_hash("short");
+
+  SyncAdapterClientTestPeer::HandleTickBytes(&client, tick);
+
+  mujoco_sim::v2::Tick received;
+  std::string error;
+  EXPECT_EQ(client.WaitForTick(0ms, &received, &error),
+            TickWaitResult::kError);
+  EXPECT_NE(error.find("event=layout_hash_mismatch"), std::string::npos);
+  EXPECT_EQ(client.layout_hash_mismatches(), 1U);
 }
 
 TEST(SyncAdapterClientTest, ConcurrentWaitIsRejectedAndTickWakesFirstWaiter) {
@@ -586,7 +627,7 @@ TEST(SyncAdapterClientTest, ConcurrentWaitIsRejectedAndTickWakesFirstWaiter) {
   SyncAdapterClientTestPeer::Configure(&client, tick);
   Publications publications;
 
-  mujoco_sim::v1::Tick first_tick;
+  mujoco_sim::v2::Tick first_tick;
   std::string first_error;
   auto first = std::async(std::launch::async, [&] {
     return client.WaitForTick(std::chrono::milliseconds::max(), &first_tick,
@@ -594,7 +635,7 @@ TEST(SyncAdapterClientTest, ConcurrentWaitIsRejectedAndTickWakesFirstWaiter) {
   });
   std::this_thread::sleep_for(20ms);
 
-  mujoco_sim::v1::Tick second_tick;
+  mujoco_sim::v2::Tick second_tick;
   std::string second_error;
   EXPECT_EQ(client.WaitForTick(0ms, &second_tick, &second_error),
             TickWaitResult::kError);
@@ -609,7 +650,7 @@ TEST(SyncAdapterClientTest, ConcurrentWaitIsRejectedAndTickWakesFirstWaiter) {
 TEST(SyncAdapterClientTest, StopWakesWaiter) {
   SyncAdapterClient client(MakeOptions());
   SyncAdapterClientTestPeer::Configure(&client, MakeTick(9));
-  mujoco_sim::v1::Tick output;
+  mujoco_sim::v2::Tick output;
   std::string error;
   auto waiting = std::async(std::launch::async, [&] {
     return client.WaitForTick(std::chrono::milliseconds::max(), &output,
@@ -640,7 +681,7 @@ TEST(SyncAdapterClientTest,
     return;
   }
 
-  mujoco_sim::v1::Tick output;
+  mujoco_sim::v2::Tick output;
   std::string error;
   auto waiting = std::async(std::launch::async, [&] {
     return client.WaitForTick(std::chrono::milliseconds::max(), &output,
@@ -658,7 +699,7 @@ TEST(SyncAdapterClientTest, MatchingServerErrorWakesWaiterWithReason) {
   SyncAdapterClient client(MakeOptions());
   const auto session = MakeTick(9);
   SyncAdapterClientTestPeer::Configure(&client, session);
-  mujoco_sim::v1::Tick output;
+  mujoco_sim::v2::Tick output;
   std::string error;
   auto waiting = std::async(std::launch::async, [&] {
     return client.WaitForTick(std::chrono::milliseconds::max(), &output,
@@ -666,18 +707,19 @@ TEST(SyncAdapterClientTest, MatchingServerErrorWakesWaiterWithReason) {
   });
   std::this_thread::sleep_for(20ms);
 
-  mujoco_sim::v1::ServerStatus status;
+  mujoco_sim::v2::ServerStatus status;
   status.mutable_header()->set_server_name("default");
   status.mutable_header()->set_epoch(2);
   status.mutable_header()->set_protocol_major(
       mujoco_sim::protocol::kProtocolMajor);
   status.mutable_header()->set_protocol_minor(
       mujoco_sim::protocol::kProtocolMinor);
-  status.set_state(mujoco_sim::v1::RUNNING);
-  auto* controller = status.add_controllers();
-  controller->set_controller_id("arm");
+  status.set_state(mujoco_sim::v2::RUNNING);
+  auto* controller = status.add_adapters();
+  controller->set_adapter_id("arm");
+  controller->set_role(mujoco_sim::v2::CONTROLLER);
   controller->set_session_id(4);
-  controller->set_state(mujoco_sim::v1::ERROR);
+  controller->set_state(mujoco_sim::v2::ERROR);
   controller->set_message("invalid actuator command");
   SyncAdapterClientTestPeer::HandleStatusBytes(&client, status);
 
@@ -690,7 +732,7 @@ TEST(SyncAdapterClientTest, MatchingServerErrorWakesWaiterWithReason) {
 TEST(SyncAdapterClientTest, SessionReplacementWakesWaiterWithReason) {
   SyncAdapterClient client(MakeOptions());
   SyncAdapterClientTestPeer::Configure(&client, MakeTick(9));
-  mujoco_sim::v1::Tick output;
+  mujoco_sim::v2::Tick output;
   std::string error;
   auto waiting = std::async(std::launch::async, [&] {
     return client.WaitForTick(std::chrono::milliseconds::max(), &output,
@@ -698,18 +740,19 @@ TEST(SyncAdapterClientTest, SessionReplacementWakesWaiterWithReason) {
   });
   std::this_thread::sleep_for(20ms);
 
-  mujoco_sim::v1::ServerStatus status;
+  mujoco_sim::v2::ServerStatus status;
   status.mutable_header()->set_server_name("default");
   status.mutable_header()->set_epoch(2);
   status.mutable_header()->set_protocol_major(
       mujoco_sim::protocol::kProtocolMajor);
   status.mutable_header()->set_protocol_minor(
       mujoco_sim::protocol::kProtocolMinor);
-  status.set_state(mujoco_sim::v1::RUNNING);
-  auto* controller = status.add_controllers();
-  controller->set_controller_id("arm");
+  status.set_state(mujoco_sim::v2::RUNNING);
+  auto* controller = status.add_adapters();
+  controller->set_adapter_id("arm");
+  controller->set_role(mujoco_sim::v2::CONTROLLER);
   controller->set_session_id(5);
-  controller->set_state(mujoco_sim::v1::ACTIVE);
+  controller->set_state(mujoco_sim::v2::ACTIVE);
   SyncAdapterClientTestPeer::HandleStatusBytes(&client, status);
 
   ASSERT_EQ(waiting.wait_for(1s), std::future_status::ready);
@@ -718,9 +761,9 @@ TEST(SyncAdapterClientTest, SessionReplacementWakesWaiterWithReason) {
 }
 
 TEST(SyncAdapterClientTest, ServerTerminalStatesWakeInfiniteWait) {
-  const auto make_status = [](mujoco_sim::v1::ServerState state,
+  const auto make_status = [](mujoco_sim::v2::ServerState state,
                               const std::string& message = {}) {
-    mujoco_sim::v1::ServerStatus status;
+    mujoco_sim::v2::ServerStatus status;
     status.mutable_header()->set_server_name("default");
     status.mutable_header()->set_epoch(2);
     status.mutable_header()->set_protocol_major(
@@ -734,7 +777,7 @@ TEST(SyncAdapterClientTest, ServerTerminalStatesWakeInfiniteWait) {
 
   SyncAdapterClient stopped_client(MakeOptions());
   SyncAdapterClientTestPeer::Configure(&stopped_client, MakeTick(9));
-  mujoco_sim::v1::Tick stopped_output;
+  mujoco_sim::v2::Tick stopped_output;
   std::string stopped_error;
   auto stopped_wait = std::async(std::launch::async, [&] {
     return stopped_client.WaitForTick(std::chrono::milliseconds::max(),
@@ -742,7 +785,7 @@ TEST(SyncAdapterClientTest, ServerTerminalStatesWakeInfiniteWait) {
   });
   std::this_thread::sleep_for(20ms);
   SyncAdapterClientTestPeer::HandleStatusBytes(
-      &stopped_client, make_status(mujoco_sim::v1::STOPPED));
+      &stopped_client, make_status(mujoco_sim::v2::STOPPED));
   ASSERT_EQ(stopped_wait.wait_for(1s), std::future_status::ready);
   EXPECT_EQ(stopped_wait.get(), TickWaitResult::kStopped);
   EXPECT_TRUE(stopped_error.empty());
@@ -750,7 +793,7 @@ TEST(SyncAdapterClientTest, ServerTerminalStatesWakeInfiniteWait) {
   SyncAdapterClient stopped_before_wait(MakeOptions());
   SyncAdapterClientTestPeer::Configure(&stopped_before_wait, MakeTick(9));
   SyncAdapterClientTestPeer::HandleStatusBytes(
-      &stopped_before_wait, make_status(mujoco_sim::v1::STOPPED));
+      &stopped_before_wait, make_status(mujoco_sim::v2::STOPPED));
   EXPECT_EQ(stopped_before_wait.WaitForTick(0ms, &stopped_output,
                                             &stopped_error),
             TickWaitResult::kStopped);
@@ -758,7 +801,7 @@ TEST(SyncAdapterClientTest, ServerTerminalStatesWakeInfiniteWait) {
 
   SyncAdapterClient error_client(MakeOptions());
   SyncAdapterClientTestPeer::Configure(&error_client, MakeTick(9));
-  mujoco_sim::v1::Tick error_output;
+  mujoco_sim::v2::Tick error_output;
   std::string error_message;
   auto error_wait = std::async(std::launch::async, [&] {
     return error_client.WaitForTick(std::chrono::milliseconds::max(),
@@ -767,7 +810,7 @@ TEST(SyncAdapterClientTest, ServerTerminalStatesWakeInfiniteWait) {
   std::this_thread::sleep_for(20ms);
   SyncAdapterClientTestPeer::HandleStatusBytes(
       &error_client,
-      make_status(mujoco_sim::v1::ERROR_PAUSED, "fatal simulation error"));
+      make_status(mujoco_sim::v2::ERROR_PAUSED, "fatal simulation error"));
   ASSERT_EQ(error_wait.wait_for(1s), std::future_status::ready);
   EXPECT_EQ(error_wait.get(), TickWaitResult::kError);
   EXPECT_EQ(error_message, "fatal simulation error");
@@ -787,7 +830,7 @@ TEST(SyncAdapterClientTest, ConcurrentActivateCallsAreSerialized) {
       first_entered_promise.set_value();
       release.wait();
     }
-    response->set_code(mujoco_sim::v1::OK);
+    response->set_code(mujoco_sim::v2::OK);
     return true;
   };
 
@@ -823,7 +866,7 @@ TEST(SyncAdapterClientTest, StopWinsRaceWithSuccessfulActivateResponse) {
   const auto call = [&](const auto&, auto* response, std::string*) {
     call_entered_promise.set_value();
     release.wait();
-    response->set_code(mujoco_sim::v1::OK);
+    response->set_code(mujoco_sim::v2::OK);
     return true;
   };
 
@@ -871,7 +914,7 @@ TEST(SyncAdapterClientTest, StopDoesNotBlockBehindCommitAndUnregisterCleansUp) {
   SyncAdapterClientTestPeer::SetRegistered(&client, true);
   Publications publications;
   Deliver(&client, tick, &publications);
-  mujoco_sim::v1::Tick received;
+  mujoco_sim::v2::Tick received;
   std::string wait_error;
   ASSERT_EQ(client.WaitForTick(0ms, &received, &wait_error),
             TickWaitResult::kReceived);
@@ -900,7 +943,7 @@ TEST(SyncAdapterClientTest, StopDoesNotBlockBehindCommitAndUnregisterCleansUp) {
         &client,
         [&](const auto&, auto* response, std::string*) {
           unregister_called = true;
-          response->set_code(mujoco_sim::v1::OK);
+          response->set_code(mujoco_sim::v2::OK);
           return true;
         },
         &unregister_error);
@@ -928,13 +971,13 @@ TEST(SyncAdapterClientTest, FailedUnregisterRemainsRetryableAndWarningsMerge) {
   const auto call = [&](const auto& request, auto* response,
                         std::string* error) {
     ++calls;
-    EXPECT_EQ(request.controller_id(), "arm");
+    EXPECT_EQ(request.adapter_id(), "arm");
     EXPECT_EQ(request.session_id(), 4U);
     if (calls == 1) {
       *error = "transport unavailable";
       return false;
     }
-    response->set_code(mujoco_sim::v1::NOT_FOUND);
+    response->set_code(mujoco_sim::v2::NOT_FOUND);
     return true;
   };
 
@@ -956,7 +999,7 @@ TEST(SyncAdapterClientTest, SuccessfulUnregisterWakesConcurrentWaitAsStopped) {
   SyncAdapterClient client(MakeOptions());
   SyncAdapterClientTestPeer::Configure(&client, MakeTick(9));
   SyncAdapterClientTestPeer::SetRegistered(&client, true);
-  mujoco_sim::v1::Tick output;
+  mujoco_sim::v2::Tick output;
   std::string wait_error;
   auto waiting = std::async(std::launch::async, [&] {
     return client.WaitForTick(std::chrono::milliseconds::max(), &output,
@@ -977,7 +1020,7 @@ TEST(SyncAdapterClientTest, SuccessfulUnregisterWakesConcurrentWaitAsStopped) {
   const bool unregistered = SyncAdapterClientTestPeer::UnregisterWith(
       &client,
       [](const auto&, auto* response, std::string*) {
-        response->set_code(mujoco_sim::v1::OK);
+        response->set_code(mujoco_sim::v2::OK);
         return true;
       },
       &unregister_error);

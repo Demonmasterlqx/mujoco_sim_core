@@ -30,7 +30,7 @@ int main(int argc, char** argv) {
 
   mujoco_sim::adapter_sdk::AdapterOptions options;
   options.server_name = argv[1];
-  options.controller_id = "sdk_lifecycle_probe";
+  options.adapter_id = "sdk_lifecycle_probe";
   options.observation_names = {"hinge_pos", "hinge_vel"};
   options.command_names = {"hinge_motor"};
   options.timeout_ms = 2000;
@@ -48,10 +48,10 @@ int main(int argc, char** argv) {
     return 1;
   }
 
-  mujoco_sim::v1::Tick first;
+  mujoco_sim::v2::Tick first;
   const auto first_result = client.WaitForTick(5s, &first, &error);
   if (first_result != mujoco_sim::adapter_sdk::TickWaitResult::kReceived ||
-      first.controller_state() != mujoco_sim::v1::ACTIVE) {
+      first.controller_state() != mujoco_sim::v2::ACTIVE) {
     std::cerr << "did not receive initial ACTIVE Tick: result="
               << static_cast<int>(first_result)
               << " state=" << static_cast<int>(first.controller_state())
@@ -73,7 +73,7 @@ int main(int argc, char** argv) {
   const auto deadline = std::chrono::steady_clock::now() + 5s;
   bool recovered = false;
   while (std::chrono::steady_clock::now() < deadline) {
-    mujoco_sim::v1::Tick tick;
+    mujoco_sim::v2::Tick tick;
     const auto result = client.WaitForTick(500ms, &tick, &error);
     if (result == mujoco_sim::adapter_sdk::TickWaitResult::kTimeout) {
       continue;
@@ -86,7 +86,7 @@ int main(int argc, char** argv) {
       std::cerr << "recovery Commit failed: " << error << '\n';
       break;
     }
-    if (tick.controller_state() == mujoco_sim::v1::ACTIVE &&
+    if (tick.controller_state() == mujoco_sim::v2::ACTIVE &&
         tick.header().tick_id() > initial_tick_id) {
       recovered = true;
       break;

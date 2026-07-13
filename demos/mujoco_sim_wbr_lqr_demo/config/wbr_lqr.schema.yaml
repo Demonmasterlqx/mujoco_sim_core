@@ -12,11 +12,11 @@ fields:
         default: wbr
         non_empty: true
         cli: [--server-name]
-      controller_id:
+      adapter_id:
         type: string
         default: wbr_lqr_controller
         non_empty: true
-        cli: [--controller-id]
+        cli: [--adapter-id]
       timeout_ms:
         type: uint32
         default: 5000

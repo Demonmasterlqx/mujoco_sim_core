@@ -10,6 +10,7 @@
 #include <utility>
 
 #include <ecal/ecal.h>
+#include <mujoco_sim/protocol/identifier.hpp>
 #include <mujoco_sim/protocol/topics.hpp>
 
 #include "ecal_runtime.hpp"
@@ -24,14 +25,14 @@ eCAL::SServiceMethodInformation MethodInfo(const std::string& method) {
 }
 
 std::optional<std::uint64_t> BytesPerPixel(
-    mujoco_sim::v1::StreamFormat format) {
+    mujoco_sim::v2::StreamFormat format) {
   switch (format) {
-    case mujoco_sim::v1::RGB8:
+    case mujoco_sim::v2::RGB8:
       return 3;
-    case mujoco_sim::v1::DEPTH32F:
-    case mujoco_sim::v1::SEGMENTATION32U:
+    case mujoco_sim::v2::DEPTH32F:
+    case mujoco_sim::v2::SEGMENTATION32U:
       return 4;
-    case mujoco_sim::v1::XYZ32F:
+    case mujoco_sim::v2::XYZ32F:
       return 12;
     default:
       return std::nullopt;
@@ -59,8 +60,9 @@ SensorStreamClient::~SensorStreamClient() {
 }
 
 bool SensorStreamClient::ValidateOptions(std::string* error_message) const {
-  if (options_.server_name.empty()) {
-    *error_message = "server_name is required";
+  if (!mujoco_sim::protocol::ValidateIdentifier(
+          options_.server_name,
+          mujoco_sim::protocol::IdentifierKind::kServer, error_message)) {
     return false;
   }
   if (options_.stream_names.empty()) {
@@ -69,8 +71,9 @@ bool SensorStreamClient::ValidateOptions(std::string* error_message) const {
   }
   std::unordered_set<std::string> names;
   for (const auto& name : options_.stream_names) {
-    if (name.empty()) {
-      *error_message = "stream name must not be empty";
+    if (!mujoco_sim::protocol::ValidateIdentifier(
+            name, mujoco_sim::protocol::IdentifierKind::kStream,
+            error_message)) {
       return false;
     }
     if (!names.insert(name).second) {
@@ -195,7 +198,7 @@ bool SensorStreamClient::Start(std::string* error_message) {
 }
 
 bool SensorStreamClient::DiscoverStreams(std::string* error_message) {
-  mujoco_sim::v1::GetSensorStreamsRequest request;
+  mujoco_sim::v2::GetSensorStreamsRequest request;
   request.set_server_name(options_.server_name);
   request.set_protocol_major(mujoco_sim::protocol::kProtocolMajor);
   request.set_protocol_minor(mujoco_sim::protocol::kProtocolMinor);
@@ -203,15 +206,11 @@ bool SensorStreamClient::DiscoverStreams(std::string* error_message) {
                    &discovery_, error_message)) {
     return false;
   }
-  if (discovery_.code() != mujoco_sim::v1::OK) {
+  if (discovery_.code() != mujoco_sim::v2::OK) {
     *error_message = discovery_.message();
     return false;
   }
-  if (discovery_.epoch() == 0 ||
-      discovery_.effective_protocol_major() !=
-          mujoco_sim::protocol::kProtocolMajor ||
-      discovery_.effective_protocol_minor() !=
-          mujoco_sim::protocol::kProtocolMinor) {
+  if (discovery_.epoch() == 0) {
     *error_message = "invalid sensor stream discovery response";
     return false;
   }
@@ -220,7 +219,7 @@ bool SensorStreamClient::DiscoverStreams(std::string* error_message) {
 
 bool SensorStreamClient::ConfigureDiscoveredStreams(
     std::string* error_message) {
-  std::unordered_map<std::string, const mujoco_sim::v1::StreamDescriptor*>
+  std::unordered_map<std::string, const mujoco_sim::v2::StreamDescriptor*>
       available;
   for (const auto& descriptor : discovery_.streams()) {
     if (!available.emplace(descriptor.name(), &descriptor).second) {
@@ -252,7 +251,7 @@ bool SensorStreamClient::ConfigureDiscoveredStreams(
 }
 
 bool SensorStreamClient::ValidateDescriptor(
-    const mujoco_sim::v1::StreamDescriptor& descriptor,
+    const mujoco_sim::v2::StreamDescriptor& descriptor,
     std::string* error_message) const {
   const auto bytes_per_pixel = BytesPerPixel(descriptor.format());
   if (descriptor.name().empty() || !bytes_per_pixel.has_value()) {
@@ -289,7 +288,7 @@ bool SensorStreamClient::ValidateDescriptor(
     return false;
   }
   if (descriptor.frame_convention() ==
-      mujoco_sim::v1::FRAME_CONVENTION_UNSPECIFIED) {
+      mujoco_sim::v2::FRAME_CONVENTION_UNSPECIFIED) {
     *error_message = "sensor stream frame convention is unspecified: " +
                      descriptor.name();
     return false;
@@ -466,7 +465,7 @@ void SensorStreamClient::Stop() {
   condition_.notify_all();
 }
 
-std::optional<mujoco_sim::v1::StreamDescriptor>
+std::optional<mujoco_sim::v2::StreamDescriptor>
 SensorStreamClient::descriptor(const std::string& stream_name) const {
   std::lock_guard lock(mutex_);
   const auto found = streams_.find(stream_name);
@@ -509,9 +508,9 @@ bool SensorStreamClient::IsExpectedFrame(
   if (header.header().server_name() != options_.server_name ||
       header.header().epoch() != discovery_.epoch() ||
       header.header().protocol_major() !=
-          discovery_.effective_protocol_major() ||
+          mujoco_sim::protocol::kProtocolMajor ||
       header.header().protocol_minor() !=
-          discovery_.effective_protocol_minor()) {
+          mujoco_sim::protocol::kProtocolMinor) {
     *error_message = "sensor stream frame identity mismatch";
     return false;
   }
@@ -576,7 +575,7 @@ void SensorStreamClient::HandleStatusBytes(const void* data,
       size > static_cast<std::size_t>(std::numeric_limits<int>::max())) {
     return;
   }
-  mujoco_sim::v1::ServerStatus status;
+  mujoco_sim::v2::ServerStatus status;
   if (!status.ParseFromArray(data, static_cast<int>(size))) {
     return;
   }
@@ -588,8 +587,8 @@ void SensorStreamClient::HandleStatusBytes(const void* data,
     if (!accepting_samples_ || stop_requested_ ||
         header.server_name() != options_.server_name ||
         header.epoch() != discovery_.epoch() ||
-        header.protocol_major() != discovery_.effective_protocol_major() ||
-        header.protocol_minor() != discovery_.effective_protocol_minor()) {
+        header.protocol_major() != mujoco_sim::protocol::kProtocolMajor ||
+        header.protocol_minor() != mujoco_sim::protocol::kProtocolMinor) {
       return;
     }
     if (last_status_tick_id_.has_value() &&
@@ -598,11 +597,11 @@ void SensorStreamClient::HandleStatusBytes(const void* data,
     }
     last_status_tick_id_ = header.tick_id();
 
-    if (status.state() == mujoco_sim::v1::STOPPED) {
+    if (status.state() == mujoco_sim::v2::STOPPED) {
       accepting_samples_ = false;
       stop_requested_ = true;
       terminal_error_recorded = true;
-    } else if (status.state() == mujoco_sim::v1::ERROR_PAUSED) {
+    } else if (status.state() == mujoco_sim::v2::ERROR_PAUSED) {
       const std::string error = status.message().empty()
                                     ? "server entered ERROR_PAUSED"
                                     : status.message();
@@ -617,11 +616,11 @@ void SensorStreamClient::HandleStatusBytes(const void* data,
       terminal_error_recorded = true;
     }
 
-    if (status.state() != mujoco_sim::v1::STOPPED) {
+    if (status.state() != mujoco_sim::v2::STOPPED) {
       for (const auto& stream_status : status.streams()) {
         const auto found = streams_.find(stream_status.name());
         if (found == streams_.end() ||
-            stream_status.state() != mujoco_sim::v1::STREAM_ERROR) {
+            stream_status.state() != mujoco_sim::v2::STREAM_ERROR) {
           continue;
         }
         auto& stream = *found->second;
@@ -724,6 +723,7 @@ SensorStreamClient::CallbackLease::CallbackLease(
   std::lock_guard lock(state_->mutex);
   if (state_->enabled && state_->client != nullptr) {
     ++state_->active_callbacks;
+    ++state_->callbacks_by_thread[std::this_thread::get_id()];
     client_ = state_->client;
   }
 }
@@ -735,17 +735,23 @@ SensorStreamClient::CallbackLease::~CallbackLease() {
   {
     std::lock_guard lock(state_->mutex);
     --state_->active_callbacks;
+    const auto thread_id = std::this_thread::get_id();
+    auto found = state_->callbacks_by_thread.find(thread_id);
+    if (found != state_->callbacks_by_thread.end() && --found->second == 0) {
+      state_->callbacks_by_thread.erase(found);
+    }
   }
   state_->condition.notify_all();
 }
 
 void SensorStreamClient::StopSampleReception() {
+  const auto callback_state = callback_state_;
   {
-    std::lock_guard callback_lock(callback_state_->mutex);
-    callback_state_->enabled = false;
-    callback_state_->client = nullptr;
+    std::lock_guard callback_lock(callback_state->mutex);
+    callback_state->enabled = false;
+    callback_state->client = nullptr;
   }
-  callback_state_->condition.notify_all();
+  callback_state->condition.notify_all();
   {
     std::lock_guard lock(mutex_);
     accepting_samples_ = false;
@@ -758,10 +764,15 @@ void SensorStreamClient::StopSampleReception() {
   if (status_subscriber_) {
     status_subscriber_->RemoveReceiveCallback();
   }
-  std::unique_lock callback_lock(callback_state_->mutex);
-  callback_state_->condition.wait(
-      callback_lock,
-      [this] { return callback_state_->active_callbacks == 0; });
+  std::unique_lock callback_lock(callback_state->mutex);
+  const auto current = callback_state->callbacks_by_thread.find(
+      std::this_thread::get_id());
+  const std::size_t callbacks_on_this_thread =
+      current == callback_state->callbacks_by_thread.end() ? 0
+                                                           : current->second;
+  callback_state->condition.wait(callback_lock, [&] {
+    return callback_state->active_callbacks <= callbacks_on_this_thread;
+  });
   callback_lock.unlock();
   subscribers_.clear();
   status_subscriber_.reset();

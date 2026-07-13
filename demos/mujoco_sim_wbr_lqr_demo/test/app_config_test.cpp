@@ -21,7 +21,7 @@ TEST(AppConfigTest, LoadsShippedGeneratedConfig) {
   demo::AppConfig config;
   ASSERT_TRUE(demo::BuildAppConfig(generated, &config, &error)) << error;
   EXPECT_EQ(config.adapter.server_name, "wbr");
-  EXPECT_EQ(config.adapter.max_ticks, 6000u);
+  EXPECT_EQ(config.adapter.max_ticks, 0u);
   EXPECT_EQ(config.adapter.interfaces.motors[0].semantic_name,
             "left_joint_1");
   EXPECT_EQ(config.adapter.interfaces.motors[5].effort_command,

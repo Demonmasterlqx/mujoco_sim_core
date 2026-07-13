@@ -1,7 +1,7 @@
 # mujoco_sim_protocol
 
-`mujoco_sim_protocol` 是 MuJoCo 仿真器 V1 lockstep 接口的协议包。它以
-[sync.proto](proto/mujoco_sim/v1/sync.proto) 为协议真相，生成 C++ Protobuf
+`mujoco_sim_protocol` 是 MuJoCo 仿真器 V2 lockstep 接口的协议包。它以
+[sync.proto](proto/mujoco_sim/v2/sync.proto) 为协议真相，生成 C++ Protobuf
 绑定，并提供 registry service 与运行期 topic 的统一命名函数。
 
 | 项目 | 值 |
@@ -9,15 +9,15 @@
 | 包版本 | `0.1.0` |
 | colcon 构建类型 | `cmake` |
 | C++ 标准 | C++20 |
-| 协议版本 | `1.2`（向 1.1 Controller 兼容） |
+| 协议版本 | `2.0`（精确匹配） |
 | 许可证 | `Apache-2.0` |
 
 ## 职责与边界
 
 本包负责：
 
-- 定义 legacy Controller 与通用 Adapter/Observer 注册、激活、注销消息。
-- 定义 `Tick`、`ObservationFrame`、原子 `AdapterCommit`、两类 Heartbeat 和统一状态消息。
+- 定义统一 Adapter/Observer 注册、激活、注销消息。
+- 定义 `Tick`、`ObservationFrame`、原子 `AdapterCommit`、`AdapterHeartbeat` 和统一状态消息。
 - 定义静态 sensor stream catalog、相机内参/分割标签、frame convention 与 stream status。
 - 提供小 Protobuf header + raw payload 的二进制 framing，避免把大图像/点云编码为 repeated
   Protobuf scalar。
@@ -93,9 +93,9 @@ target_link_libraries(protocol_consumer PRIVATE mujoco_sim::protocol)
 | --- | --- |
 | `<mujoco_sim/protocol/topics.hpp>` | 版本常量、service/topic 命名函数、registry 方法名 |
 | `<mujoco_sim/protocol/stream_frame.hpp>` | raw stream framing 序列化/解析、24-byte 前缀、1 MiB header 与 512 MiB payload 上限 |
-| `<mujoco_sim/v1/sync.pb.h>` | 由 `sync.proto` 生成的全部 C++ 消息与枚举 |
+| `<mujoco_sim/v2/sync.pb.h>` | 由 `sync.proto` 生成的全部 C++ 消息与枚举 |
 
-生成类型位于 `mujoco_sim::v1` 命名空间，命名辅助 API 位于
+生成类型位于 `mujoco_sim::v2` 命名空间，命名辅助 API 位于
 `mujoco_sim::protocol` 命名空间。
 
 ### 消息与枚举
@@ -111,47 +111,41 @@ target_link_libraries(protocol_consumer PRIVATE mujoco_sim::protocol)
 | `CommitStatus` | `COMMIT_OK` 或 `COMMIT_ERROR` |
 | `Header` | `server_name`、`session_id`、`epoch`、`tick_id`、wall 时间戳、协议版本和可选仿真时间 |
 | `ResourceDescriptor` | 资源名、类型、维度、MuJoCo stage/interval/delay/object/unit/interpolation 元数据和可选 control range |
-| `ResourceLayout` | 某控制器获配的 observations 与 commands |
-| `GetAvailableResourcesRequest/Response` | 查询服务端可用资源与协商后的协议版本 |
-| `RegisterControllerRequest/Response` | 申请资源并取得 `session_id`、`epoch` 与 layout |
-| `ActivateControllerRequest/Response` | 将已注册控制器从 provisional 转为 active |
-| `UnregisterControllerRequest/Response` | 注销控制器 |
-| `Register/Activate/UnregisterAdapter*` | role-aware Controller/Observer 生命周期；Controller 仍可使用 legacy API |
+| `ResourceLayout` | Adapter 获配的 observations、commands 与 128-bit `layout_hash` |
+| `GetAvailableResourcesRequest/Response` | 按精确 V2.0 查询服务端可用资源 |
+| `Register/Activate/UnregisterAdapter*` | Controller/Observer 唯一 lifecycle API，以 `role` 区分 |
 | `ObservationDelivery` | Observer 的 every-N-step 或 simulation-period 二选一规则 |
 | `ObservationBlock` | 一个命名 observation 的 `double` 数组 |
 | `ActuatorCommandBlock` | 一个命名 actuator 的 `double` 数组 |
-| `Tick` | header、controller、layout、observations 与 controller state |
+| `Tick` | header、`adapter_id`、16-byte layout hash、observations 与 controller state |
 | `ObservationFrame` | post-step Observer 小数据、独立 sequence，不要求 Commit |
-| `AdapterCommit` | header、controller、提交状态、整组 actuator commands 与错误文本 |
-| `Heartbeat` | controller 及其当前协议 header |
+| `AdapterCommit` | header、`adapter_id`、提交状态、整组 actuator commands 与错误文本 |
 | `AdapterHeartbeat` | role-aware keepalive 与 Observer 最后接收 sequence |
-| `ControllerStatus` | session、最后 heartbeat/Commit Tick、状态起始 Tick、累计超时数、Barrier 成员标志、状态与说明 |
 | `AdapterStatus` | Controller/Observer 的统一 lifecycle 视图 |
 | `StreamDescriptor`、`GetSensorStreams*` | 静态 stream topic、shape、stride、frame、rate、内参与 label catalog |
 | `StreamFrameHeader`、`StreamStatus` | 每帧 identity/sequence/capture/drop 元数据和运行指标 |
-| `ServerStatus` | 服务端状态、legacy controllers、统一 adapters 与 streams |
+| `ServerStatus` | 服务端状态、统一 adapters 与 streams |
 
-完整字段号、枚举值和 wire contract 以 [sync.proto](proto/mujoco_sim/v1/sync.proto)
+完整字段号、枚举值和 wire contract 以 [sync.proto](proto/mujoco_sim/v2/sync.proto)
 为准。
 
 ### 命名 API
 
-版本常量为 `kProtocolMajor == 1`、`kProtocolMinor == 2`。命名函数不会访问
+版本常量为 `kProtocolMajor == 2`、`kProtocolMinor == 0`。命名函数不会访问
 传输层：
 
-| API | `server_name=default`、`controller_id=arm` 时的结果 |
+| API | `server_name=default`、`adapter_id=arm` 时的结果 |
 | --- | --- |
-| `RegistryServiceName(server_name)` | `mujoco_sim.default.registry` |
-| `TickTopicName(server_name, controller_id)` | `mujoco_sim/default/tick/arm` |
-| `CommitTopicName(server_name)` | `mujoco_sim/default/commit` |
-| `HeartbeatTopicName(server_name)` | `mujoco_sim/default/heartbeat` |
-| `AdapterHeartbeatTopicName(server_name)` | `mujoco_sim/default/adapter_heartbeat` |
-| `ObservationTopicName(server_name, adapter_id)` | `mujoco_sim/default/observation/arm` |
-| `SensorStreamTopicName(server_name, stream_name)` | `mujoco_sim/default/sensor/arm` |
-| `StatusTopicName(server_name)` | `mujoco_sim/default/status` |
+| `RegistryServiceName(server_name)` | `mujoco_sim.v2.default.registry` |
+| `TickTopicName(server_name, adapter_id)` | `mujoco_sim/v2/default/tick/arm` |
+| `CommitTopicName(server_name)` | `mujoco_sim/v2/default/commit` |
+| `AdapterHeartbeatTopicName(server_name)` | `mujoco_sim/v2/default/adapter_heartbeat` |
+| `ObservationTopicName(server_name, adapter_id)` | `mujoco_sim/v2/default/observation/arm` |
+| `SensorStreamTopicName(server_name, stream_name)` | `mujoco_sim/v2/default/sensor/arm` |
+| `StatusTopicName(server_name)` | `mujoco_sim/v2/default/status` |
 
-除 legacy Controller 方法外，registry 还定义 `RegisterAdapter`、`ActivateAdapter`、
-`UnregisterAdapter` 和 `GetSensorStreams` 方法名常量。
+Registry 只定义 `GetAvailableResources`、`RegisterAdapter`、`ActivateAdapter`、
+`UnregisterAdapter` 和 `GetSensorStreams` 五个方法。
 
 ## 最小可用示例
 
@@ -163,18 +157,18 @@ target_link_libraries(protocol_consumer PRIVATE mujoco_sim::protocol)
 #include <string>
 
 #include <mujoco_sim/protocol/topics.hpp>
-#include <mujoco_sim/v1/sync.pb.h>
+#include <mujoco_sim/v2/sync.pb.h>
 
 int main() {
   const std::string server_name = "default";
-  const std::string controller_id = "arm";
+  const std::string adapter_id = "arm";
 
   std::cout << mujoco_sim::protocol::RegistryServiceName(server_name) << '\n';
-  std::cout << mujoco_sim::protocol::TickTopicName(server_name, controller_id)
+  std::cout << mujoco_sim::protocol::TickTopicName(server_name, adapter_id)
             << '\n';
   std::cout << mujoco_sim::protocol::CommitTopicName(server_name) << '\n';
 
-  mujoco_sim::v1::AdapterCommit outgoing;
+  mujoco_sim::v2::AdapterCommit outgoing;
   auto* header = outgoing.mutable_header();
   header->set_server_name(server_name);
   header->set_session_id(42);
@@ -182,8 +176,8 @@ int main() {
   header->set_tick_id(3);
   header->set_protocol_major(mujoco_sim::protocol::kProtocolMajor);
   header->set_protocol_minor(mujoco_sim::protocol::kProtocolMinor);
-  outgoing.set_controller_id(controller_id);
-  outgoing.set_status(mujoco_sim::v1::COMMIT_OK);
+  outgoing.set_adapter_id(adapter_id);
+  outgoing.set_status(mujoco_sim::v2::COMMIT_OK);
 
   auto* command = outgoing.add_commands();
   command->set_name("hinge_motor");
@@ -195,7 +189,7 @@ int main() {
     return 1;
   }
 
-  mujoco_sim::v1::AdapterCommit incoming;
+  mujoco_sim::v2::AdapterCommit incoming;
   if (!incoming.ParseFromString(payload)) {
     std::cerr << "parse failed\n";
     return 2;
@@ -234,16 +228,8 @@ top-left `RGB8`；`DEPTH32F` 和 `XYZ32F` 是 little-endian IEEE-754 binary32，
 
 - Proto3 枚举的默认值是各枚举的 `*_UNSPECIFIED == 0`；尤其
   `ErrorCode::OK == 1`，不能把未设置的 `code` 当成成功。
-- 当前协议常量是 `1.2`。协议包只声明版本；版本校验和 minor version 协商由 Core
-  或其他消费者实现。
-- V1.1 在保持既有枚举数值和字段号不变的基础上新增 `ControllerState::TIMED_OUT == 5`；
-  `ControllerStatus` 新增 optional `last_commit_tick_id`、`state_since_tick_id`、
-  `timeout_count` 和 `required_for_barrier`。`Tick::controller_state` 用于区分正常控制 Tick 与
-  超时恢复 Tick。
-- Core 与协议 1.0 controller 协商到 minor 0 时，超时恢复 Tick 的线上 state 降级为旧 SDK
-  可识别的 `ACTIVE`；这是宿主的兼容策略，不改变 V1.1 枚举定义。
-- V1.2 只追加消息、枚举和新字段；legacy Controller registry、Tick、Commit 与 Heartbeat
-  的既有字段号和行为保持不变。`Header.simulation_time_s` 是 optional，旧端会忽略它。
+- 当前协议固定为 `2.0`；所有边界精确匹配 major/minor，不协商或降级。
+- `ResourceLayout.layout_hash` 与 Tick 的 16-byte hash 必须一致；Tick 不重复携带 layout。
 - Controller Tick 中的 observation 是同步控制契约的一部分；`ObservationFrame` 是新增的
   sensor-only 小数据通道，不能替代或削弱 Controller Tick 的 observation。
 - `Header` 的 `server_name`、`session_id`、`epoch` 和 `tick_id` 共同标识一次
@@ -251,9 +237,9 @@ top-left `RGB8`；`DEPTH32F` 和 `XYZ32F` 是 little-endian IEEE-754 binary32，
 - `AdapterCommit` 表达一组命令，但消息类本身不保证原子性、资源所有权或 barrier；
   这些语义由 [mujoco_sim_core](../mujoco_sim_core/Readme.md) 校验。
 - 命名函数直接拼接输入，不检查空字符串，也不转义 `.`、`/` 等分隔符。调用方必须保证
-  `server_name` 和 `controller_id` 在整个系统中一致且适合当前传输层。
+  `server_name` 和 `adapter_id` 在整个系统中一致且符合 identifier grammar。
 - 生成头文件位于构建目录并在安装时复制，不作为手写源码维护。协议变更应修改
-  `sync.proto`，且兼容演进时不能复用既有字段号或枚举数值。
+  `sync.proto`。
 
 ## 测试
 
@@ -271,10 +257,8 @@ colcon test-result \
   --verbose
 ```
 
-[protocol_test.cpp](test/protocol_test.cpp) 当前覆盖 legacy 与新增 service/topic 命名、
-Controller/Observer/Stream 消息序列化、仿真时间、V1.1 的 18 组固定 golden wire bytes、
-85 个旧字段号和 31 个旧枚举值，以及 raw frame 固定 golden bytes、round-trip、坏
-Protobuf header、major/minor、前缀/header 长度冲突、magic 和 payload 上限拒绝。
+[protocol_test.cpp](test/protocol_test.cpp) 覆盖严格 V2 schema、版本化 endpoint、identifier、
+128-bit layout hash 固定向量，以及 raw frame golden bytes、round-trip 和边界拒绝。
 
 ## 相关包
 

@@ -6,7 +6,7 @@
 
 #include <mujoco_sim/adapter_sdk/sensor_stream_client.hpp>
 #include <mujoco_sim/sensor_demo/icp_mapper.hpp>
-#include <mujoco_sim/v1/sync.pb.h>
+#include <mujoco_sim/v2/sync.pb.h>
 
 namespace mujoco_sim::sensor_demo {
 
@@ -26,7 +26,7 @@ struct StreamValidationSummary {
 
 bool ValidateCameraSample(
     const mujoco_sim::adapter_sdk::OwnedStreamSample& sample,
-    const mujoco_sim::v1::StreamDescriptor& descriptor,
+    const mujoco_sim::v2::StreamDescriptor& descriptor,
     CameraStreamKind expected_kind, StreamValidationSummary* summary,
     std::string* error_message);
 
@@ -34,7 +34,7 @@ bool ValidateCameraSample(
 // dense cloud passed to PCL.
 bool DecodeXyzPointCloud(
     const mujoco_sim::adapter_sdk::OwnedStreamSample& sample,
-    const mujoco_sim::v1::StreamDescriptor& descriptor,
+    const mujoco_sim::v2::StreamDescriptor& descriptor,
     PointCloud* cloud, std::string* error_message);
 
 bool SaveRgbScreenshot(

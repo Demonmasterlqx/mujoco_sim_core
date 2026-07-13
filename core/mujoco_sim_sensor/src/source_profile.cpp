@@ -17,11 +17,11 @@ namespace {
 
 constexpr double kPi = 3.14159265358979323846264338327950288;
 
-bool IsCameraFormat(mujoco_sim::v1::StreamFormat format) {
-  return format == mujoco_sim::v1::RGB8 ||
-         format == mujoco_sim::v1::DEPTH32F ||
-         format == mujoco_sim::v1::SEGMENTATION32U ||
-         format == mujoco_sim::v1::XYZ32F;
+bool IsCameraFormat(mujoco_sim::v2::StreamFormat format) {
+  return format == mujoco_sim::v2::RGB8 ||
+         format == mujoco_sim::v2::DEPTH32F ||
+         format == mujoco_sim::v2::SEGMENTATION32U ||
+         format == mujoco_sim::v2::XYZ32F;
 }
 
 bool ValidateSnapshot(const core::SimulationSnapshot& snapshot,
@@ -34,7 +34,7 @@ bool ValidateSnapshot(const core::SimulationSnapshot& snapshot,
 
 bool ComputePinholeIntrinsics(const mjModel* model, int camera_id,
                               std::uint32_t width, std::uint32_t height,
-                              mujoco_sim::v1::CameraIntrinsics* intrinsics,
+                              mujoco_sim::v2::CameraIntrinsics* intrinsics,
                               std::string* error_message) {
   if (model->cam_projection[camera_id] != mjPROJ_PERSPECTIVE) {
     return Fail("orthographic MuJoCo cameras are not supported",
@@ -88,13 +88,13 @@ bool ComputePinholeIntrinsics(const mjModel* model, int camera_id,
   return true;
 }
 
-void PopulateDescriptorCommon(mujoco_sim::v1::StreamDescriptor* descriptor,
+void PopulateDescriptorCommon(mujoco_sim::v2::StreamDescriptor* descriptor,
                               std::string_view name,
-                              mujoco_sim::v1::StreamFormat format,
+                              mujoco_sim::v2::StreamFormat format,
                               std::uint32_t width, std::uint32_t height,
                               const StreamShape& shape,
                               std::string_view frame_id,
-                              mujoco_sim::v1::FrameConvention convention,
+                              mujoco_sim::v2::FrameConvention convention,
                               std::string_view source_name, double rate_hz) {
   descriptor->set_name(name.data(), name.size());
   descriptor->set_format(format);
@@ -110,7 +110,7 @@ void PopulateDescriptorCommon(mujoco_sim::v1::StreamDescriptor* descriptor,
 
 }  // namespace
 
-bool StreamShapeFor(mujoco_sim::v1::StreamFormat format,
+bool StreamShapeFor(mujoco_sim::v2::StreamFormat format,
                     std::uint32_t width, std::uint32_t height,
                     StreamShape* shape, std::string* error_message) {
   if (shape == nullptr) {
@@ -128,14 +128,14 @@ bool StreamShapeFor(mujoco_sim::v1::StreamFormat format,
 
   std::uint64_t bytes_per_pixel = 0;
   switch (format) {
-    case mujoco_sim::v1::RGB8:
+    case mujoco_sim::v2::RGB8:
       bytes_per_pixel = 3;
       break;
-    case mujoco_sim::v1::DEPTH32F:
-    case mujoco_sim::v1::SEGMENTATION32U:
+    case mujoco_sim::v2::DEPTH32F:
+    case mujoco_sim::v2::SEGMENTATION32U:
       bytes_per_pixel = 4;
       break;
-    case mujoco_sim::v1::XYZ32F:
+    case mujoco_sim::v2::XYZ32F:
       bytes_per_pixel = 12;
       break;
     default:
@@ -169,7 +169,7 @@ bool ValidateCaptureMetadata(const CaptureMetadata& metadata,
 
 bool BuildCameraDescriptors(
     const core::SimulationSnapshot& snapshot, const CameraProfile& profile,
-    std::vector<mujoco_sim::v1::StreamDescriptor>* descriptors,
+    std::vector<mujoco_sim::v2::StreamDescriptor>* descriptors,
     int* camera_id, std::string* error_message) {
   ClearError(error_message);
   if (descriptors == nullptr || camera_id == nullptr) {
@@ -201,7 +201,7 @@ bool BuildCameraDescriptors(
                 error_message);
   }
 
-  mujoco_sim::v1::CameraIntrinsics intrinsics;
+  mujoco_sim::v2::CameraIntrinsics intrinsics;
   if (!ComputePinholeIntrinsics(model, id, profile.width, profile.height,
                                 &intrinsics, error_message)) {
     return false;
@@ -209,7 +209,7 @@ bool BuildCameraDescriptors(
 
   std::set<int> formats;
   std::set<std::string> stream_names;
-  std::vector<mujoco_sim::v1::StreamDescriptor> built_descriptors;
+  std::vector<mujoco_sim::v2::StreamDescriptor> built_descriptors;
   built_descriptors.reserve(profile.outputs.size());
   for (const CameraOutput& output : profile.outputs) {
     if (!IsCameraFormat(output.format)) {
@@ -234,10 +234,10 @@ bool BuildCameraDescriptors(
     auto& descriptor = built_descriptors.emplace_back();
     PopulateDescriptorCommon(&descriptor, output.stream_name, output.format,
                              profile.width, profile.height, shape,
-                             profile.frame_id, mujoco_sim::v1::ROS_OPTICAL,
+                             profile.frame_id, mujoco_sim::v2::ROS_OPTICAL,
                              profile.camera_name, profile.rate_hz);
     *descriptor.mutable_camera_intrinsics() = intrinsics;
-    if (output.format == mujoco_sim::v1::SEGMENTATION32U) {
+    if (output.format == mujoco_sim::v2::SEGMENTATION32U) {
       for (int geom_id = 0; geom_id < model->ngeom; ++geom_id) {
         auto* label = descriptor.add_segmentation_labels();
         label->set_value(static_cast<std::uint32_t>(geom_id) + 1U);
@@ -258,7 +258,7 @@ bool BuildCameraDescriptors(
 
 bool BuildRayLidarDescriptor(
     const core::SimulationSnapshot& snapshot, const RayLidarProfile& profile,
-    mujoco_sim::v1::StreamDescriptor* descriptor,
+    mujoco_sim::v2::StreamDescriptor* descriptor,
     std::vector<double>* vertical_angles, int* site_id,
     std::string* error_message) {
   ClearError(error_message);
@@ -324,7 +324,7 @@ bool BuildRayLidarDescriptor(
   const auto rings = static_cast<std::uint32_t>(ring_count);
   StreamShape shape;
   if (!mujoco_sim::sensor::detail::StreamShapeFor(
-          mujoco_sim::v1::XYZ32F, profile.horizontal_samples, rings, &shape,
+          mujoco_sim::v2::XYZ32F, profile.horizontal_samples, rings, &shape,
           error_message)) {
     return false;
   }
@@ -371,16 +371,16 @@ bool BuildRayLidarDescriptor(
   }
 
   PopulateDescriptorCommon(descriptor, profile.stream_name,
-                           mujoco_sim::v1::XYZ32F,
+                           mujoco_sim::v2::XYZ32F,
                            profile.horizontal_samples, rings, shape,
-                           profile.frame_id, mujoco_sim::v1::ROS_BODY,
+                           profile.frame_id, mujoco_sim::v2::ROS_BODY,
                            profile.site_name, profile.rate_hz);
   *vertical_angles = std::move(built_angles);
   *site_id = id;
   return true;
 }
 
-RawFrame MakeRawFrame(const mujoco_sim::v1::StreamDescriptor& descriptor,
+RawFrame MakeRawFrame(const mujoco_sim::v2::StreamDescriptor& descriptor,
                       const CaptureMetadata& metadata,
                       std::vector<std::byte> payload) {
   RawFrame frame;
@@ -402,7 +402,7 @@ RawFrame MakeRawFrame(const mujoco_sim::v1::StreamDescriptor& descriptor,
 
 }  // namespace detail
 
-bool StreamShapeFor(mujoco_sim::v1::StreamFormat format,
+bool StreamShapeFor(mujoco_sim::v2::StreamFormat format,
                     std::uint32_t width, std::uint32_t height,
                     StreamShape* shape, std::string* error_message) {
   return detail::StreamShapeFor(format, width, height, shape, error_message);
@@ -410,7 +410,7 @@ bool StreamShapeFor(mujoco_sim::v1::StreamFormat format,
 
 bool DescribeCameraStreams(
     const core::SimulationSnapshot& snapshot, const CameraProfile& profile,
-    std::vector<mujoco_sim::v1::StreamDescriptor>* descriptors,
+    std::vector<mujoco_sim::v2::StreamDescriptor>* descriptors,
     std::string* error_message) {
   int camera_id = -1;
   return detail::BuildCameraDescriptors(snapshot, profile, descriptors,
@@ -419,7 +419,7 @@ bool DescribeCameraStreams(
 
 bool DescribeRayLidarStream(
     const core::SimulationSnapshot& snapshot, const RayLidarProfile& profile,
-    mujoco_sim::v1::StreamDescriptor* descriptor,
+    mujoco_sim::v2::StreamDescriptor* descriptor,
     std::string* error_message) {
   std::vector<double> vertical_angles;
   int site_id = -1;

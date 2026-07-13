@@ -117,6 +117,17 @@ struct RuntimeMetricsSnapshot {
   std::uint64_t tick_send_rejected_with_subscribers = 0;
   std::uint64_t tick_no_subscribers = 0;
   std::uint64_t tick_retransmissions = 0;
+  std::uint64_t tick_serializations = 0;
+  std::uint64_t tick_cache_hits = 0;
+  std::uint64_t tick_cache_misses = 0;
+  std::uint64_t tick_cached_bytes = 0;
+  std::uint64_t layout_bytes_avoided = 0;
+  std::uint64_t layout_hash_mismatches = 0;
+  std::uint64_t blocking_wait_count = 0;
+  double blocking_wait_total_ms = 0.0;
+  double blocking_wait_max_ms = 0.0;
+  std::uint64_t scheduler_wakeups = 0;
+  std::uint64_t scheduler_late_wakeups = 0;
   std::uint64_t commits = 0;
   std::uint64_t duplicate_commits = 0;
   std::uint64_t rejected_commits = 0;
@@ -147,6 +158,15 @@ class RuntimeMetrics {
                               std::uint64_t rejected_with_subscribers,
                               std::uint64_t no_subscribers,
                               std::uint64_t retransmissions);
+  void RecordTickCache(std::uint64_t serializations, std::uint64_t hits,
+                       std::uint64_t misses, std::uint64_t cached_bytes,
+                       std::uint64_t layout_bytes_avoided);
+  void RecordLayoutHashMismatch() { ++layout_hash_mismatches_; }
+  void RecordBlockingWait(double elapsed_ms);
+  void RecordSchedulerWakeup(bool late) {
+    ++scheduler_wakeups_;
+    scheduler_late_wakeups_ += late ? 1U : 0U;
+  }
   double RecordCommit(bool duplicate, bool rejected, bool stepped,
                       TimePoint now);
   double RecordBarrierCompleted(TimePoint now);
@@ -175,6 +195,17 @@ class RuntimeMetrics {
   std::uint64_t tick_send_rejected_with_subscribers_ = 0;
   std::uint64_t tick_no_subscribers_ = 0;
   std::uint64_t tick_retransmissions_ = 0;
+  std::uint64_t tick_serializations_ = 0;
+  std::uint64_t tick_cache_hits_ = 0;
+  std::uint64_t tick_cache_misses_ = 0;
+  std::uint64_t tick_cached_bytes_ = 0;
+  std::uint64_t layout_bytes_avoided_ = 0;
+  std::uint64_t layout_hash_mismatches_ = 0;
+  std::uint64_t blocking_wait_count_ = 0;
+  double blocking_wait_total_ms_ = 0.0;
+  double blocking_wait_max_ms_ = 0.0;
+  std::uint64_t scheduler_wakeups_ = 0;
+  std::uint64_t scheduler_late_wakeups_ = 0;
   std::uint64_t commits_ = 0;
   std::uint64_t duplicate_commits_ = 0;
   std::uint64_t rejected_commits_ = 0;

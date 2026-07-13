@@ -6,7 +6,7 @@
 
 #include <mujoco_sim/adapter_sdk/sync_adapter_client.hpp>
 #include <mujoco_sim/sensor_demo/waypoint_controller.hpp>
-#include <mujoco_sim/v1/sync.pb.h>
+#include <mujoco_sim/v2/sync.pb.h>
 
 namespace mujoco_sim::sensor_demo {
 
@@ -46,13 +46,13 @@ std::vector<std::string> ControllerCommandNames(
 std::vector<std::string> StateObservationNames(
     const StateObserverInterfaces& interfaces);
 
-bool DecodeVehicleSample(const mujoco_sim::v1::Tick& tick,
+bool DecodeVehicleSample(const mujoco_sim::v2::Tick& tick,
                          const ControllerInterfaces& interfaces,
                          VehicleSample* sample, std::string* error_message);
-bool DecodeStateSample(const mujoco_sim::v1::ObservationFrame& frame,
+bool DecodeStateSample(const mujoco_sim::v2::ObservationFrame& frame,
                        const StateObserverInterfaces& interfaces,
                        StateSample* sample, std::string* error_message);
-bool DecodeImuOrientation(const mujoco_sim::v1::ObservationFrame& frame,
+bool DecodeImuOrientation(const mujoco_sim::v2::ObservationFrame& frame,
                           const std::string& observation_name,
                           ImuOrientationSample* sample,
                           std::string* error_message);

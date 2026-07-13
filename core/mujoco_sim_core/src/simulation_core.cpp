@@ -13,36 +13,36 @@
 #include <vector>
 
 #include <mujoco/mujoco.h>
+#include <mujoco_sim/protocol/identifier.hpp>
+#include <mujoco_sim/protocol/layout_hash.hpp>
 #include <mujoco_sim/protocol/topics.hpp>
 
 namespace mujoco_sim::core {
 namespace {
 
-using mujoco_sim::v1::ACTIVE;
-using mujoco_sim::v1::ALREADY_EXISTS;
-using mujoco_sim::v1::COMMAND_ACTUATOR;
-using mujoco_sim::v1::ERROR;
-using mujoco_sim::v1::ERROR_PAUSED;
-using mujoco_sim::v1::FAILED_PRECONDITION;
-using mujoco_sim::v1::IDLE;
-using mujoco_sim::v1::INVALID_ARGUMENT;
-using mujoco_sim::v1::INVALID_COMMAND;
-using mujoco_sim::v1::INVALID_EPOCH;
-using mujoco_sim::v1::INVALID_SESSION;
-using mujoco_sim::v1::INVALID_TICK;
-using mujoco_sim::v1::NOT_FOUND;
-using mujoco_sim::v1::OBSERVATION_SENSOR;
-using mujoco_sim::v1::OBSERVER;
-using mujoco_sim::v1::OK;
-using mujoco_sim::v1::PROVISIONAL;
-using mujoco_sim::v1::RESOURCE_CONFLICT;
-using mujoco_sim::v1::RUNNING;
-using mujoco_sim::v1::TIMEOUT;
-using mujoco_sim::v1::TIMED_OUT;
-using mujoco_sim::v1::UNREGISTERED;
-using mujoco_sim::v1::VERSION_MISMATCH;
-
-constexpr std::uint32_t kRoleAwareApiMinimumMinor = 2;
+using mujoco_sim::v2::ACTIVE;
+using mujoco_sim::v2::ALREADY_EXISTS;
+using mujoco_sim::v2::COMMAND_ACTUATOR;
+using mujoco_sim::v2::ERROR;
+using mujoco_sim::v2::ERROR_PAUSED;
+using mujoco_sim::v2::FAILED_PRECONDITION;
+using mujoco_sim::v2::IDLE;
+using mujoco_sim::v2::INVALID_ARGUMENT;
+using mujoco_sim::v2::INVALID_COMMAND;
+using mujoco_sim::v2::INVALID_EPOCH;
+using mujoco_sim::v2::INVALID_SESSION;
+using mujoco_sim::v2::INVALID_TICK;
+using mujoco_sim::v2::NOT_FOUND;
+using mujoco_sim::v2::OBSERVATION_SENSOR;
+using mujoco_sim::v2::OBSERVER;
+using mujoco_sim::v2::OK;
+using mujoco_sim::v2::PROVISIONAL;
+using mujoco_sim::v2::RESOURCE_CONFLICT;
+using mujoco_sim::v2::RUNNING;
+using mujoco_sim::v2::TIMEOUT;
+using mujoco_sim::v2::TIMED_OUT;
+using mujoco_sim::v2::UNREGISTERED;
+using mujoco_sim::v2::VERSION_MISMATCH;
 
 std::uint64_t NowUnixNanos() {
   const auto now = std::chrono::system_clock::now().time_since_epoch();
@@ -66,9 +66,9 @@ bool HasDuplicates(const google::protobuf::RepeatedPtrField<std::string>& names,
 
 bool SameCommandPayload(
     const google::protobuf::RepeatedPtrField<
-        mujoco_sim::v1::ActuatorCommandBlock>& lhs,
+        mujoco_sim::v2::ActuatorCommandBlock>& lhs,
     const google::protobuf::RepeatedPtrField<
-        mujoco_sim::v1::ActuatorCommandBlock>& rhs) {
+        mujoco_sim::v2::ActuatorCommandBlock>& rhs) {
   if (lhs.size() != rhs.size()) {
     return false;
   }
@@ -90,20 +90,20 @@ bool SameCommandPayload(
   return lhs_by_name == rhs_by_name;
 }
 
-bool SameCommitPayload(const mujoco_sim::v1::AdapterCommit& lhs,
-                       const mujoco_sim::v1::AdapterCommit& rhs) {
+bool SameCommitPayload(const mujoco_sim::v2::AdapterCommit& lhs,
+                       const mujoco_sim::v2::AdapterCommit& rhs) {
   return lhs.status() == rhs.status() &&
          lhs.error_message() == rhs.error_message() &&
          SameCommandPayload(lhs.commands(), rhs.commands());
 }
 
-void CopyDescriptor(const mujoco_sim::v1::ResourceDescriptor& from,
-                    mujoco_sim::v1::ResourceDescriptor* to) {
+void CopyDescriptor(const mujoco_sim::v2::ResourceDescriptor& from,
+                    mujoco_sim::v2::ResourceDescriptor* to) {
   *to = from;
 }
 
 template <typename Response>
-Response ErrorResponse(mujoco_sim::v1::ErrorCode code,
+Response ErrorResponse(mujoco_sim::v2::ErrorCode code,
                        const std::string& message) {
   Response response;
   response.set_code(code);
@@ -357,14 +357,28 @@ std::string SensorFrameId(const mjModel* model, int sensor_id) {
 
 }  // namespace
 
-struct SimulationCore::Controller {
+namespace detail {
+
+struct ModelDeleter {
+  void operator()(mjModel_* model) const {
+    if (model != nullptr) mj_deleteModel(model);
+  }
+};
+
+struct DataDeleter {
+  void operator()(mjData_* data) const {
+    if (data != nullptr) mj_deleteData(data);
+  }
+};
+
+struct Controller {
   std::string id;
   std::uint64_t session_id = 0;
   std::uint64_t epoch = 0;
   std::uint32_t timeout_ms = 1000;
   std::uint32_t protocol_minor = mujoco_sim::protocol::kProtocolMinor;
-  mujoco_sim::v1::ControllerState state = PROVISIONAL;
-  mujoco_sim::v1::ResourceLayout layout;
+  mujoco_sim::v2::ControllerState state = PROVISIONAL;
+  mujoco_sim::v2::ResourceLayout layout;
   std::chrono::steady_clock::time_point registered_at =
       std::chrono::steady_clock::now();
   std::uint64_t last_heartbeat_tick = 0;
@@ -378,20 +392,20 @@ struct SimulationCore::Controller {
   bool has_tick_sent = false;
   bool has_recovery_proof = false;
   bool recovery_pending = false;
-  mujoco_sim::v1::AdapterCommit last_recovery_commit;
-  mujoco_sim::v1::AdapterCommit last_commit;
+  mujoco_sim::v2::AdapterCommit last_recovery_commit;
+  mujoco_sim::v2::AdapterCommit last_commit;
   std::string message;
 };
 
-struct SimulationCore::Observer {
+struct Observer {
   std::string id;
   std::uint64_t session_id = 0;
   std::uint64_t epoch = 0;
   std::uint32_t timeout_ms = 1000;
   std::uint32_t protocol_minor = mujoco_sim::protocol::kProtocolMinor;
-  mujoco_sim::v1::ControllerState state = PROVISIONAL;
-  mujoco_sim::v1::ResourceLayout layout;
-  mujoco_sim::v1::ObservationDelivery delivery;
+  mujoco_sim::v2::ControllerState state = PROVISIONAL;
+  mujoco_sim::v2::ResourceLayout layout;
+  mujoco_sim::v2::ObservationDelivery delivery;
   std::chrono::steady_clock::time_point registered_at =
       std::chrono::steady_clock::now();
   std::chrono::steady_clock::time_point last_heartbeat_at = registered_at;
@@ -406,6 +420,342 @@ struct SimulationCore::Observer {
   std::string message;
 };
 
+struct ValidatedActuatorWrite {
+  int actuator_id = -1;
+  mjtNum value = 0.0;
+};
+
+class ResourceCatalog;
+
+class AdapterRegistry {
+ public:
+  std::uint64_t AllocateSession() noexcept { return next_session_id++; }
+  void ClearAdapters() {
+    controllers.clear();
+    observers.clear();
+    actuator_owner.clear();
+  }
+  std::unordered_map<std::string, Controller> controllers;
+  std::unordered_map<std::string, Observer> observers;
+  std::unordered_map<std::string, std::string> actuator_owner;
+  std::uint64_t next_session_id = 1;
+};
+
+class BarrierCoordinator {
+ public:
+  void Reset() {
+    pending_commits.clear();
+    required_controllers.clear();
+    recipient_controllers.clear();
+    pending_zero_actuators.clear();
+  }
+  bool Ready() const {
+    if (pending_commits.size() != required_controllers.size()) return false;
+    return std::all_of(required_controllers.begin(), required_controllers.end(),
+                       [this](const auto& item) {
+                         return pending_commits.contains(item.first);
+                       });
+  }
+  std::vector<ValidatedActuatorWrite> BuildWritePlan(
+      const ResourceCatalog& catalog) const;
+  std::unordered_map<std::string, mujoco_sim::v2::AdapterCommit>
+      pending_commits;
+  std::unordered_map<std::string, bool> required_controllers;
+  std::unordered_map<std::string, bool> recipient_controllers;
+  std::set<int> pending_zero_actuators;
+};
+
+class TickStore {
+ public:
+  IssuedTickHandle Insert(const std::string& adapter_id,
+                          mujoco_sim::v2::Tick message,
+                          std::size_t layout_bytes_avoided,
+                          std::uint64_t session_id, std::uint64_t epoch,
+                          std::uint64_t tick_id) {
+    auto issued_tick = std::make_shared<IssuedTick>();
+    issued_tick->message = std::move(message);
+    if (!issued_tick->message.SerializeToString(
+            &issued_tick->serialized_bytes)) {
+      return {};
+    }
+    issued_tick->serialization_count = 1;
+    issued_tick->layout_bytes_avoided = layout_bytes_avoided;
+    issued_tick->identity = {adapter_id, session_id, epoch, tick_id,
+                             next_issue_generation++};
+    issued.emplace(adapter_id, issued_tick);
+    return issued_tick;
+  }
+
+  IssuedTickHandle Find(const std::string& adapter_id) const {
+    const auto found = issued.find(adapter_id);
+    return found == issued.end() ? IssuedTickHandle{} : found->second;
+  }
+
+  bool IsCurrent(const IssuedTickIdentity& identity) const {
+    const auto found = issued.find(identity.adapter_id);
+    return found != issued.end() &&
+           found->second->current.load(std::memory_order_acquire) &&
+           found->second->identity.session_id == identity.session_id &&
+           found->second->identity.epoch == identity.epoch &&
+           found->second->identity.tick_id == identity.tick_id &&
+           found->second->identity.issue_generation ==
+               identity.issue_generation;
+  }
+
+  void Invalidate(const std::string& adapter_id) {
+    const auto found = issued.find(adapter_id);
+    if (found == issued.end()) return;
+    found->second->current.store(false, std::memory_order_release);
+    issued.erase(found);
+  }
+
+  void InvalidateAll() {
+    for (const auto& [_, tick] : issued) {
+      tick->current.store(false, std::memory_order_release);
+    }
+    issued.clear();
+  }
+
+  std::unordered_map<std::string, IssuedTickHandle> issued;
+  std::uint64_t next_issue_generation = 1;
+};
+
+class ModelState {
+ public:
+  struct PreparedModel {
+    std::unique_ptr<mjModel_, ModelDeleter> model;
+    std::unique_ptr<mjData_, DataDeleter> data;
+  };
+
+  static std::optional<PreparedModel> Prepare(
+      const std::string& model_path, const ModelLoadOptions& options,
+      std::string* error_message) {
+    char load_error[1024] = {};
+    PreparedModel prepared;
+    prepared.model.reset(mj_loadXML(model_path.c_str(), nullptr, load_error,
+                                    sizeof(load_error)));
+    if (!prepared.model) {
+      if (error_message != nullptr) {
+        *error_message = load_error[0] == '\0' ? "failed to load MuJoCo model"
+                                               : load_error;
+      }
+      return std::nullopt;
+    }
+    prepared.data.reset(mj_makeData(prepared.model.get()));
+    if (!prepared.data) {
+      if (error_message != nullptr) {
+        *error_message = "failed to allocate MuJoCo data";
+      }
+      return std::nullopt;
+    }
+    if (options.initial_keyframe.empty()) {
+      mj_resetData(prepared.model.get(), prepared.data.get());
+    } else {
+      const int keyframe_id = mj_name2id(prepared.model.get(), mjOBJ_KEY,
+                                        options.initial_keyframe.c_str());
+      if (keyframe_id < 0) {
+        if (error_message != nullptr) {
+          *error_message = "initial keyframe '" + options.initial_keyframe +
+                           "' was not found in MuJoCo model";
+        }
+        return std::nullopt;
+      }
+      mj_resetDataKeyframe(prepared.model.get(), prepared.data.get(),
+                           keyframe_id);
+    }
+    if (prepared.model->nu > 0) {
+      mju_zero(prepared.data->ctrl, prepared.model->nu);
+    }
+    mj_forward(prepared.model.get(), prepared.data.get());
+    return prepared;
+  }
+
+  void Commit(PreparedModel prepared) {
+    model = std::move(prepared.model);
+    data = std::move(prepared.data);
+    simulation_time = data->time;
+    ++generation;
+  }
+
+  bool loaded() const noexcept { return model != nullptr && data != nullptr; }
+  void ApplyActuatorWrites(
+      const std::vector<ValidatedActuatorWrite>& writes) {
+    if (data == nullptr) return;
+    for (const auto& write : writes) {
+      data->ctrl[write.actuator_id] = write.value;
+    }
+  }
+
+  void ZeroActuators(const std::vector<int>& actuator_ids) {
+    if (data == nullptr) return;
+    for (const int actuator_id : actuator_ids) {
+      data->ctrl[actuator_id] = 0.0;
+    }
+  }
+
+  void ZeroAllControls() {
+    if (loaded() && model->nu > 0) mju_zero(data->ctrl, model->nu);
+  }
+
+  void Step() {
+    mj_step(model.get(), data.get());
+    simulation_time = data->time;
+  }
+
+  std::unique_ptr<mjModel_, ModelDeleter> model;
+  std::unique_ptr<mjData_, DataDeleter> data;
+  double simulation_time = 0.0;
+  std::uint64_t generation = 0;
+};
+
+class ResourceCatalog {
+ public:
+  void Build(const mjModel* model);
+  std::vector<mujoco_sim::v2::ResourceDescriptor> observations;
+  std::vector<mujoco_sim::v2::ResourceDescriptor> commands;
+  std::unordered_map<std::string, mujoco_sim::v2::ResourceDescriptor>
+      observations_by_name;
+  std::unordered_map<std::string, mujoco_sim::v2::ResourceDescriptor>
+      commands_by_name;
+};
+
+std::vector<ValidatedActuatorWrite> BarrierCoordinator::BuildWritePlan(
+    const ResourceCatalog& catalog) const {
+  std::vector<ValidatedActuatorWrite> writes;
+  for (const auto& [_, pending] : pending_commits) {
+    for (const auto& command : pending.commands()) {
+      const auto& descriptor = catalog.commands_by_name.at(command.name());
+      writes.push_back({descriptor.mujoco_id(), command.values(0)});
+    }
+  }
+  for (const int actuator_id : pending_zero_actuators) {
+    writes.push_back({actuator_id, 0.0});
+  }
+  return writes;
+}
+
+class SnapshotManager {
+ public:
+  void Reset() {
+    identity = std::make_shared<char>();
+    ++model_generation;
+  }
+  std::unique_ptr<SimulationSnapshot> Create(
+      const ModelState& model_state, std::string* error_message) const;
+  std::unique_ptr<SimulationSnapshot> Clone(
+      const ModelState& model_state, const SimulationSnapshot& source,
+      std::string* error_message) const;
+  bool Update(const ModelState& model_state, SimulationSnapshot* snapshot,
+              std::string* error_message) const;
+  std::shared_ptr<void> identity = std::make_shared<char>();
+  std::uint64_t model_generation = 0;
+};
+
+class ObservationScheduler {
+ public:
+  bool Due(const Observer& observer, std::uint64_t tick_id,
+           double timestep) const {
+    if (!observer.has_delivery) return true;
+    if (observer.delivery.has_every_n_steps()) {
+      return tick_id - observer.last_delivery_tick >=
+             observer.delivery.every_n_steps();
+    }
+    if (!observer.delivery.has_period_s()) return false;
+    const long double elapsed_steps =
+        static_cast<long double>(tick_id - observer.delivery_phase_tick);
+    const long double elapsed =
+        elapsed_steps * static_cast<long double>(timestep);
+    const long double deadline =
+        static_cast<long double>(observer.next_delivery_period) *
+        static_cast<long double>(observer.delivery.period_s());
+    const long double tolerance =
+        static_cast<long double>(std::numeric_limits<double>::epsilon()) *
+        8.0L * std::max({1.0L, std::abs(elapsed), std::abs(deadline)});
+    return elapsed + tolerance >= deadline;
+  }
+
+  void MarkDelivered(Observer* observer, std::uint64_t tick_id,
+                     double timestep) const {
+    observer->last_delivery_tick = tick_id;
+    if (observer->delivery.has_period_s()) {
+      const double period = observer->delivery.period_s();
+      if (!observer->has_delivery) {
+        observer->delivery_phase_tick = tick_id;
+        observer->next_delivery_period = 1;
+      } else if (period <= timestep) {
+        observer->next_delivery_period =
+            tick_id - observer->delivery_phase_tick + 1;
+      } else {
+        ++observer->next_delivery_period;
+      }
+    }
+    observer->has_delivery = true;
+  }
+};
+
+class StatusBuilder {
+ public:
+  mujoco_sim::v2::ServerStatus Build(
+      const mujoco_sim::v2::Header& header,
+      mujoco_sim::v2::ServerState server_state, const std::string& message,
+      const AdapterRegistry& registry,
+      const BarrierCoordinator& barrier) const {
+    mujoco_sim::v2::ServerStatus status;
+    *status.mutable_header() = header;
+    status.set_state(server_state);
+    status.set_message(message);
+    for (const auto& [_, controller] : registry.controllers) {
+      auto* adapter = status.add_adapters();
+      adapter->set_adapter_id(controller.id);
+      adapter->set_role(mujoco_sim::v2::CONTROLLER);
+      adapter->set_session_id(controller.session_id);
+      adapter->set_state(controller.state);
+      adapter->set_message(controller.message);
+      adapter->set_state_since_tick_id(controller.state_since_tick);
+      adapter->set_timeout_count(controller.timeout_count);
+      adapter->set_last_heartbeat_tick_id(controller.last_heartbeat_tick);
+      if (controller.has_tick_sent) {
+        adapter->set_last_delivery_tick_id(controller.last_tick_sent);
+      }
+      if (controller.has_commit) {
+        adapter->set_last_commit_tick_id(controller.last_commit_tick);
+      }
+      adapter->set_required_for_barrier(
+          barrier.required_controllers.contains(controller.id));
+    }
+    for (const auto& [_, observer] : registry.observers) {
+      auto* adapter = status.add_adapters();
+      adapter->set_adapter_id(observer.id);
+      adapter->set_role(OBSERVER);
+      adapter->set_session_id(observer.session_id);
+      adapter->set_state(observer.state);
+      adapter->set_message(observer.message);
+      adapter->set_state_since_tick_id(observer.state_since_tick);
+      adapter->set_timeout_count(observer.timeout_count);
+      if (observer.has_delivery) {
+        adapter->set_last_delivery_tick_id(observer.last_delivery_tick);
+      }
+      adapter->set_last_observation_sequence(observer.sequence);
+    }
+    return status;
+  }
+};
+
+}  // namespace detail
+
+using detail::AdapterRegistry;
+using detail::BarrierCoordinator;
+using detail::Controller;
+using detail::DataDeleter;
+using detail::ModelDeleter;
+using detail::ModelState;
+using detail::ObservationScheduler;
+using detail::Observer;
+using detail::ResourceCatalog;
+using detail::SnapshotManager;
+using detail::StatusBuilder;
+using detail::TickStore;
+
 struct SimulationSnapshot::Impl {
   ~Impl() {
     if (data != nullptr) {
@@ -419,6 +769,93 @@ struct SimulationSnapshot::Impl {
   std::uint64_t model_generation = 0;
 };
 
+std::unique_ptr<SimulationSnapshot> detail::SnapshotManager::Create(
+    const ModelState& model_state, std::string* error_message) const {
+  if (!model_state.loaded()) {
+    if (error_message != nullptr) {
+      *error_message = "cannot create snapshot before loading a model";
+    }
+    return nullptr;
+  }
+  auto snapshot =
+      std::unique_ptr<SimulationSnapshot>(new SimulationSnapshot());
+  snapshot->impl_->owner = identity;
+  snapshot->impl_->model_generation = model_generation;
+  snapshot->impl_->model = std::shared_ptr<mjModel>(
+      mj_copyModel(nullptr, model_state.model.get()),
+      [](mjModel* model) { mj_deleteModel(model); });
+  if (snapshot->impl_->model == nullptr) {
+    if (error_message != nullptr) {
+      *error_message = "failed to copy MuJoCo model for visualization";
+    }
+    return nullptr;
+  }
+  snapshot->impl_->data = mj_copyData(nullptr, snapshot->impl_->model.get(),
+                                      model_state.data.get());
+  if (snapshot->impl_->data == nullptr) {
+    if (error_message != nullptr) {
+      *error_message = "failed to copy MuJoCo data for visualization";
+    }
+    return nullptr;
+  }
+  return snapshot;
+}
+
+std::unique_ptr<SimulationSnapshot> detail::SnapshotManager::Clone(
+    const ModelState& model_state, const SimulationSnapshot& source,
+    std::string* error_message) const {
+  if (!model_state.loaded() || source.impl_ == nullptr ||
+      source.impl_->model == nullptr || source.impl_->data == nullptr ||
+      source.impl_->owner.lock() != identity ||
+      source.impl_->model_generation != model_generation) {
+    if (error_message != nullptr) {
+      *error_message = "cannot clone an invalid or stale simulation snapshot";
+    }
+    return nullptr;
+  }
+  auto snapshot =
+      std::unique_ptr<SimulationSnapshot>(new SimulationSnapshot());
+  snapshot->impl_->owner = identity;
+  snapshot->impl_->model_generation = model_generation;
+  snapshot->impl_->model = source.impl_->model;
+  snapshot->impl_->data = mj_copyData(nullptr, snapshot->impl_->model.get(),
+                                      source.impl_->data);
+  if (snapshot->impl_->data == nullptr) {
+    if (error_message != nullptr) {
+      *error_message = "failed to allocate cloned MuJoCo snapshot data";
+    }
+    return nullptr;
+  }
+  return snapshot;
+}
+
+bool detail::SnapshotManager::Update(const ModelState& model_state,
+                                     SimulationSnapshot* snapshot,
+                                     std::string* error_message) const {
+  if (!model_state.loaded() || snapshot == nullptr ||
+      snapshot->impl_ == nullptr || snapshot->impl_->model == nullptr ||
+      snapshot->impl_->data == nullptr) {
+    if (error_message != nullptr) *error_message = "invalid visualization snapshot";
+    return false;
+  }
+  if (snapshot->impl_->owner.lock() != identity ||
+      snapshot->impl_->model_generation != model_generation) {
+    if (error_message != nullptr) {
+      *error_message = "visualization snapshot does not belong to this model";
+    }
+    return false;
+  }
+  if (snapshot->impl_->model->nbuffer != model_state.model->nbuffer) {
+    if (error_message != nullptr) {
+      *error_message = "visualization snapshot model is incompatible";
+    }
+    return false;
+  }
+  mj_copyData(snapshot->impl_->data, snapshot->impl_->model.get(),
+              model_state.data.get());
+  return true;
+}
+
 SimulationSnapshot::SimulationSnapshot() : impl_(std::make_unique<Impl>()) {}
 SimulationSnapshot::~SimulationSnapshot() = default;
 SimulationSnapshot::SimulationSnapshot(SimulationSnapshot&&) noexcept = default;
@@ -430,20 +867,16 @@ const mjModel_* SimulationSnapshot::model() const {
 }
 mjData_* SimulationSnapshot::data() const { return impl_->data; }
 
-void SimulationCore::MjModelDeleter::operator()(mjModel_* model) const {
-  if (model != nullptr) {
-    mj_deleteModel(model);
-  }
-}
-
-void SimulationCore::MjDataDeleter::operator()(mjData_* data) const {
-  if (data != nullptr) {
-    mj_deleteData(data);
-  }
-}
-
 SimulationCore::SimulationCore(CoreOptions options)
-    : options_(std::move(options)) {}
+    : options_(std::move(options)),
+      model_state_(std::make_unique<ModelState>()),
+      resource_catalog_(std::make_unique<ResourceCatalog>()),
+      snapshot_manager_(std::make_unique<SnapshotManager>()),
+      observation_scheduler_(std::make_unique<ObservationScheduler>()),
+      status_builder_(std::make_unique<StatusBuilder>()),
+      adapter_registry_(std::make_unique<AdapterRegistry>()),
+      barrier_coordinator_(std::make_unique<BarrierCoordinator>()),
+      tick_store_(std::make_unique<TickStore>()) {}
 
 SimulationCore::~SimulationCore() = default;
 SimulationCore::SimulationCore(SimulationCore&&) noexcept = default;
@@ -457,64 +890,21 @@ bool SimulationCore::LoadModel(const std::string& model_path,
 bool SimulationCore::LoadModel(const std::string& model_path,
                                const ModelLoadOptions& options,
                                std::string* error_message) {
-  char load_error[1024] = {};
-  std::unique_ptr<mjModel_, MjModelDeleter> model(
-      mj_loadXML(model_path.c_str(), nullptr, load_error, sizeof(load_error)));
-  if (!model) {
-    if (error_message != nullptr) {
-      *error_message = load_error[0] == '\0' ? "failed to load MuJoCo model"
-                                             : load_error;
-    }
-    return false;
-  }
+  EnsureInternalComponents();
+  auto prepared = ModelState::Prepare(model_path, options, error_message);
+  if (!prepared) return false;
+  model_state_->Commit(std::move(*prepared));
+  snapshot_manager_->Reset();
 
-  std::unique_ptr<mjData_, MjDataDeleter> data(mj_makeData(model.get()));
-  if (!data) {
-    if (error_message != nullptr) {
-      *error_message = "failed to allocate MuJoCo data";
-    }
-    return false;
-  }
-
-  if (options.initial_keyframe.empty()) {
-    mj_resetData(model.get(), data.get());
-  } else {
-    const int keyframe_id =
-        mj_name2id(model.get(), mjOBJ_KEY, options.initial_keyframe.c_str());
-    if (keyframe_id < 0) {
-      if (error_message != nullptr) {
-        *error_message = "initial keyframe '" + options.initial_keyframe +
-                         "' was not found in MuJoCo model";
-      }
-      return false;
-    }
-    mj_resetDataKeyframe(model.get(), data.get(), keyframe_id);
-  }
-  if (model->nu > 0) {
-    mju_zero(data->ctrl, model->nu);
-  }
-  mj_forward(model.get(), data.get());
-
-  model_ = std::move(model);
-  data_ = std::move(data);
-  snapshot_identity_ = std::make_shared<char>();
-  ++model_generation_;
-
-  observations_.clear();
-  commands_.clear();
-  observations_by_name_.clear();
-  commands_by_name_.clear();
-  controllers_.clear();
-  observers_.clear();
-  actuator_owner_.clear();
-  pending_commits_.clear();
-  open_ticks_.clear();
-  tick_required_controllers_.clear();
-  tick_recipient_controllers_.clear();
-  pending_observation_frames_.clear();
+  resource_catalog_->observations.clear();
+  resource_catalog_->commands.clear();
+  resource_catalog_->observations_by_name.clear();
+  resource_catalog_->commands_by_name.clear();
+  adapter_registry_->ClearAdapters();
+  InvalidateAllIssuedTicks();
+  barrier_coordinator_->Reset();
   epoch_++;
   current_tick_id_ = 0;
-  simulation_time_ = data_->time;
   server_state_ = RUNNING;
   tick_open_ = false;
   status_message_.clear();
@@ -522,171 +912,134 @@ bool SimulationCore::LoadModel(const std::string& model_path,
   return true;
 }
 
-bool SimulationCore::IsModelLoaded() const { return model_ && data_; }
+void SimulationCore::EnsureInternalComponents() {
+  if (!adapter_registry_) {
+    adapter_registry_ = std::make_unique<AdapterRegistry>();
+  }
+  if (!barrier_coordinator_) {
+    barrier_coordinator_ = std::make_unique<BarrierCoordinator>();
+  }
+  if (!tick_store_) {
+    tick_store_ = std::make_unique<TickStore>();
+  }
+  if (!model_state_) {
+    model_state_ = std::make_unique<ModelState>();
+  }
+  if (!resource_catalog_) {
+    resource_catalog_ = std::make_unique<ResourceCatalog>();
+  }
+  if (!snapshot_manager_) {
+    snapshot_manager_ = std::make_unique<SnapshotManager>();
+  }
+  if (!observation_scheduler_) {
+    observation_scheduler_ = std::make_unique<ObservationScheduler>();
+  }
+  if (!status_builder_) {
+    status_builder_ = std::make_unique<StatusBuilder>();
+  }
+}
+
+bool SimulationCore::IsModelLoaded() const { return model_state_->loaded(); }
 
 std::unique_ptr<SimulationSnapshot> SimulationCore::CreateSnapshot(
     std::string* error_message) const {
-  if (!IsModelLoaded()) {
-    if (error_message != nullptr) {
-      *error_message = "cannot create snapshot before loading a model";
-    }
-    return nullptr;
-  }
-
-  auto snapshot = std::unique_ptr<SimulationSnapshot>(
-      new SimulationSnapshot());
-  snapshot->impl_->owner = snapshot_identity_;
-  snapshot->impl_->model_generation = model_generation_;
-  snapshot->impl_->model = std::shared_ptr<mjModel>(
-      mj_copyModel(nullptr, model_.get()),
-      [](mjModel* model) { mj_deleteModel(model); });
-  if (snapshot->impl_->model == nullptr) {
-    if (error_message != nullptr) {
-      *error_message = "failed to copy MuJoCo model for visualization";
-    }
-    return nullptr;
-  }
-  snapshot->impl_->data =
-      mj_copyData(nullptr, snapshot->impl_->model.get(), data_.get());
-  if (snapshot->impl_->data == nullptr) {
-    if (error_message != nullptr) {
-      *error_message = "failed to copy MuJoCo data for visualization";
-    }
-    return nullptr;
-  }
-  return snapshot;
+  return snapshot_manager_->Create(*model_state_, error_message);
 }
 
 std::unique_ptr<SimulationSnapshot> SimulationCore::CloneSnapshot(
     const SimulationSnapshot& source, std::string* error_message) const {
-  if (!IsModelLoaded() || source.impl_ == nullptr ||
-      source.impl_->model == nullptr || source.impl_->data == nullptr ||
-      source.impl_->owner.lock() != snapshot_identity_ ||
-      source.impl_->model_generation != model_generation_) {
-    if (error_message != nullptr) {
-      *error_message = "cannot clone an invalid or stale simulation snapshot";
-    }
-    return nullptr;
-  }
-  auto snapshot =
-      std::unique_ptr<SimulationSnapshot>(new SimulationSnapshot());
-  snapshot->impl_->owner = snapshot_identity_;
-  snapshot->impl_->model_generation = model_generation_;
-  snapshot->impl_->model = source.impl_->model;
-  snapshot->impl_->data =
-      mj_copyData(nullptr, snapshot->impl_->model.get(), source.impl_->data);
-  if (snapshot->impl_->data == nullptr) {
-    if (error_message != nullptr) {
-      *error_message = "failed to allocate cloned MuJoCo snapshot data";
-    }
-    return nullptr;
-  }
-  return snapshot;
+  return snapshot_manager_->Clone(*model_state_, source, error_message);
 }
 
 bool SimulationCore::UpdateSnapshot(SimulationSnapshot* snapshot,
                                     std::string* error_message) const {
-  if (!IsModelLoaded() || snapshot == nullptr || snapshot->impl_ == nullptr ||
-      snapshot->impl_->model == nullptr || snapshot->impl_->data == nullptr) {
-    if (error_message != nullptr) {
-      *error_message = "invalid visualization snapshot";
-    }
-    return false;
-  }
-  if (snapshot->impl_->owner.lock() != snapshot_identity_ ||
-      snapshot->impl_->model_generation != model_generation_) {
-    if (error_message != nullptr) {
-      *error_message = "visualization snapshot does not belong to this model";
-    }
-    return false;
-  }
-  if (snapshot->impl_->model->nbuffer != model_->nbuffer) {
-    if (error_message != nullptr) {
-      *error_message = "visualization snapshot model is incompatible";
-    }
-    return false;
-  }
-
-  mj_copyData(snapshot->impl_->data, snapshot->impl_->model.get(), data_.get());
-  return true;
+  return snapshot_manager_->Update(*model_state_, snapshot, error_message);
 }
 
-const std::vector<mujoco_sim::v1::ResourceDescriptor>&
+const std::vector<mujoco_sim::v2::ResourceDescriptor>&
 SimulationCore::observations() const {
-  return observations_;
+  return resource_catalog_->observations;
 }
 
-const std::vector<mujoco_sim::v1::ResourceDescriptor>&
+const std::vector<mujoco_sim::v2::ResourceDescriptor>&
 SimulationCore::commands() const {
-  return commands_;
+  return resource_catalog_->commands;
 }
 
 void SimulationCore::BuildCatalogs() {
-  for (int sensor_id = 0; sensor_id < model_->nsensor; ++sensor_id) {
-    const char* name = mj_id2name(model_.get(), mjOBJ_SENSOR, sensor_id);
+  resource_catalog_->Build(model_state_->model.get());
+}
+
+void detail::ResourceCatalog::Build(const mjModel* model) {
+  observations.clear();
+  commands.clear();
+  observations_by_name.clear();
+  commands_by_name.clear();
+  for (int sensor_id = 0; sensor_id < model->nsensor; ++sensor_id) {
+    const char* name = mj_id2name(model, mjOBJ_SENSOR, sensor_id);
     if (name == nullptr || name[0] == '\0') {
       continue;
     }
 
-    mujoco_sim::v1::ResourceDescriptor descriptor;
+    mujoco_sim::v2::ResourceDescriptor descriptor;
     descriptor.set_name(name);
     descriptor.set_type(OBSERVATION_SENSOR);
     descriptor.set_dimension(
-        static_cast<std::uint32_t>(model_->sensor_dim[sensor_id]));
+        static_cast<std::uint32_t>(model->sensor_dim[sensor_id]));
     descriptor.set_mujoco_id(sensor_id);
-    descriptor.set_mujoco_type(model_->sensor_type[sensor_id]);
-    descriptor.set_mujoco_datatype(model_->sensor_datatype[sensor_id]);
-    descriptor.set_mujoco_stage(model_->sensor_needstage[sensor_id]);
+    descriptor.set_mujoco_type(model->sensor_type[sensor_id]);
+    descriptor.set_mujoco_datatype(model->sensor_datatype[sensor_id]);
+    descriptor.set_mujoco_stage(model->sensor_needstage[sensor_id]);
     descriptor.set_interval_period_s(
-        model_->sensor_interval[2 * sensor_id]);
+        model->sensor_interval[2 * sensor_id]);
     descriptor.set_interval_phase_s(
-        model_->sensor_interval[2 * sensor_id + 1]);
-    descriptor.set_delay_s(model_->sensor_delay[sensor_id]);
-    descriptor.set_unit(SensorUnit(model_.get(), sensor_id));
-    descriptor.set_object_type(model_->sensor_objtype[sensor_id]);
-    descriptor.set_interpolation(SensorInterpolation(model_.get(), sensor_id));
-    descriptor.set_frame_id(SensorFrameId(model_.get(), sensor_id));
-    const int object_type = model_->sensor_objtype[sensor_id];
-    const int object_id = model_->sensor_objid[sensor_id];
+        model->sensor_interval[2 * sensor_id + 1]);
+    descriptor.set_delay_s(model->sensor_delay[sensor_id]);
+    descriptor.set_unit(SensorUnit(model, sensor_id));
+    descriptor.set_object_type(model->sensor_objtype[sensor_id]);
+    descriptor.set_interpolation(SensorInterpolation(model, sensor_id));
+    descriptor.set_frame_id(SensorFrameId(model, sensor_id));
+    const int object_type = model->sensor_objtype[sensor_id];
+    const int object_id = model->sensor_objid[sensor_id];
     if (object_type != mjOBJ_UNKNOWN && object_id >= 0) {
-      const char* object_name = mj_id2name(
-          model_.get(), static_cast<mjtObj>(object_type), object_id);
+      const char* object_name =
+          mj_id2name(model, static_cast<mjtObj>(object_type), object_id);
       if (object_name != nullptr) {
         descriptor.set_object_name(object_name);
       }
     }
-    observations_.push_back(descriptor);
-    observations_by_name_.emplace(descriptor.name(), descriptor);
+    observations.push_back(descriptor);
+    observations_by_name.emplace(descriptor.name(), descriptor);
   }
 
-  for (int actuator_id = 0; actuator_id < model_->nu; ++actuator_id) {
-    const char* name = mj_id2name(model_.get(), mjOBJ_ACTUATOR, actuator_id);
+  for (int actuator_id = 0; actuator_id < model->nu; ++actuator_id) {
+    const char* name = mj_id2name(model, mjOBJ_ACTUATOR, actuator_id);
     if (name == nullptr || name[0] == '\0') {
       continue;
     }
 
-    mujoco_sim::v1::ResourceDescriptor descriptor;
+    mujoco_sim::v2::ResourceDescriptor descriptor;
     descriptor.set_name(name);
     descriptor.set_type(COMMAND_ACTUATOR);
     descriptor.set_dimension(1);
     descriptor.set_mujoco_id(actuator_id);
     descriptor.set_mujoco_type(mjOBJ_ACTUATOR);
     descriptor.set_mujoco_datatype(0);
-    const bool limited = model_->actuator_ctrllimited[actuator_id] != 0;
+    const bool limited = model->actuator_ctrllimited[actuator_id] != 0;
     descriptor.set_has_ctrl_range(limited);
     if (limited) {
-      descriptor.set_ctrl_min(model_->actuator_ctrlrange[2 * actuator_id]);
-      descriptor.set_ctrl_max(model_->actuator_ctrlrange[2 * actuator_id + 1]);
+      descriptor.set_ctrl_min(model->actuator_ctrlrange[2 * actuator_id]);
+      descriptor.set_ctrl_max(model->actuator_ctrlrange[2 * actuator_id + 1]);
     }
-    commands_.push_back(descriptor);
-    commands_by_name_.emplace(descriptor.name(), descriptor);
+    commands.push_back(descriptor);
+    commands_by_name.emplace(descriptor.name(), descriptor);
   }
 }
 
-mujoco_sim::v1::GetAvailableResourcesResponse
+mujoco_sim::v2::GetAvailableResourcesResponse
 SimulationCore::GetAvailableResources(
-    const mujoco_sim::v1::GetAvailableResourcesRequest& request) const {
-  mujoco_sim::v1::GetAvailableResourcesResponse response;
+    const mujoco_sim::v2::GetAvailableResourcesRequest& request) const {
+  mujoco_sim::v2::GetAvailableResourcesResponse response;
   if (!IsModelLoaded()) {
     response.set_code(FAILED_PRECONDITION);
     response.set_message("model is not loaded");
@@ -698,108 +1051,119 @@ SimulationCore::GetAvailableResources(
     response.set_message("server name mismatch");
     return response;
   }
-  if (request.protocol_major() != mujoco_sim::protocol::kProtocolMajor) {
+  if (request.protocol_major() != mujoco_sim::protocol::kProtocolMajor ||
+      request.protocol_minor() != mujoco_sim::protocol::kProtocolMinor) {
     response.set_code(VERSION_MISMATCH);
-    response.set_message("protocol major mismatch");
+    response.set_message("protocol version mismatch; expected 2.0");
     return response;
   }
 
   response.set_code(OK);
   response.set_epoch(epoch_);
-  response.set_effective_protocol_major(mujoco_sim::protocol::kProtocolMajor);
-  response.set_effective_protocol_minor(
-      std::min(request.protocol_minor(), mujoco_sim::protocol::kProtocolMinor));
-  for (const auto& observation : observations_) {
+  for (const auto& observation : resource_catalog_->observations) {
     CopyDescriptor(observation, response.add_observations());
   }
-  for (const auto& command : commands_) {
+  for (const auto& command : resource_catalog_->commands) {
     CopyDescriptor(command, response.add_commands());
   }
   return response;
 }
 
-mujoco_sim::v1::RegisterControllerResponse
-SimulationCore::RegisterController(
-    const mujoco_sim::v1::RegisterControllerRequest& request) {
+mujoco_sim::v2::RegisterAdapterResponse
+SimulationCore::RegisterControlAdapter(
+    const mujoco_sim::v2::RegisterAdapterRequest& request) {
   if (!IsModelLoaded()) {
-    return ErrorResponse<mujoco_sim::v1::RegisterControllerResponse>(
+    return ErrorResponse<mujoco_sim::v2::RegisterAdapterResponse>(
         FAILED_PRECONDITION, "model is not loaded");
   }
-  if (server_state_ == ERROR_PAUSED || server_state_ == mujoco_sim::v1::STOPPED) {
-    return ErrorResponse<mujoco_sim::v1::RegisterControllerResponse>(
+  if (server_state_ == ERROR_PAUSED || server_state_ == mujoco_sim::v2::STOPPED) {
+    return ErrorResponse<mujoco_sim::v2::RegisterAdapterResponse>(
         FAILED_PRECONDITION, "server is not accepting registrations");
   }
   if (request.server_name() != options_.server_name) {
-    return ErrorResponse<mujoco_sim::v1::RegisterControllerResponse>(
+    return ErrorResponse<mujoco_sim::v2::RegisterAdapterResponse>(
         NOT_FOUND, "server name mismatch");
   }
-  if (request.controller_id().empty()) {
-    return ErrorResponse<mujoco_sim::v1::RegisterControllerResponse>(
-        INVALID_ARGUMENT, "controller_id is required");
+  if (request.adapter_id().empty()) {
+    return ErrorResponse<mujoco_sim::v2::RegisterAdapterResponse>(
+        INVALID_ARGUMENT, "adapter_id is required");
   }
-  if (request.protocol_major() != mujoco_sim::protocol::kProtocolMajor) {
-    return ErrorResponse<mujoco_sim::v1::RegisterControllerResponse>(
-        VERSION_MISMATCH, "protocol major mismatch");
+  std::string identifier_error;
+  if (!mujoco_sim::protocol::ValidateIdentifier(
+          request.adapter_id(),
+          mujoco_sim::protocol::IdentifierKind::kAdapter,
+          &identifier_error)) {
+    return ErrorResponse<mujoco_sim::v2::RegisterAdapterResponse>(
+        INVALID_ARGUMENT, identifier_error);
+  }
+  if (request.protocol_major() != mujoco_sim::protocol::kProtocolMajor ||
+      request.protocol_minor() != mujoco_sim::protocol::kProtocolMinor) {
+    return ErrorResponse<mujoco_sim::v2::RegisterAdapterResponse>(
+        VERSION_MISMATCH, "protocol version mismatch; expected 2.0");
   }
   if (request.command_names().empty()) {
-    return ErrorResponse<mujoco_sim::v1::RegisterControllerResponse>(
+    return ErrorResponse<mujoco_sim::v2::RegisterAdapterResponse>(
         INVALID_ARGUMENT, "at least one command actuator is required");
+  }
+  if (request.delivery().schedule_case() !=
+      mujoco_sim::v2::ObservationDelivery::SCHEDULE_NOT_SET) {
+    return ErrorResponse<mujoco_sim::v2::RegisterAdapterResponse>(
+        INVALID_ARGUMENT, "controller adapters cannot set delivery");
   }
   std::string duplicate;
   if (HasDuplicates(request.observation_names(), &duplicate) ||
       HasDuplicates(request.command_names(), &duplicate)) {
-    return ErrorResponse<mujoco_sim::v1::RegisterControllerResponse>(
+    return ErrorResponse<mujoco_sim::v2::RegisterAdapterResponse>(
         INVALID_ARGUMENT, "duplicate resource name: " + duplicate);
   }
 
-  if (observers_.contains(request.controller_id())) {
-    return ErrorResponse<mujoco_sim::v1::RegisterControllerResponse>(
+  if (adapter_registry_->observers.contains(request.adapter_id())) {
+    return ErrorResponse<mujoco_sim::v2::RegisterAdapterResponse>(
         ALREADY_EXISTS, "adapter_id is already registered as an observer");
   }
 
-  const auto existing = controllers_.find(request.controller_id());
+  const auto existing = adapter_registry_->controllers.find(request.adapter_id());
   const bool replacing =
-      existing != controllers_.end() && existing->second.state == TIMED_OUT &&
+      existing != adapter_registry_->controllers.end() && existing->second.state == TIMED_OUT &&
       options_.allow_timed_out_adapter_replacement;
-  if (existing != controllers_.end() && !replacing) {
-    return ErrorResponse<mujoco_sim::v1::RegisterControllerResponse>(
+  if (existing != adapter_registry_->controllers.end() && !replacing) {
+    return ErrorResponse<mujoco_sim::v2::RegisterAdapterResponse>(
         ALREADY_EXISTS,
         existing->second.state == TIMED_OUT
             ? "timed-out controller replacement is disabled"
-            : "controller_id is already registered");
+            : "adapter_id is already registered");
   }
 
   Controller controller;
-  controller.id = request.controller_id();
-  controller.session_id = next_session_id_++;
+  controller.id = request.adapter_id();
+  controller.session_id = adapter_registry_->AllocateSession();
   controller.epoch = epoch_;
   controller.timeout_ms = request.timeout_ms() == 0 ? options_.default_timeout_ms
                                                     : request.timeout_ms();
-  controller.protocol_minor =
-      std::min(request.protocol_minor(), mujoco_sim::protocol::kProtocolMinor);
+  controller.protocol_minor = mujoco_sim::protocol::kProtocolMinor;
   controller.state = PROVISIONAL;
   controller.registered_at = std::chrono::steady_clock::now();
   controller.state_since_tick = current_tick_id_;
 
   for (const auto& name : request.observation_names()) {
-    const auto it = observations_by_name_.find(name);
-    if (it == observations_by_name_.end()) {
-      return ErrorResponse<mujoco_sim::v1::RegisterControllerResponse>(
+    const auto it = resource_catalog_->observations_by_name.find(name);
+    if (it == resource_catalog_->observations_by_name.end()) {
+      return ErrorResponse<mujoco_sim::v2::RegisterAdapterResponse>(
           NOT_FOUND, "unknown observation sensor: " + name);
     }
     CopyDescriptor(it->second, controller.layout.add_observations());
   }
 
   for (const auto& name : request.command_names()) {
-    const auto command = commands_by_name_.find(name);
-    if (command == commands_by_name_.end()) {
-      return ErrorResponse<mujoco_sim::v1::RegisterControllerResponse>(
+    const auto command = resource_catalog_->commands_by_name.find(name);
+    if (command == resource_catalog_->commands_by_name.end()) {
+      return ErrorResponse<mujoco_sim::v2::RegisterAdapterResponse>(
           NOT_FOUND, "unknown command actuator: " + name);
     }
-    const auto owner = actuator_owner_.find(name);
-    if (owner != actuator_owner_.end() &&
-        (!replacing || owner->second != request.controller_id())) {
-      return ErrorResponse<mujoco_sim::v1::RegisterControllerResponse>(
+    const auto owner = adapter_registry_->actuator_owner.find(name);
+    if (owner != adapter_registry_->actuator_owner.end() &&
+        (!replacing || owner->second != request.adapter_id())) {
+      return ErrorResponse<mujoco_sim::v2::RegisterAdapterResponse>(
           RESOURCE_CONFLICT,
           "actuator already owned by controller: " + owner->second);
     }
@@ -809,194 +1173,178 @@ SimulationCore::RegisterController(
   if (replacing) {
     ZeroControllerCommands(existing->second);
     ReleaseControllerResources(existing->second);
-    pending_commits_.erase(existing->first);
-    open_ticks_.erase(existing->first);
-    tick_required_controllers_.erase(existing->first);
-    tick_recipient_controllers_.erase(existing->first);
-    controllers_.erase(existing);
+    barrier_coordinator_->pending_commits.erase(existing->first);
+    InvalidateIssuedTick(existing->first);
+    barrier_coordinator_->required_controllers.erase(existing->first);
+    barrier_coordinator_->recipient_controllers.erase(existing->first);
+    adapter_registry_->controllers.erase(existing);
   }
 
   for (const auto& command : controller.layout.commands()) {
-    actuator_owner_[command.name()] = controller.id;
+    adapter_registry_->actuator_owner[command.name()] = controller.id;
   }
+  controller.layout.set_layout_hash(
+      mujoco_sim::protocol::ComputeLayoutHash(controller.layout));
 
-  mujoco_sim::v1::RegisterControllerResponse response;
+  mujoco_sim::v2::RegisterAdapterResponse response;
   response.set_code(OK);
-  response.set_controller_id(controller.id);
+  response.set_adapter_id(controller.id);
+  response.set_role(mujoco_sim::v2::CONTROLLER);
   response.set_session_id(controller.session_id);
   response.set_epoch(controller.epoch);
-  response.set_effective_protocol_major(mujoco_sim::protocol::kProtocolMajor);
-  response.set_effective_protocol_minor(
-      controller.protocol_minor);
   response.set_state(PROVISIONAL);
   if (replacing) {
     response.set_message("replaced timed-out controller session");
   }
   *response.mutable_layout() = controller.layout;
 
-  controllers_.emplace(controller.id, std::move(controller));
+  adapter_registry_->controllers.emplace(controller.id, std::move(controller));
   return response;
 }
 
-mujoco_sim::v1::ActivateControllerResponse
-SimulationCore::ActivateController(
-    const mujoco_sim::v1::ActivateControllerRequest& request) {
-  const auto it = controllers_.find(request.controller_id());
-  if (it == controllers_.end()) {
-    return ErrorResponse<mujoco_sim::v1::ActivateControllerResponse>(
+mujoco_sim::v2::ActivateAdapterResponse
+SimulationCore::ActivateControlAdapter(
+    const mujoco_sim::v2::ActivateAdapterRequest& request) {
+  const auto it = adapter_registry_->controllers.find(request.adapter_id());
+  if (it == adapter_registry_->controllers.end()) {
+    return ErrorResponse<mujoco_sim::v2::ActivateAdapterResponse>(
         NOT_FOUND, "controller is not registered");
   }
   Controller& controller = it->second;
   if (request.session_id() != controller.session_id) {
-    return ErrorResponse<mujoco_sim::v1::ActivateControllerResponse>(
+    return ErrorResponse<mujoco_sim::v2::ActivateAdapterResponse>(
         INVALID_SESSION, "session mismatch");
   }
   if (request.epoch() != epoch_) {
-    return ErrorResponse<mujoco_sim::v1::ActivateControllerResponse>(
+    return ErrorResponse<mujoco_sim::v2::ActivateAdapterResponse>(
         INVALID_EPOCH, "epoch mismatch");
   }
   if (server_state_ == ERROR_PAUSED ||
-      server_state_ == mujoco_sim::v1::STOPPED) {
-    return ErrorResponse<mujoco_sim::v1::ActivateControllerResponse>(
+      server_state_ == mujoco_sim::v2::STOPPED) {
+    return ErrorResponse<mujoco_sim::v2::ActivateAdapterResponse>(
         FAILED_PRECONDITION, "server is not accepting activations");
   }
   if (controller.state != PROVISIONAL) {
-    return ErrorResponse<mujoco_sim::v1::ActivateControllerResponse>(
+    return ErrorResponse<mujoco_sim::v2::ActivateAdapterResponse>(
         FAILED_PRECONDITION, "controller is not provisional");
   }
   SetControllerState(&controller, ACTIVE, {});
-  mujoco_sim::v1::ActivateControllerResponse response;
+  mujoco_sim::v2::ActivateAdapterResponse response;
   response.set_code(OK);
   response.set_state(ACTIVE);
   return response;
 }
 
-mujoco_sim::v1::UnregisterControllerResponse
-SimulationCore::UnregisterController(
-    const mujoco_sim::v1::UnregisterControllerRequest& request) {
-  const auto it = controllers_.find(request.controller_id());
-  if (it == controllers_.end()) {
-    return ErrorResponse<mujoco_sim::v1::UnregisterControllerResponse>(
-        NOT_FOUND, "controller is not registered");
+UnregisterAdapterResult
+SimulationCore::UnregisterControlAdapter(
+    const mujoco_sim::v2::UnregisterAdapterRequest& request) {
+  const auto it = adapter_registry_->controllers.find(request.adapter_id());
+  if (it == adapter_registry_->controllers.end()) {
+    return {ErrorResponse<mujoco_sim::v2::UnregisterAdapterResponse>(
+                NOT_FOUND, "controller is not registered"),
+            std::nullopt};
   }
   Controller& controller = it->second;
   if (request.session_id() != controller.session_id) {
-    return ErrorResponse<mujoco_sim::v1::UnregisterControllerResponse>(
-        INVALID_SESSION, "session mismatch");
+    return {ErrorResponse<mujoco_sim::v2::UnregisterAdapterResponse>(
+                INVALID_SESSION, "session mismatch"),
+            std::nullopt};
   }
   if (request.epoch() != epoch_) {
-    return ErrorResponse<mujoco_sim::v1::UnregisterControllerResponse>(
-        INVALID_EPOCH, "epoch mismatch");
+    return {ErrorResponse<mujoco_sim::v2::UnregisterAdapterResponse>(
+                INVALID_EPOCH, "epoch mismatch"),
+            std::nullopt};
   }
   ZeroControllerCommands(controller);
   ReleaseControllerResources(controller);
-  pending_commits_.erase(controller.id);
-  open_ticks_.erase(controller.id);
-  tick_required_controllers_.erase(controller.id);
-  tick_recipient_controllers_.erase(controller.id);
-  controllers_.erase(it);
-  StepIfBarrierComplete();
+  barrier_coordinator_->pending_commits.erase(controller.id);
+  InvalidateIssuedTick(controller.id);
+  barrier_coordinator_->required_controllers.erase(controller.id);
+  barrier_coordinator_->recipient_controllers.erase(controller.id);
+  adapter_registry_->controllers.erase(it);
+  auto step_completed = CompleteBarrier(StepCompletionSource::kUnregister);
 
-  mujoco_sim::v1::UnregisterControllerResponse response;
+  mujoco_sim::v2::UnregisterAdapterResponse response;
   response.set_code(OK);
   response.set_state(UNREGISTERED);
-  return response;
+  return {std::move(response), std::move(step_completed)};
 }
 
-mujoco_sim::v1::RegisterAdapterResponse SimulationCore::RegisterAdapter(
-    const mujoco_sim::v1::RegisterAdapterRequest& request) {
-  if (request.role() != mujoco_sim::v1::CONTROLLER &&
+mujoco_sim::v2::RegisterAdapterResponse SimulationCore::RegisterAdapter(
+    const mujoco_sim::v2::RegisterAdapterRequest& request) {
+  if (request.role() != mujoco_sim::v2::CONTROLLER &&
       request.role() != OBSERVER) {
-    return ErrorResponse<mujoco_sim::v1::RegisterAdapterResponse>(
+    return ErrorResponse<mujoco_sim::v2::RegisterAdapterResponse>(
         INVALID_ARGUMENT, "adapter role must be CONTROLLER or OBSERVER");
   }
-  if (request.protocol_major() != mujoco_sim::protocol::kProtocolMajor) {
-    return ErrorResponse<mujoco_sim::v1::RegisterAdapterResponse>(
-        VERSION_MISMATCH, "protocol major mismatch");
+  if (request.protocol_major() != mujoco_sim::protocol::kProtocolMajor ||
+      request.protocol_minor() != mujoco_sim::protocol::kProtocolMinor) {
+    return ErrorResponse<mujoco_sim::v2::RegisterAdapterResponse>(
+        VERSION_MISMATCH, "protocol version mismatch; expected 2.0");
   }
-  if (request.protocol_minor() < kRoleAwareApiMinimumMinor) {
-    return ErrorResponse<mujoco_sim::v1::RegisterAdapterResponse>(
-        VERSION_MISMATCH, "role-aware adapter API requires protocol minor 2");
-  }
-  if (request.role() == mujoco_sim::v1::CONTROLLER) {
-    mujoco_sim::v1::RegisterControllerRequest controller_request;
-    controller_request.set_server_name(request.server_name());
-    controller_request.set_controller_id(request.adapter_id());
-    controller_request.set_protocol_major(request.protocol_major());
-    controller_request.set_protocol_minor(request.protocol_minor());
-    controller_request.mutable_observation_names()->CopyFrom(
-        request.observation_names());
-    controller_request.mutable_command_names()->CopyFrom(
-        request.command_names());
-    controller_request.set_timeout_ms(request.timeout_ms());
-    const auto controller_response = RegisterController(controller_request);
-    mujoco_sim::v1::RegisterAdapterResponse response;
-    response.set_code(controller_response.code());
-    response.set_message(controller_response.message());
-    response.set_adapter_id(controller_response.controller_id());
-    response.set_role(mujoco_sim::v1::CONTROLLER);
-    response.set_session_id(controller_response.session_id());
-    response.set_epoch(controller_response.epoch());
-    response.set_effective_protocol_major(
-        controller_response.effective_protocol_major());
-    response.set_effective_protocol_minor(
-        controller_response.effective_protocol_minor());
-    *response.mutable_layout() = controller_response.layout();
-    response.set_state(controller_response.state());
-    return response;
+  if (request.role() == mujoco_sim::v2::CONTROLLER) {
+    return RegisterControlAdapter(request);
   }
   if (!IsModelLoaded()) {
-    return ErrorResponse<mujoco_sim::v1::RegisterAdapterResponse>(
+    return ErrorResponse<mujoco_sim::v2::RegisterAdapterResponse>(
         FAILED_PRECONDITION, "model is not loaded");
   }
   if (server_state_ == ERROR_PAUSED ||
-      server_state_ == mujoco_sim::v1::STOPPED) {
-    return ErrorResponse<mujoco_sim::v1::RegisterAdapterResponse>(
+      server_state_ == mujoco_sim::v2::STOPPED) {
+    return ErrorResponse<mujoco_sim::v2::RegisterAdapterResponse>(
         FAILED_PRECONDITION, "server is not accepting registrations");
   }
   if (request.server_name() != options_.server_name) {
-    return ErrorResponse<mujoco_sim::v1::RegisterAdapterResponse>(
+    return ErrorResponse<mujoco_sim::v2::RegisterAdapterResponse>(
         NOT_FOUND, "server name mismatch");
   }
   if (request.adapter_id().empty()) {
-    return ErrorResponse<mujoco_sim::v1::RegisterAdapterResponse>(
+    return ErrorResponse<mujoco_sim::v2::RegisterAdapterResponse>(
         INVALID_ARGUMENT, "adapter_id is required");
   }
+  std::string identifier_error;
+  if (!mujoco_sim::protocol::ValidateIdentifier(
+          request.adapter_id(),
+          mujoco_sim::protocol::IdentifierKind::kAdapter,
+          &identifier_error)) {
+    return ErrorResponse<mujoco_sim::v2::RegisterAdapterResponse>(
+        INVALID_ARGUMENT, identifier_error);
+  }
   if (request.observation_names().empty()) {
-    return ErrorResponse<mujoco_sim::v1::RegisterAdapterResponse>(
+    return ErrorResponse<mujoco_sim::v2::RegisterAdapterResponse>(
         INVALID_ARGUMENT, "at least one observation sensor is required");
   }
   if (!request.command_names().empty()) {
-    return ErrorResponse<mujoco_sim::v1::RegisterAdapterResponse>(
+    return ErrorResponse<mujoco_sim::v2::RegisterAdapterResponse>(
         INVALID_ARGUMENT, "observer adapters cannot claim actuators");
   }
   std::string duplicate;
   if (HasDuplicates(request.observation_names(), &duplicate)) {
-    return ErrorResponse<mujoco_sim::v1::RegisterAdapterResponse>(
+    return ErrorResponse<mujoco_sim::v2::RegisterAdapterResponse>(
         INVALID_ARGUMENT, "duplicate resource name: " + duplicate);
   }
   if (request.delivery().has_every_n_steps() &&
       request.delivery().every_n_steps() == 0) {
-    return ErrorResponse<mujoco_sim::v1::RegisterAdapterResponse>(
+    return ErrorResponse<mujoco_sim::v2::RegisterAdapterResponse>(
         INVALID_ARGUMENT, "every_n_steps must be >= 1");
   }
   if (request.delivery().has_period_s() &&
       (!std::isfinite(request.delivery().period_s()) ||
        request.delivery().period_s() <= 0.0)) {
-    return ErrorResponse<mujoco_sim::v1::RegisterAdapterResponse>(
+    return ErrorResponse<mujoco_sim::v2::RegisterAdapterResponse>(
         INVALID_ARGUMENT, "period_s must be finite and > 0");
   }
-  if (controllers_.contains(request.adapter_id())) {
-    return ErrorResponse<mujoco_sim::v1::RegisterAdapterResponse>(
+  if (adapter_registry_->controllers.contains(request.adapter_id())) {
+    return ErrorResponse<mujoco_sim::v2::RegisterAdapterResponse>(
         ALREADY_EXISTS, "adapter_id is already registered as a controller");
   }
 
-  const auto existing = observers_.find(request.adapter_id());
+  const auto existing = adapter_registry_->observers.find(request.adapter_id());
   const bool replacing =
-      existing != observers_.end() && existing->second.state == TIMED_OUT &&
+      existing != adapter_registry_->observers.end() && existing->second.state == TIMED_OUT &&
       options_.allow_timed_out_adapter_replacement;
-  if (existing != observers_.end() && !replacing) {
-    return ErrorResponse<mujoco_sim::v1::RegisterAdapterResponse>(
+  if (existing != adapter_registry_->observers.end() && !replacing) {
+    return ErrorResponse<mujoco_sim::v2::RegisterAdapterResponse>(
         ALREADY_EXISTS,
         existing->second.state == TIMED_OUT
             ? "timed-out observer replacement is disabled"
@@ -1009,92 +1357,75 @@ mujoco_sim::v1::RegisterAdapterResponse SimulationCore::RegisterAdapter(
   observer.timeout_ms = request.timeout_ms() == 0
                             ? options_.default_timeout_ms
                             : request.timeout_ms();
-  observer.protocol_minor =
-      std::min(request.protocol_minor(), mujoco_sim::protocol::kProtocolMinor);
+  observer.protocol_minor = mujoco_sim::protocol::kProtocolMinor;
   observer.registered_at = std::chrono::steady_clock::now();
   observer.last_heartbeat_at = observer.registered_at;
   observer.state_since_tick = current_tick_id_;
   observer.delivery = request.delivery();
   if (observer.delivery.schedule_case() ==
-      mujoco_sim::v1::ObservationDelivery::SCHEDULE_NOT_SET) {
+      mujoco_sim::v2::ObservationDelivery::SCHEDULE_NOT_SET) {
     observer.delivery.set_every_n_steps(1);
   }
   for (const auto& name : request.observation_names()) {
-    const auto found = observations_by_name_.find(name);
-    if (found == observations_by_name_.end()) {
-      return ErrorResponse<mujoco_sim::v1::RegisterAdapterResponse>(
+    const auto found = resource_catalog_->observations_by_name.find(name);
+    if (found == resource_catalog_->observations_by_name.end()) {
+      return ErrorResponse<mujoco_sim::v2::RegisterAdapterResponse>(
           NOT_FOUND, "unknown observation sensor: " + name);
     }
     CopyDescriptor(found->second, observer.layout.add_observations());
   }
-  observer.session_id = next_session_id_++;
+  observer.session_id = adapter_registry_->AllocateSession();
+  observer.layout.set_layout_hash(
+      mujoco_sim::protocol::ComputeLayoutHash(observer.layout));
   if (replacing) {
-    observers_.erase(existing);
+    adapter_registry_->observers.erase(existing);
   }
 
-  mujoco_sim::v1::RegisterAdapterResponse response;
+  mujoco_sim::v2::RegisterAdapterResponse response;
   response.set_code(OK);
   response.set_adapter_id(observer.id);
   response.set_role(OBSERVER);
   response.set_session_id(observer.session_id);
   response.set_epoch(observer.epoch);
-  response.set_effective_protocol_major(mujoco_sim::protocol::kProtocolMajor);
-  response.set_effective_protocol_minor(observer.protocol_minor);
   response.set_state(PROVISIONAL);
   *response.mutable_layout() = observer.layout;
   if (replacing) {
     response.set_message("replaced timed-out observer session");
   }
-  observers_.emplace(observer.id, std::move(observer));
+  adapter_registry_->observers.emplace(observer.id, std::move(observer));
   return response;
 }
 
-mujoco_sim::v1::ActivateAdapterResponse SimulationCore::ActivateAdapter(
-    const mujoco_sim::v1::ActivateAdapterRequest& request) {
-  if (request.role() == mujoco_sim::v1::CONTROLLER) {
-    const auto found = controllers_.find(request.adapter_id());
-    if (found != controllers_.end() &&
-        found->second.protocol_minor < kRoleAwareApiMinimumMinor) {
-      return ErrorResponse<mujoco_sim::v1::ActivateAdapterResponse>(
-          VERSION_MISMATCH,
-          "role-aware adapter API requires protocol minor 2");
-    }
-    mujoco_sim::v1::ActivateControllerRequest controller_request;
-    controller_request.set_controller_id(request.adapter_id());
-    controller_request.set_session_id(request.session_id());
-    controller_request.set_epoch(request.epoch());
-    const auto controller_response = ActivateController(controller_request);
-    mujoco_sim::v1::ActivateAdapterResponse response;
-    response.set_code(controller_response.code());
-    response.set_message(controller_response.message());
-    response.set_state(controller_response.state());
-    return response;
+mujoco_sim::v2::ActivateAdapterResponse SimulationCore::ActivateAdapter(
+    const mujoco_sim::v2::ActivateAdapterRequest& request) {
+  if (request.role() == mujoco_sim::v2::CONTROLLER) {
+    return ActivateControlAdapter(request);
   }
   if (request.role() != OBSERVER) {
-    return ErrorResponse<mujoco_sim::v1::ActivateAdapterResponse>(
+    return ErrorResponse<mujoco_sim::v2::ActivateAdapterResponse>(
         INVALID_ARGUMENT, "adapter role must be CONTROLLER or OBSERVER");
   }
-  const auto found = observers_.find(request.adapter_id());
-  if (found == observers_.end()) {
-    return ErrorResponse<mujoco_sim::v1::ActivateAdapterResponse>(
+  const auto found = adapter_registry_->observers.find(request.adapter_id());
+  if (found == adapter_registry_->observers.end()) {
+    return ErrorResponse<mujoco_sim::v2::ActivateAdapterResponse>(
         NOT_FOUND, "observer is not registered");
   }
   Observer& observer = found->second;
   if (request.session_id() != observer.session_id) {
-    return ErrorResponse<mujoco_sim::v1::ActivateAdapterResponse>(
+    return ErrorResponse<mujoco_sim::v2::ActivateAdapterResponse>(
         INVALID_SESSION, "session mismatch");
   }
   if (request.epoch() != epoch_) {
-    return ErrorResponse<mujoco_sim::v1::ActivateAdapterResponse>(
+    return ErrorResponse<mujoco_sim::v2::ActivateAdapterResponse>(
         INVALID_EPOCH, "epoch mismatch");
   }
   if (observer.state != PROVISIONAL) {
-    return ErrorResponse<mujoco_sim::v1::ActivateAdapterResponse>(
+    return ErrorResponse<mujoco_sim::v2::ActivateAdapterResponse>(
         FAILED_PRECONDITION, "observer is not provisional");
   }
   if (server_state_ == ERROR_PAUSED ||
-      server_state_ == mujoco_sim::v1::STOPPED) {
-    return ErrorResponse<mujoco_sim::v1::ActivateAdapterResponse>(
+      server_state_ == mujoco_sim::v2::STOPPED) {
+    return ErrorResponse<mujoco_sim::v2::ActivateAdapterResponse>(
         FAILED_PRECONDITION, "server is not accepting activations");
   }
   observer.state = ACTIVE;
@@ -1102,213 +1433,174 @@ mujoco_sim::v1::ActivateAdapterResponse SimulationCore::ActivateAdapter(
   observer.activation_tick = current_tick_id_;
   observer.last_heartbeat_at = std::chrono::steady_clock::now();
   observer.message.clear();
-  mujoco_sim::v1::ActivateAdapterResponse response;
+  mujoco_sim::v2::ActivateAdapterResponse response;
   response.set_code(OK);
   response.set_state(ACTIVE);
   return response;
 }
 
-mujoco_sim::v1::UnregisterAdapterResponse SimulationCore::UnregisterAdapter(
-    const mujoco_sim::v1::UnregisterAdapterRequest& request) {
-  if (request.role() == mujoco_sim::v1::CONTROLLER) {
-    const auto found = controllers_.find(request.adapter_id());
-    if (found != controllers_.end() &&
-        found->second.protocol_minor < kRoleAwareApiMinimumMinor) {
-      return ErrorResponse<mujoco_sim::v1::UnregisterAdapterResponse>(
-          VERSION_MISMATCH,
-          "role-aware adapter API requires protocol minor 2");
-    }
-    mujoco_sim::v1::UnregisterControllerRequest controller_request;
-    controller_request.set_controller_id(request.adapter_id());
-    controller_request.set_session_id(request.session_id());
-    controller_request.set_epoch(request.epoch());
-    const auto controller_response = UnregisterController(controller_request);
-    mujoco_sim::v1::UnregisterAdapterResponse response;
-    response.set_code(controller_response.code());
-    response.set_message(controller_response.message());
-    response.set_state(controller_response.state());
-    return response;
+UnregisterAdapterResult SimulationCore::UnregisterAdapter(
+    const mujoco_sim::v2::UnregisterAdapterRequest& request) {
+  if (request.role() == mujoco_sim::v2::CONTROLLER) {
+    return UnregisterControlAdapter(request);
   }
   if (request.role() != OBSERVER) {
-    return ErrorResponse<mujoco_sim::v1::UnregisterAdapterResponse>(
-        INVALID_ARGUMENT, "adapter role must be CONTROLLER or OBSERVER");
+    return {ErrorResponse<mujoco_sim::v2::UnregisterAdapterResponse>(
+                INVALID_ARGUMENT,
+                "adapter role must be CONTROLLER or OBSERVER"),
+            std::nullopt};
   }
-  const auto found = observers_.find(request.adapter_id());
-  if (found == observers_.end()) {
-    return ErrorResponse<mujoco_sim::v1::UnregisterAdapterResponse>(
-        NOT_FOUND, "observer is not registered");
+  const auto found = adapter_registry_->observers.find(request.adapter_id());
+  if (found == adapter_registry_->observers.end()) {
+    return {ErrorResponse<mujoco_sim::v2::UnregisterAdapterResponse>(
+                NOT_FOUND, "observer is not registered"),
+            std::nullopt};
   }
   if (request.session_id() != found->second.session_id) {
-    return ErrorResponse<mujoco_sim::v1::UnregisterAdapterResponse>(
-        INVALID_SESSION, "session mismatch");
+    return {ErrorResponse<mujoco_sim::v2::UnregisterAdapterResponse>(
+                INVALID_SESSION, "session mismatch"),
+            std::nullopt};
   }
   if (request.epoch() != epoch_) {
-    return ErrorResponse<mujoco_sim::v1::UnregisterAdapterResponse>(
-        INVALID_EPOCH, "epoch mismatch");
+    return {ErrorResponse<mujoco_sim::v2::UnregisterAdapterResponse>(
+                INVALID_EPOCH, "epoch mismatch"),
+            std::nullopt};
   }
-  observers_.erase(found);
-  mujoco_sim::v1::UnregisterAdapterResponse response;
+  adapter_registry_->observers.erase(found);
+  mujoco_sim::v2::UnregisterAdapterResponse response;
   response.set_code(OK);
   response.set_state(UNREGISTERED);
-  return response;
+  return {std::move(response), std::nullopt};
 }
 
-std::vector<mujoco_sim::v1::Tick> SimulationCore::OpenTick() {
-  std::vector<mujoco_sim::v1::Tick> ticks;
+std::vector<IssuedTickHandle> SimulationCore::OpenIssuedTicks() {
+  std::vector<IssuedTickHandle> ticks;
   if (!IsModelLoaded() || server_state_ == ERROR_PAUSED ||
-      server_state_ == mujoco_sim::v1::STOPPED) {
+      server_state_ == mujoco_sim::v2::STOPPED) {
     return ticks;
   }
   if (!tick_open_) {
-    pending_commits_.clear();
-    open_ticks_.clear();
-    tick_required_controllers_.clear();
-    tick_recipient_controllers_.clear();
-    for (auto& [controller_id, controller] : controllers_) {
+    InvalidateAllIssuedTicks();
+    barrier_coordinator_->Reset();
+    for (auto& [adapter_id, controller] : adapter_registry_->controllers) {
       if (controller.recovery_pending) {
         controller.recovery_pending = false;
         SetControllerState(&controller, ACTIVE, {});
       }
       if (controller.state == ACTIVE) {
-        tick_required_controllers_.emplace(controller_id, true);
-        tick_recipient_controllers_.emplace(controller_id, true);
+        barrier_coordinator_->required_controllers.emplace(adapter_id, true);
+        barrier_coordinator_->recipient_controllers.emplace(adapter_id, true);
       } else if (controller.state == TIMED_OUT) {
-        tick_recipient_controllers_.emplace(controller_id, true);
+        barrier_coordinator_->recipient_controllers.emplace(adapter_id, true);
       }
     }
-    for (const auto& [controller_id, _] : tick_recipient_controllers_) {
-      auto& controller = controllers_.at(controller_id);
+    for (const auto& [adapter_id, _] : barrier_coordinator_->recipient_controllers) {
+      auto& controller = adapter_registry_->controllers.at(adapter_id);
       controller.last_tick_sent = current_tick_id_;
       controller.has_tick_sent = true;
-      open_ticks_.emplace(controller_id, BuildTickFor(controller));
+      const auto issued = tick_store_->Insert(
+          adapter_id, BuildTickFor(controller),
+          controller.layout.ByteSizeLong(), controller.session_id, epoch_,
+          current_tick_id_);
+      if (!issued) {
+        EnterErrorPaused("failed to serialize issued Tick");
+        return {};
+      }
     }
     tick_started_at_ = std::chrono::steady_clock::now();
     tick_open_ = true;
   }
   server_state_ = RUNNING;
-  for (const auto& [controller_id, _] : tick_recipient_controllers_) {
-    const auto it = controllers_.find(controller_id);
-    if (it == controllers_.end() ||
+  for (const auto& [adapter_id, _] : barrier_coordinator_->recipient_controllers) {
+    const auto it = adapter_registry_->controllers.find(adapter_id);
+    if (it == adapter_registry_->controllers.end() ||
         (it->second.state != ACTIVE && it->second.state != TIMED_OUT)) {
       continue;
     }
-    const auto tick = open_ticks_.find(controller_id);
-    if (tick != open_ticks_.end()) {
-      ticks.push_back(tick->second);
-    }
+    const auto tick = tick_store_->Find(adapter_id);
+    if (tick) ticks.push_back(tick);
   }
   return ticks;
 }
 
-bool SimulationCore::IsTickIssued(const mujoco_sim::v1::Tick& tick) const {
-  const auto issued = open_ticks_.find(tick.controller_id());
-  return tick_open_ && issued != open_ticks_.end() &&
-         issued->second.SerializeAsString() == tick.SerializeAsString();
+bool SimulationCore::IsIssuedTickCurrent(
+    const IssuedTickIdentity& identity) const {
+  return tick_open_ && tick_store_->IsCurrent(identity);
 }
 
-mujoco_sim::v1::Tick SimulationCore::BuildTickFor(
+void SimulationCore::InvalidateIssuedTick(const std::string& adapter_id) {
+  tick_store_->Invalidate(adapter_id);
+}
+
+void SimulationCore::InvalidateAllIssuedTicks() {
+  tick_store_->InvalidateAll();
+}
+
+mujoco_sim::v2::Tick SimulationCore::BuildTickFor(
     const Controller& controller) const {
-  mujoco_sim::v1::Tick tick;
+  mujoco_sim::v2::Tick tick;
   *tick.mutable_header() = MakeHeader(controller.session_id);
-  tick.set_controller_id(controller.id);
-  const auto wire_state =
-      controller.protocol_minor == 0 && controller.state == TIMED_OUT
-          ? ACTIVE
-          : controller.state;
-  tick.set_controller_state(wire_state);
-  *tick.mutable_layout() = controller.layout;
-  tick.mutable_header()->set_protocol_minor(controller.protocol_minor);
+  tick.set_adapter_id(controller.id);
+  tick.set_controller_state(controller.state);
+  tick.set_layout_hash(controller.layout.layout_hash());
 
   for (const auto& observation : controller.layout.observations()) {
     auto* block = tick.add_observations();
     block->set_name(observation.name());
     const int sensor_id = observation.mujoco_id();
-    const int address = model_->sensor_adr[sensor_id];
-    const int dimension = model_->sensor_dim[sensor_id];
+    const int address = model_state_->model->sensor_adr[sensor_id];
+    const int dimension = model_state_->model->sensor_dim[sensor_id];
     for (int i = 0; i < dimension; ++i) {
-      block->add_values(static_cast<double>(data_->sensordata[address + i]));
+      block->add_values(static_cast<double>(model_state_->data->sensordata[address + i]));
     }
   }
 
   return tick;
 }
 
-std::vector<mujoco_sim::v1::ObservationFrame>
-SimulationCore::CollectObservationFrames() {
-  std::vector<mujoco_sim::v1::ObservationFrame> frames;
-  frames.swap(pending_observation_frames_);
-  return frames;
-}
-
-void SimulationCore::QueueObservationFramesForCompletedStep() {
-  for (auto& [_, observer] : observers_) {
+std::vector<mujoco_sim::v2::ObservationFrame>
+SimulationCore::BuildObservationFramesForCompletedStep() {
+  std::vector<mujoco_sim::v2::ObservationFrame> frames;
+  for (auto& [_, observer] : adapter_registry_->observers) {
     if (observer.state != ACTIVE ||
         current_tick_id_ <= observer.activation_tick) {
       continue;
     }
 
-    bool due = !observer.has_delivery;
-    if (!due && observer.delivery.has_every_n_steps()) {
-      due = current_tick_id_ - observer.last_delivery_tick >=
-            observer.delivery.every_n_steps();
-    } else if (!due && observer.delivery.has_period_s()) {
-      const long double elapsed_steps = static_cast<long double>(
-          current_tick_id_ - observer.delivery_phase_tick);
-      const long double elapsed =
-          elapsed_steps * static_cast<long double>(timestep());
-      const long double deadline =
-          static_cast<long double>(observer.next_delivery_period) *
-          static_cast<long double>(observer.delivery.period_s());
-      const long double tolerance =
-          static_cast<long double>(std::numeric_limits<double>::epsilon()) *
-          8.0L * std::max({1.0L, std::abs(elapsed), std::abs(deadline)});
-      due = elapsed + tolerance >= deadline;
-    }
-    if (!due) {
+    if (!observation_scheduler_->Due(observer, current_tick_id_, timestep())) {
       continue;
     }
 
-    pending_observation_frames_.push_back(BuildObservationFrame(&observer));
-    observer.last_delivery_tick = current_tick_id_;
-    if (observer.delivery.has_period_s()) {
-      const double period = observer.delivery.period_s();
-      if (!observer.has_delivery) {
-        observer.delivery_phase_tick = current_tick_id_;
-        observer.next_delivery_period = 1;
-      } else if (period <= timestep()) {
-        observer.next_delivery_period =
-            current_tick_id_ - observer.delivery_phase_tick + 1;
-      } else {
-        ++observer.next_delivery_period;
-      }
-    }
-    observer.has_delivery = true;
+    frames.push_back(BuildObservationFrame(&observer));
+    observation_scheduler_->MarkDelivered(&observer, current_tick_id_,
+                                           timestep());
   }
+  return frames;
 }
 
-mujoco_sim::v1::ObservationFrame SimulationCore::BuildObservationFrame(
+mujoco_sim::v2::ObservationFrame SimulationCore::BuildObservationFrame(
     Observer* observer) const {
-  mujoco_sim::v1::ObservationFrame frame;
+  mujoco_sim::v2::ObservationFrame frame;
   *frame.mutable_header() = MakeHeader(observer->session_id);
   frame.mutable_header()->set_protocol_minor(observer->protocol_minor);
-  frame.set_observer_id(observer->id);
+  frame.set_adapter_id(observer->id);
   frame.set_sequence(++observer->sequence);
   for (const auto& observation : observer->layout.observations()) {
     auto* block = frame.add_observations();
     block->set_name(observation.name());
     const int sensor_id = observation.mujoco_id();
-    const int address = model_->sensor_adr[sensor_id];
-    const int dimension = model_->sensor_dim[sensor_id];
+    const int address = model_state_->model->sensor_adr[sensor_id];
+    const int dimension = model_state_->model->sensor_dim[sensor_id];
     for (int i = 0; i < dimension; ++i) {
-      block->add_values(static_cast<double>(data_->sensordata[address + i]));
+      block->add_values(static_cast<double>(model_state_->data->sensordata[address + i]));
     }
   }
   return frame;
 }
 
-mujoco_sim::v1::Header SimulationCore::MakeHeader(
+mujoco_sim::v2::Header SimulationCore::MakeHeader(
     std::uint64_t session_id) const {
-  mujoco_sim::v1::Header header;
+  mujoco_sim::v2::Header header;
   header.set_server_name(options_.server_name);
   header.set_session_id(session_id);
   header.set_epoch(epoch_);
@@ -1316,12 +1608,12 @@ mujoco_sim::v1::Header SimulationCore::MakeHeader(
   header.set_timestamp_unix_nanos(NowUnixNanos());
   header.set_protocol_major(mujoco_sim::protocol::kProtocolMajor);
   header.set_protocol_minor(mujoco_sim::protocol::kProtocolMinor);
-  header.set_simulation_time_s(simulation_time_);
+  header.set_simulation_time_s(model_state_->simulation_time);
   return header;
 }
 
 bool SimulationCore::ValidateCommonHeader(
-    const mujoco_sim::v1::Header& header, const Controller& controller,
+    const mujoco_sim::v2::Header& header, const Controller& controller,
     std::string* message) const {
   if (header.server_name() != options_.server_name) {
     *message = "server name mismatch";
@@ -1342,44 +1634,41 @@ bool SimulationCore::ValidateCommonHeader(
   return true;
 }
 
-bool SimulationCore::StepIfBarrierComplete() {
-  if (!tick_open_ ||
-      pending_commits_.size() != tick_required_controllers_.size()) {
-    return false;
+std::optional<StepCompletedEvent> SimulationCore::CompleteBarrier(
+    StepCompletionSource source) {
+  if (!tick_open_ || !barrier_coordinator_->Ready()) {
+    return std::nullopt;
   }
-  for (const auto& [controller_id, _] : tick_required_controllers_) {
-    if (!pending_commits_.contains(controller_id)) {
-      return false;
-    }
-  }
-  for (const auto& [_, pending] : pending_commits_) {
-    for (const auto& command : pending.commands()) {
-      const auto& descriptor = commands_by_name_.at(command.name());
-      data_->ctrl[descriptor.mujoco_id()] = command.values(0);
-    }
-  }
-  mj_step(model_.get(), data_.get());
-  simulation_time_ = data_->time;
+  model_state_->ApplyActuatorWrites(
+      barrier_coordinator_->BuildWritePlan(*resource_catalog_));
+  model_state_->Step();
   ++current_tick_id_;
-  QueueObservationFramesForCompletedStep();
-  pending_commits_.clear();
-  open_ticks_.clear();
-  tick_required_controllers_.clear();
-  tick_recipient_controllers_.clear();
+  StepCompletedEvent event;
+  event.completed_tick_id = current_tick_id_ - 1;
+  event.next_tick_id = current_tick_id_;
+  event.simulation_time_s = model_state_->simulation_time;
+  event.source = source;
+  event.observer_frames = BuildObservationFramesForCompletedStep();
+  InvalidateAllIssuedTicks();
+  barrier_coordinator_->Reset();
   tick_open_ = false;
-  return true;
+  return event;
+}
+
+EmptyBarrierResult SimulationCore::CompleteEmptyBarrier() {
+  return {CompleteBarrier(StepCompletionSource::kEmptyBarrier)};
 }
 
 CommitResult SimulationCore::SubmitCommit(
-    const mujoco_sim::v1::AdapterCommit& commit) {
+    const mujoco_sim::v2::AdapterCommit& commit) {
   CommitResult result;
   if (server_state_ == ERROR_PAUSED) {
     result.code = FAILED_PRECONDITION;
     result.message = "server is error-paused";
     return result;
   }
-  const auto controller_it = controllers_.find(commit.controller_id());
-  if (controller_it == controllers_.end()) {
+  const auto controller_it = adapter_registry_->controllers.find(commit.adapter_id());
+  if (controller_it == adapter_registry_->controllers.end()) {
     result.code = NOT_FOUND;
     result.message = "controller is not registered";
     return result;
@@ -1424,7 +1713,7 @@ CommitResult SimulationCore::SubmitCommit(
         result.message = "duplicate recovery commit ignored";
         return result;
       }
-      result.stepped = EnterControllerError(
+      result.step_completed = EnterControllerError(
           &controller, "duplicate recovery commit payload mismatch");
       result.code = INVALID_COMMAND;
       result.message = controller.message;
@@ -1440,7 +1729,7 @@ CommitResult SimulationCore::SubmitCommit(
       result.message = "commit does not match a new Tick issued for recovery";
       return result;
     }
-    if (commit.status() != mujoco_sim::v1::COMMIT_OK) {
+    if (commit.status() != mujoco_sim::v2::COMMIT_OK) {
       result.code = INVALID_COMMAND;
       result.message = "timed-out controller did not report a valid commit";
       return result;
@@ -1476,7 +1765,7 @@ CommitResult SimulationCore::SubmitCommit(
       return result;
     }
     if (!SameCommitPayload(commit, controller.last_commit)) {
-      result.stepped = EnterControllerError(
+      result.step_completed = EnterControllerError(
           &controller, "stale duplicate commit payload mismatch");
       result.code = INVALID_COMMAND;
       result.message = controller.message;
@@ -1498,7 +1787,7 @@ CommitResult SimulationCore::SubmitCommit(
     result.message = "no tick is open";
     return result;
   }
-  if (!tick_required_controllers_.contains(controller.id)) {
+  if (!barrier_coordinator_->required_controllers.contains(controller.id)) {
     result.code = FAILED_PRECONDITION;
     result.message = "controller joins the barrier on the next Tick";
     return result;
@@ -1509,10 +1798,10 @@ CommitResult SimulationCore::SubmitCommit(
     return result;
   }
 
-  const auto pending_it = pending_commits_.find(controller.id);
-  if (pending_it != pending_commits_.end()) {
+  const auto pending_it = barrier_coordinator_->pending_commits.find(controller.id);
+  if (pending_it != barrier_coordinator_->pending_commits.end()) {
     if (!SameCommitPayload(commit, pending_it->second)) {
-      result.stepped = EnterControllerError(
+      result.step_completed = EnterControllerError(
           &controller, "duplicate commit payload mismatch");
       result.code = INVALID_COMMAND;
       result.message = controller.message;
@@ -1525,8 +1814,8 @@ CommitResult SimulationCore::SubmitCommit(
     return result;
   }
 
-  if (commit.status() != mujoco_sim::v1::COMMIT_OK) {
-    result.stepped = EnterControllerError(
+  if (commit.status() != mujoco_sim::v2::COMMIT_OK) {
+    result.step_completed = EnterControllerError(
         &controller,
         "controller reported commit error: " + commit.error_message());
     result.code = INVALID_COMMAND;
@@ -1537,7 +1826,7 @@ CommitResult SimulationCore::SubmitCommit(
   }
 
   if (!ValidateCommands(controller, commit, &message)) {
-    result.stepped = EnterControllerError(&controller, message);
+    result.step_completed = EnterControllerError(&controller, message);
     result.code = INVALID_COMMAND;
     result.message = controller.message;
     result.controller_state_changed = true;
@@ -1545,56 +1834,46 @@ CommitResult SimulationCore::SubmitCommit(
     return result;
   }
 
-  pending_commits_.emplace(controller.id, commit);
+  barrier_coordinator_->pending_commits.emplace(controller.id, commit);
   controller.last_commit_tick = current_tick_id_;
   controller.has_commit = true;
   controller.last_commit = commit;
-  if (pending_commits_.size() != tick_required_controllers_.size()) {
+  if (barrier_coordinator_->pending_commits.size() != barrier_coordinator_->required_controllers.size()) {
     result.message = "commit accepted";
     return result;
   }
-  result.stepped = StepIfBarrierComplete();
-  result.message = result.stepped ? "barrier complete" : "commit accepted";
+  result.step_completed = CompleteBarrier(StepCompletionSource::kCommit);
+  result.message = result.step_completed ? "barrier complete"
+                                         : "commit accepted";
   return result;
 }
 
 void SimulationCore::AcceptHeartbeat(
-    const mujoco_sim::v1::Heartbeat& heartbeat) {
-  const auto controller_it = controllers_.find(heartbeat.controller_id());
-  if (controller_it == controllers_.end()) {
-    return;
-  }
-  Controller& controller = controller_it->second;
-  const auto& header = heartbeat.header();
-  if (header.server_name() == options_.server_name &&
-      header.session_id() == controller.session_id &&
-      header.epoch() == epoch_ &&
-      header.protocol_major() == mujoco_sim::protocol::kProtocolMajor &&
-      header.protocol_minor() == controller.protocol_minor &&
-      header.tick_id() <= controller.last_tick_sent) {
-    controller.last_heartbeat_tick =
-        std::max(controller.last_heartbeat_tick, header.tick_id());
-  }
-}
-
-void SimulationCore::AcceptAdapterHeartbeat(
-    const mujoco_sim::v1::AdapterHeartbeat& heartbeat,
+    const mujoco_sim::v2::AdapterHeartbeat& heartbeat,
     std::chrono::steady_clock::time_point now) {
-  if (heartbeat.role() == mujoco_sim::v1::CONTROLLER) {
-    if (heartbeat.header().protocol_minor() < kRoleAwareApiMinimumMinor) {
+  if (heartbeat.role() == mujoco_sim::v2::CONTROLLER) {
+    const auto found = adapter_registry_->controllers.find(heartbeat.adapter_id());
+    if (found == adapter_registry_->controllers.end()) {
       return;
     }
-    mujoco_sim::v1::Heartbeat controller_heartbeat;
-    *controller_heartbeat.mutable_header() = heartbeat.header();
-    controller_heartbeat.set_controller_id(heartbeat.adapter_id());
-    AcceptHeartbeat(controller_heartbeat);
+    Controller& controller = found->second;
+    const auto& header = heartbeat.header();
+    if (header.server_name() == options_.server_name &&
+        header.session_id() == controller.session_id &&
+        header.epoch() == epoch_ &&
+        header.protocol_major() == mujoco_sim::protocol::kProtocolMajor &&
+        header.protocol_minor() == mujoco_sim::protocol::kProtocolMinor &&
+        header.tick_id() <= controller.last_tick_sent) {
+      controller.last_heartbeat_tick =
+          std::max(controller.last_heartbeat_tick, header.tick_id());
+    }
     return;
   }
   if (heartbeat.role() != OBSERVER) {
     return;
   }
-  const auto found = observers_.find(heartbeat.adapter_id());
-  if (found == observers_.end()) {
+  const auto found = adapter_registry_->observers.find(heartbeat.adapter_id());
+  if (found == adapter_registry_->observers.end()) {
     return;
   }
   Observer& observer = found->second;
@@ -1603,41 +1882,42 @@ void SimulationCore::AcceptAdapterHeartbeat(
       header.server_name() == options_.server_name &&
       header.session_id() == observer.session_id && header.epoch() == epoch_ &&
       header.protocol_major() == mujoco_sim::protocol::kProtocolMajor &&
-      header.protocol_minor() == observer.protocol_minor &&
+      header.protocol_minor() == mujoco_sim::protocol::kProtocolMinor &&
       heartbeat.last_observation_sequence() <= observer.sequence) {
     observer.last_heartbeat_at = now;
   }
 }
 
-DeadlineResult SimulationCore::CheckControllerDeadlines(
+DeadlineResult SimulationCore::CheckDeadlines(
     std::chrono::steady_clock::time_point now) {
   DeadlineResult result;
-  for (auto it = controllers_.begin(); it != controllers_.end();) {
+  for (auto it = adapter_registry_->controllers.begin(); it != adapter_registry_->controllers.end();) {
     Controller& controller = it->second;
     if (controller.state == PROVISIONAL &&
         now - controller.registered_at >
             std::chrono::milliseconds(options_.activation_timeout_ms)) {
       result.transitions.push_back(
-          ControllerTransition{controller.id, controller.session_id,
+          AdapterTransition{controller.id, mujoco_sim::v2::CONTROLLER,
+                               controller.session_id,
                                PROVISIONAL, UNREGISTERED,
                                "controller activation timed out",
                                current_tick_id_});
       ReleaseControllerResources(controller);
-      it = controllers_.erase(it);
+      it = adapter_registry_->controllers.erase(it);
       continue;
     }
     ++it;
   }
 
-  for (auto it = observers_.begin(); it != observers_.end();) {
+  for (auto it = adapter_registry_->observers.begin(); it != adapter_registry_->observers.end();) {
     Observer& observer = it->second;
     if (observer.state == PROVISIONAL &&
         now - observer.registered_at >
             std::chrono::milliseconds(options_.activation_timeout_ms)) {
-      result.adapter_transitions.push_back(DeadlineResult::AdapterTransition{
+      result.transitions.push_back(AdapterTransition{
           observer.id, OBSERVER, observer.session_id, PROVISIONAL,
           UNREGISTERED, "observer activation timed out", current_tick_id_});
-      it = observers_.erase(it);
+      it = adapter_registry_->observers.erase(it);
       continue;
     }
     if (observer.state == ACTIVE &&
@@ -1648,7 +1928,7 @@ DeadlineResult SimulationCore::CheckControllerDeadlines(
       observer.state = TIMED_OUT;
       observer.state_since_tick = current_tick_id_;
       observer.message = "observer keepalive timed out";
-      result.adapter_transitions.push_back(DeadlineResult::AdapterTransition{
+      result.transitions.push_back(AdapterTransition{
           observer.id, OBSERVER, observer.session_id, old_state, TIMED_OUT,
           observer.message, current_tick_id_});
     }
@@ -1656,9 +1936,9 @@ DeadlineResult SimulationCore::CheckControllerDeadlines(
   }
 
   if (tick_open_ && server_state_ != ERROR_PAUSED) {
-    for (auto& [controller_id, controller] : controllers_) {
-      if (!tick_required_controllers_.contains(controller_id) ||
-          pending_commits_.contains(controller_id)) {
+    for (auto& [adapter_id, controller] : adapter_registry_->controllers) {
+      if (!barrier_coordinator_->required_controllers.contains(adapter_id) ||
+          barrier_coordinator_->pending_commits.contains(adapter_id)) {
         continue;
       }
       const auto elapsed_ms =
@@ -1677,79 +1957,27 @@ DeadlineResult SimulationCore::CheckControllerDeadlines(
       SetControllerState(&controller, TIMED_OUT,
                          "controller timed out waiting for Commit");
       ZeroControllerCommands(controller);
-      pending_commits_.erase(controller_id);
-      tick_required_controllers_.erase(controller_id);
+      barrier_coordinator_->pending_commits.erase(adapter_id);
+      barrier_coordinator_->required_controllers.erase(adapter_id);
       result.transitions.push_back(
-          ControllerTransition{controller.id, controller.session_id, old_state,
+          AdapterTransition{controller.id, mujoco_sim::v2::CONTROLLER,
+                               controller.session_id, old_state,
                                TIMED_OUT, controller.message,
                                current_tick_id_});
     }
-    result.stepped = StepIfBarrierComplete();
+    result.step_completed = CompleteBarrier(StepCompletionSource::kDeadline);
   }
   return result;
 }
 
-bool SimulationCore::CheckTickTimeout(
-    std::chrono::steady_clock::time_point now) {
-  const auto result = CheckControllerDeadlines(now);
-  return std::any_of(result.transitions.begin(), result.transitions.end(),
-                     [](const auto& transition) {
-                       return transition.new_state == TIMED_OUT;
-                     });
-}
-
-mujoco_sim::v1::ServerStatus SimulationCore::MakeStatus() const {
-  mujoco_sim::v1::ServerStatus status;
-  *status.mutable_header() = MakeHeader(0);
-  status.set_state(server_state_);
-  status.set_message(status_message_);
-  for (const auto& [_, controller] : controllers_) {
-    auto* controller_status = status.add_controllers();
-    controller_status->set_controller_id(controller.id);
-    controller_status->set_session_id(controller.session_id);
-    controller_status->set_last_tick_id(controller.last_heartbeat_tick);
-    controller_status->set_state(controller.state);
-    controller_status->set_message(controller.message);
-    if (controller.has_commit) {
-      controller_status->set_last_commit_tick_id(controller.last_commit_tick);
-    }
-    controller_status->set_state_since_tick_id(controller.state_since_tick);
-    controller_status->set_timeout_count(controller.timeout_count);
-    controller_status->set_required_for_barrier(
-        tick_required_controllers_.contains(controller.id));
-
-    auto* adapter_status = status.add_adapters();
-    adapter_status->set_adapter_id(controller.id);
-    adapter_status->set_role(mujoco_sim::v1::CONTROLLER);
-    adapter_status->set_session_id(controller.session_id);
-    adapter_status->set_state(controller.state);
-    adapter_status->set_message(controller.message);
-    adapter_status->set_state_since_tick_id(controller.state_since_tick);
-    adapter_status->set_timeout_count(controller.timeout_count);
-    if (controller.has_tick_sent) {
-      adapter_status->set_last_delivery_tick_id(controller.last_tick_sent);
-    }
-  }
-  for (const auto& [_, observer] : observers_) {
-    auto* adapter_status = status.add_adapters();
-    adapter_status->set_adapter_id(observer.id);
-    adapter_status->set_role(OBSERVER);
-    adapter_status->set_session_id(observer.session_id);
-    adapter_status->set_state(observer.state);
-    adapter_status->set_message(observer.message);
-    adapter_status->set_state_since_tick_id(observer.state_since_tick);
-    adapter_status->set_timeout_count(observer.timeout_count);
-    if (observer.has_delivery) {
-      adapter_status->set_last_delivery_tick_id(observer.last_delivery_tick);
-    }
-    adapter_status->set_last_observation_sequence(observer.sequence);
-  }
-  return status;
+mujoco_sim::v2::ServerStatus SimulationCore::MakeStatus() const {
+  return status_builder_->Build(MakeHeader(0), server_state_, status_message_,
+                                *adapter_registry_, *barrier_coordinator_);
 }
 
 bool SimulationCore::ValidateCommands(
     const Controller& controller,
-    const mujoco_sim::v1::AdapterCommit& commit,
+    const mujoco_sim::v2::AdapterCommit& commit,
     std::string* message) const {
   std::set<std::string> expected;
   for (const auto& command : controller.layout.commands()) {
@@ -1775,7 +2003,7 @@ bool SimulationCore::ValidateCommands(
       *message = "actuator command is not finite: " + command.name();
       return false;
     }
-    const auto descriptor = commands_by_name_.at(command.name());
+    const auto descriptor = resource_catalog_->commands_by_name.at(command.name());
     if (descriptor.has_ctrl_range() &&
         (value < descriptor.ctrl_min() || value > descriptor.ctrl_max())) {
       *message = "actuator command is outside ctrl range: " + command.name();
@@ -1790,40 +2018,45 @@ bool SimulationCore::ValidateCommands(
 }
 
 void SimulationCore::ZeroControllerCommands(const Controller& controller) {
-  if (data_ == nullptr) {
-    return;
-  }
+  std::vector<int> actuator_ids;
+  actuator_ids.reserve(controller.layout.commands_size());
   for (const auto& command : controller.layout.commands()) {
-    data_->ctrl[command.mujoco_id()] = 0.0;
+    actuator_ids.push_back(command.mujoco_id());
+  }
+  if (tick_open_) {
+    barrier_coordinator_->pending_zero_actuators.insert(actuator_ids.begin(),
+                                                        actuator_ids.end());
+  } else {
+    model_state_->ZeroActuators(actuator_ids);
   }
 }
 
 void SimulationCore::SetControllerState(
-    Controller* controller, mujoco_sim::v1::ControllerState state,
+    Controller* controller, mujoco_sim::v2::ControllerState state,
     const std::string& message) {
   controller->state = state;
   controller->state_since_tick = current_tick_id_;
   controller->message = message;
 }
 
-bool SimulationCore::EnterControllerError(Controller* controller,
-                                          const std::string& message) {
+std::optional<StepCompletedEvent> SimulationCore::EnterControllerError(
+    Controller* controller, const std::string& message) {
   SetControllerState(controller, ERROR, message);
   controller->recovery_pending = false;
   ZeroControllerCommands(*controller);
-  pending_commits_.erase(controller->id);
-  open_ticks_.erase(controller->id);
-  tick_required_controllers_.erase(controller->id);
-  tick_recipient_controllers_.erase(controller->id);
-  return StepIfBarrierComplete();
+  barrier_coordinator_->pending_commits.erase(controller->id);
+  InvalidateIssuedTick(controller->id);
+  barrier_coordinator_->required_controllers.erase(controller->id);
+  barrier_coordinator_->recipient_controllers.erase(controller->id);
+  return CompleteBarrier(StepCompletionSource::kLocalError);
 }
 
 void SimulationCore::ReleaseControllerResources(
     const Controller& controller) {
   for (const auto& command : controller.layout.commands()) {
-    const auto owner = actuator_owner_.find(command.name());
-    if (owner != actuator_owner_.end() && owner->second == controller.id) {
-      actuator_owner_.erase(owner);
+    const auto owner = adapter_registry_->actuator_owner.find(command.name());
+    if (owner != adapter_registry_->actuator_owner.end() && owner->second == controller.id) {
+      adapter_registry_->actuator_owner.erase(owner);
     }
   }
 }
@@ -1832,16 +2065,14 @@ void SimulationCore::EnterErrorPaused(const std::string& message) {
   server_state_ = ERROR_PAUSED;
   status_message_ = message;
   tick_open_ = false;
-  pending_commits_.clear();
-  open_ticks_.clear();
-  tick_required_controllers_.clear();
-  tick_recipient_controllers_.clear();
-  for (auto& [_, controller] : controllers_) {
+  InvalidateAllIssuedTicks();
+  barrier_coordinator_->Reset();
+  for (auto& [_, controller] : adapter_registry_->controllers) {
     if (controller.state == ACTIVE) {
       SetControllerState(&controller, ERROR, message);
     }
   }
-  for (auto& [_, observer] : observers_) {
+  for (auto& [_, observer] : adapter_registry_->observers) {
     if (observer.state == ACTIVE) {
       observer.state = ERROR;
       observer.state_since_tick = current_tick_id_;
@@ -1855,13 +2086,11 @@ void SimulationCore::EnterFatalError(const std::string& message) {
 }
 
 void SimulationCore::MarkStopped(const std::string& message) {
-  server_state_ = mujoco_sim::v1::STOPPED;
+  server_state_ = mujoco_sim::v2::STOPPED;
   status_message_ = message;
   tick_open_ = false;
-  pending_commits_.clear();
-  open_ticks_.clear();
-  tick_required_controllers_.clear();
-  tick_recipient_controllers_.clear();
+  InvalidateAllIssuedTicks();
+  barrier_coordinator_->Reset();
 }
 
 std::uint64_t SimulationCore::epoch() const { return epoch_; }
@@ -1870,13 +2099,13 @@ std::uint64_t SimulationCore::current_tick_id() const {
   return current_tick_id_;
 }
 
-double SimulationCore::simulation_time() const { return simulation_time_; }
+double SimulationCore::simulation_time() const { return model_state_->simulation_time; }
 
 double SimulationCore::timestep() const {
-  return model_ == nullptr ? 0.0 : model_->opt.timestep;
+  return model_state_->model == nullptr ? 0.0 : model_state_->model->opt.timestep;
 }
 
-mujoco_sim::v1::ServerState SimulationCore::server_state() const {
+mujoco_sim::v2::ServerState SimulationCore::server_state() const {
   return server_state_;
 }
 
@@ -1884,7 +2113,7 @@ bool SimulationCore::tick_open() const { return tick_open_; }
 
 std::size_t SimulationCore::active_controller_count() const {
   std::size_t count = 0;
-  for (const auto& [_, controller] : controllers_) {
+  for (const auto& [_, controller] : adapter_registry_->controllers) {
     if (controller.state == ACTIVE) {
       ++count;
     }
@@ -1893,16 +2122,16 @@ std::size_t SimulationCore::active_controller_count() const {
 }
 
 std::size_t SimulationCore::controller_count(
-    mujoco_sim::v1::ControllerState state) const {
+    mujoco_sim::v2::ControllerState state) const {
   return static_cast<std::size_t>(std::count_if(
-      controllers_.begin(), controllers_.end(),
+      adapter_registry_->controllers.begin(), adapter_registry_->controllers.end(),
       [state](const auto& entry) { return entry.second.state == state; }));
 }
 
 std::size_t SimulationCore::observer_count(
-    mujoco_sim::v1::ControllerState state) const {
+    mujoco_sim::v2::ControllerState state) const {
   return static_cast<std::size_t>(std::count_if(
-      observers_.begin(), observers_.end(),
+      adapter_registry_->observers.begin(), adapter_registry_->observers.end(),
       [state](const auto& entry) { return entry.second.state == state; }));
 }
 

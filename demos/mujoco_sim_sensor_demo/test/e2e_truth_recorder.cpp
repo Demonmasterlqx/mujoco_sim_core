@@ -19,8 +19,8 @@ volatile std::sig_atomic_t stop_requested = 0;
 
 void HandleSignal(int) { stop_requested = 1; }
 
-const mujoco_sim::v1::ObservationBlock* FindBlock(
-    const mujoco_sim::v1::ObservationFrame& frame,
+const mujoco_sim::v2::ObservationBlock* FindBlock(
+    const mujoco_sim::v2::ObservationFrame& frame,
     const std::string& name) {
   for (const auto& block : frame.observations()) {
     if (block.name() == name) return &block;
@@ -67,7 +67,7 @@ int main(int argc, char** argv) {
 
   std::uint64_t samples = 0;
   while (stop_requested == 0) {
-    mujoco_sim::v1::ObservationFrame frame;
+    mujoco_sim::v2::ObservationFrame frame;
     const auto result = observer.WaitForObservation(500ms, &frame, &error);
     if (result ==
         mujoco_sim::adapter_sdk::ObservationWaitResult::kTimeout) {

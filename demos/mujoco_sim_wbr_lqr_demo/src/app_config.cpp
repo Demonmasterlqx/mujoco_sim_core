@@ -213,7 +213,7 @@ bool BuildAppConfig(const generated::WbrConfig& generated_config,
   error_message->clear();
   AppConfig output;
   output.adapter.server_name = generated_config.adapter.server_name;
-  output.adapter.controller_id = generated_config.adapter.controller_id;
+  output.adapter.adapter_id = generated_config.adapter.adapter_id;
   output.adapter.timeout_ms = generated_config.adapter.timeout_ms;
   output.adapter.service_timeout_ms = generated_config.adapter.service_timeout_ms;
   output.adapter.max_ticks = generated_config.adapter.max_ticks;

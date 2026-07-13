@@ -12,6 +12,7 @@
 #include <optional>
 #include <span>
 #include <string>
+#include <thread>
 #include <unordered_map>
 #include <utility>
 #include <vector>
@@ -19,7 +20,7 @@
 #include <ecal/pubsub/subscriber.h>
 #include <ecal/service/client.h>
 #include <mujoco_sim/protocol/stream_frame.hpp>
-#include <mujoco_sim/v1/sync.pb.h>
+#include <mujoco_sim/v2/sync.pb.h>
 
 namespace mujoco_sim::adapter_sdk {
 
@@ -31,7 +32,7 @@ struct SensorStreamOptions {
 };
 
 struct OwnedStreamSample {
-  mujoco_sim::v1::StreamFrameHeader header;
+  mujoco_sim::v2::StreamFrameHeader header;
   std::vector<std::byte> payload;
 };
 
@@ -42,7 +43,7 @@ class StreamSampleView {
   StreamSampleView(const StreamSampleView&) = delete;
   StreamSampleView& operator=(const StreamSampleView&) = delete;
 
-  const mujoco_sim::v1::StreamFrameHeader& header() const { return header_; }
+  const mujoco_sim::v2::StreamFrameHeader& header() const { return header_; }
   std::span<const std::byte> payload() const { return payload_; }
 
   [[nodiscard]] OwnedStreamSample Copy() const;
@@ -50,11 +51,11 @@ class StreamSampleView {
  private:
   friend class SensorStreamClient;
 
-  StreamSampleView(mujoco_sim::v1::StreamFrameHeader header,
+  StreamSampleView(mujoco_sim::v2::StreamFrameHeader header,
                    std::span<const std::byte> payload)
       : header_(std::move(header)), payload_(payload) {}
 
-  mujoco_sim::v1::StreamFrameHeader header_;
+  mujoco_sim::v2::StreamFrameHeader header_;
   std::span<const std::byte> payload_;
 };
 
@@ -84,12 +85,12 @@ class SensorStreamClient {
                                  std::string* error_message);
   void Stop();
 
-  std::optional<mujoco_sim::v1::StreamDescriptor> descriptor(
+  std::optional<mujoco_sim::v2::StreamDescriptor> descriptor(
       const std::string& stream_name) const;
   std::uint64_t dropped_samples(const std::string& stream_name) const;
   std::string stream_diagnostic(const std::string& stream_name) const;
 
-  const mujoco_sim::v1::GetSensorStreamsResponse& discovery() const {
+  const mujoco_sim::v2::GetSensorStreamsResponse& discovery() const {
     return discovery_;
   }
 
@@ -104,7 +105,7 @@ class SensorStreamClient {
 
   struct StreamState {
     std::mutex delivery_mutex;
-    mujoco_sim::v1::StreamDescriptor descriptor;
+    mujoco_sim::v2::StreamDescriptor descriptor;
     DeliveryMode mode = DeliveryMode::kUnset;
     StreamCallback callback;
     std::deque<OwnedStreamSample> samples;
@@ -122,7 +123,7 @@ class SensorStreamClient {
   bool ValidateOptions(std::string* error_message) const;
   bool DiscoverStreams(std::string* error_message);
   bool ConfigureDiscoveredStreams(std::string* error_message);
-  bool ValidateDescriptor(const mujoco_sim::v1::StreamDescriptor& descriptor,
+  bool ValidateDescriptor(const mujoco_sim::v2::StreamDescriptor& descriptor,
                           std::string* error_message) const;
   bool IsExpectedFrame(
       const std::string& stream_name,
@@ -144,6 +145,7 @@ class SensorStreamClient {
     SensorStreamClient* client = nullptr;
     bool enabled = false;
     std::size_t active_callbacks = 0;
+    std::unordered_map<std::thread::id, std::size_t> callbacks_by_thread;
   };
 
   class CallbackLease {
@@ -159,7 +161,7 @@ class SensorStreamClient {
   };
 
   SensorStreamOptions options_;
-  mujoco_sim::v1::GetSensorStreamsResponse discovery_;
+  mujoco_sim::v2::GetSensorStreamsResponse discovery_;
   std::unique_ptr<eCAL::CServiceClient> registry_client_;
   std::unordered_map<std::string, std::unique_ptr<eCAL::CSubscriber>>
       subscribers_;

@@ -85,11 +85,11 @@ std::size_t CommandIndex(const std::array<std::string, 6>& names,
   return static_cast<std::size_t>(found - names.begin());
 }
 
-const mujoco_sim::v1::ResourceDescriptor& FindCommandDescriptor(
-    const mujoco_sim::v1::ResourceLayout& layout, std::string_view name) {
+const mujoco_sim::v2::ResourceDescriptor& FindCommandDescriptor(
+    const mujoco_sim::v2::ResourceLayout& layout, std::string_view name) {
   const auto found = std::find_if(
       layout.commands().begin(), layout.commands().end(),
-      [name](const mujoco_sim::v1::ResourceDescriptor& descriptor) {
+      [name](const mujoco_sim::v2::ResourceDescriptor& descriptor) {
         return descriptor.name() == name;
       });
   if (found == layout.commands().end()) {
@@ -98,18 +98,11 @@ const mujoco_sim::v1::ResourceDescriptor& FindCommandDescriptor(
   return *found;
 }
 
-void ValidateTickLayout(const InterfaceConfig& config,
-                        const mujoco_sim::v1::ResourceLayout& tick_layout,
-                        const mujoco_sim::v1::ResourceLayout& registered_layout) {
-  ValidateWbrLayout(config, tick_layout);
-  for (const auto& name : CommandNames(config)) {
-    const auto& tick_descriptor = FindCommandDescriptor(tick_layout, name);
-    const auto& registered_descriptor = FindCommandDescriptor(registered_layout, name);
-    if (tick_descriptor.has_ctrl_range() != registered_descriptor.has_ctrl_range() ||
-        tick_descriptor.ctrl_min() != registered_descriptor.ctrl_min() ||
-        tick_descriptor.ctrl_max() != registered_descriptor.ctrl_max()) {
-      throw InterfaceError("tick ctrlrange differs from registration for " + name);
-    }
+void ValidateTickLayoutHash(std::string_view tick_hash,
+                            std::string_view registered_hash) {
+  if (tick_hash.size() != 16 || registered_hash.size() != 16 ||
+      tick_hash != registered_hash) {
+    throw InterfaceError("tick layout hash differs from registration");
   }
 }
 
@@ -124,9 +117,9 @@ float ToFiniteFloat(double value, const std::string& resource, int component) {
 }
 
 using BlockMap =
-    std::unordered_map<std::string, const mujoco_sim::v1::ObservationBlock*>;
+    std::unordered_map<std::string, const mujoco_sim::v2::ObservationBlock*>;
 
-const mujoco_sim::v1::ObservationBlock& GetBlock(const BlockMap& blocks,
+const mujoco_sim::v2::ObservationBlock& GetBlock(const BlockMap& blocks,
                                                   const std::string& name) {
   const auto found = blocks.find(name);
   if (found == blocks.end()) {
@@ -162,12 +155,12 @@ std::vector<std::string> WbrCommandNames(const InterfaceConfig& config) {
   return {configured.begin(), configured.end()};
 }
 
-void ValidateWbrLayout(const mujoco_sim::v1::ResourceLayout& layout) {
+void ValidateWbrLayout(const mujoco_sim::v2::ResourceLayout& layout) {
   ValidateWbrLayout(MakeUpstreamWbrInterfaceConfig(), layout);
 }
 
 void ValidateWbrLayout(const InterfaceConfig& config,
-                       const mujoco_sim::v1::ResourceLayout& layout) {
+                       const mujoco_sim::v2::ResourceLayout& layout) {
   ValidateInterfaceConfig(config);
   const auto specs = ObservationSpecs(config);
   const auto commands = CommandNames(config);
@@ -183,7 +176,7 @@ void ValidateWbrLayout(const InterfaceConfig& config,
     if (!names.insert(descriptor.name()).second) {
       throw InterfaceError("duplicate observation resource: " + descriptor.name());
     }
-    if (descriptor.type() != mujoco_sim::v1::OBSERVATION_SENSOR ||
+    if (descriptor.type() != mujoco_sim::v2::OBSERVATION_SENSOR ||
         descriptor.dimension() != spec->dimension) {
       throw InterfaceError("observation layout mismatch for " + descriptor.name());
     }
@@ -197,7 +190,7 @@ void ValidateWbrLayout(const InterfaceConfig& config,
     if (!names.insert(descriptor.name()).second) {
       throw InterfaceError("duplicate command resource: " + descriptor.name());
     }
-    if (descriptor.type() != mujoco_sim::v1::COMMAND_ACTUATOR ||
+    if (descriptor.type() != mujoco_sim::v2::COMMAND_ACTUATOR ||
         descriptor.dimension() != 1 || !descriptor.has_ctrl_range() ||
         !std::isfinite(descriptor.ctrl_min()) ||
         !std::isfinite(descriptor.ctrl_max()) ||
@@ -207,19 +200,23 @@ void ValidateWbrLayout(const InterfaceConfig& config,
   }
 }
 
-TickDecoder::TickDecoder(const mujoco_sim::v1::ResourceLayout& registered_layout)
+TickDecoder::TickDecoder(const mujoco_sim::v2::ResourceLayout& registered_layout)
     : TickDecoder(MakeUpstreamWbrInterfaceConfig(), registered_layout) {}
 
 TickDecoder::TickDecoder(
     InterfaceConfig config,
-    const mujoco_sim::v1::ResourceLayout& registered_layout)
-    : config_(std::move(config)), registered_layout_(registered_layout) {
-  ValidateWbrLayout(config_, registered_layout_);
+    const mujoco_sim::v2::ResourceLayout& registered_layout)
+    : config_(std::move(config)),
+      registered_layout_hash_(registered_layout.layout_hash()) {
+  ValidateWbrLayout(config_, registered_layout);
+  if (registered_layout_hash_.size() != 16) {
+    throw InterfaceError("registration layout hash must contain 16 bytes");
+  }
 }
 
 control::msg_raw_state_t TickDecoder::Decode(
-    const mujoco_sim::v1::Tick& tick) const {
-  ValidateTickLayout(config_, tick.layout(), registered_layout_);
+    const mujoco_sim::v2::Tick& tick) const {
+  ValidateTickLayoutHash(tick.layout_hash(), registered_layout_hash_);
   const auto specs = ObservationSpecs(config_);
   if (tick.observations_size() != static_cast<int>(specs.size())) {
     throw InterfaceError("tick must contain exactly 21 observation blocks");
@@ -260,12 +257,12 @@ control::msg_raw_state_t TickDecoder::Decode(
 }
 
 TorqueCommandMapper::TorqueCommandMapper(
-    const mujoco_sim::v1::ResourceLayout& registered_layout)
+    const mujoco_sim::v2::ResourceLayout& registered_layout)
     : TorqueCommandMapper(MakeUpstreamWbrInterfaceConfig(), registered_layout) {}
 
 TorqueCommandMapper::TorqueCommandMapper(
     InterfaceConfig config,
-    const mujoco_sim::v1::ResourceLayout& registered_layout) {
+    const mujoco_sim::v2::ResourceLayout& registered_layout) {
   ValidateWbrLayout(config, registered_layout);
   command_names_ = CommandNames(config);
   std::size_t order = 0;

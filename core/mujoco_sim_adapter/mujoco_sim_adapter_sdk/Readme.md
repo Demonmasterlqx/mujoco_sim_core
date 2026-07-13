@@ -89,7 +89,7 @@ target_link_libraries(my_adapter PRIVATE mujoco_sim::adapter_sdk)
 | 字段 | 默认值 | 约束与含义 |
 |---|---:|---|
 | `server_name` | `"default"` | 必须与 Server namespace 一致。 |
-| `controller_id` | 空 | 必填。 |
+| `adapter_id` | 空 | 必填。 |
 | `observation_names` | 空列表 | 允许不申请 observation。 |
 | `command_names` | 空列表 | 至少一个。 |
 | `timeout_ms` | `1000` | 每 Tick Commit deadline；`0` 使用 Server 默认值。 |
@@ -108,9 +108,9 @@ enum class TickWaitResult {
 bool Start(std::string* error_message);
 bool Activate(std::string* error_message);
 TickWaitResult WaitForTick(std::chrono::milliseconds timeout,
-                           mujoco_sim::v1::Tick* tick,
+                           mujoco_sim::v2::Tick* tick,
                            std::string* error_message);
-bool Commit(const mujoco_sim::v1::Tick& tick,
+bool Commit(const mujoco_sim::v2::Tick& tick,
             const std::vector<CommandValue>& commands,
             std::string* error_message);
 ```
@@ -122,7 +122,7 @@ bool Commit(const mujoco_sim::v1::Tick& tick,
 
 ## ObserverClient
 
-`ObserverClient` 使用 v1.2 `RegisterAdapter(role=OBSERVER)`、`ActivateAdapter` 和
+`ObserverClient` 使用 V2.0 `RegisterAdapter(role=OBSERVER)`、`ActivateAdapter` 和
 `UnregisterAdapter`。它订阅 Observer 专属 observation topic 和 ServerStatus，并由独立线程向
 共享 adapter heartbeat topic 周期发布 `AdapterHeartbeat`。Observer 不参与 Commit Barrier，公开
 类中也没有 `Commit()` 成员。
@@ -158,7 +158,7 @@ std::string error;
 if (!observer.Start(&error) || !observer.Activate(&error)) {
   // Handle error.
 }
-mujoco_sim::v1::ObservationFrame frame;
+mujoco_sim::v2::ObservationFrame frame;
 const auto result = observer.WaitForObservation(
     std::chrono::milliseconds(100), &frame, &error);
 ```
@@ -170,7 +170,7 @@ Wait；超时和错误不会修改输出。`Stop()` 可从其他线程唤醒 Wai
 
 ## SensorStreamClient
 
-`SensorStreamClient::Start()` 调用 v1.2 `GetSensorStreams`，确认所有请求的静态 descriptor 后，
+`SensorStreamClient::Start()` 调用 V2.0 `GetSensorStreams`，确认所有请求的静态 descriptor 后，
 为每个 stream 创建 `SensorStreamTopicName` subscriber。它不注册 Adapter、没有 Activate、
 Heartbeat、Commit 或 Unregister 阶段。
 
@@ -297,7 +297,7 @@ SDK 不提供 `CommitError()`。控制算法无法产生合法命令时，应保
 int main() {
   using namespace std::chrono_literals;
   mujoco_sim::adapter_sdk::AdapterOptions options;
-  options.controller_id = "minimal_controller";
+  options.adapter_id = "minimal_controller";
   options.observation_names = {"hinge_pos", "hinge_vel"};
   options.command_names = {"hinge_motor"};
 
@@ -323,7 +323,7 @@ int main() {
 
   std::uint64_t active_ticks = 0;
   while (active_ticks < 5) {
-    mujoco_sim::v1::Tick tick;
+    mujoco_sim::v2::Tick tick;
     const auto result = client.WaitForTick(100ms, &tick, &error);
     if (result == mujoco_sim::adapter_sdk::TickWaitResult::kTimeout) continue;
     if (result != mujoco_sim::adapter_sdk::TickWaitResult::kReceived) {
@@ -341,7 +341,7 @@ int main() {
       unregister();
       return 1;
     }
-    if (tick.controller_state() == mujoco_sim::v1::ACTIVE) ++active_ticks;
+    if (tick.controller_state() == mujoco_sim::v2::ACTIVE) ++active_ticks;
   }
 
   return unregister() ? 0 : 1;
@@ -376,7 +376,7 @@ colcon test-result --verbose
   验证 `TIMED_OUT -> recovery pending -> ACTIVE`、显式 Commit 和最终注销。
 - `sensor_observer_e2e` 在同一进程组合共享 eCAL runtime 的 Observer 与 Stream Client，连接
   真实无 DISPLAY Server；销毁首个 runtime owner 后其余 Client 继续通信，并使用独立 gate
-  Controller 将正常 Commit、timeout、legacy/generic unregister 和局部 command `ERROR` 每类
+  Controller 将正常 Commit、timeout、open-Barrier unregister 和局部 command `ERROR` 每类
   completed-step 固定在唯一 Tick。测试要求 IMU ObservationFrame 与 blocking LiDAR raw frame
   的 Tick 精确匹配，同时覆盖空 Barrier、非空 RGB、注销和 Server 持续运行。
 - Sample Adapter 另行覆盖正常 headless/GUI 五 Tick Barrier；WBR Demo 覆盖长时间闭环控制。

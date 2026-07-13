@@ -43,7 +43,7 @@ int main(int argc, char** argv) {
   }
   demo::WaypointController controller(config.control);
   std::cout << "sensor-demo controller ready adapter="
-            << config.adapter.controller_id << std::endl;
+            << config.adapter.adapter_id << std::endl;
 
   std::uint64_t handled_ticks = 0;
   std::size_t completed_laps = 0;
@@ -51,7 +51,7 @@ int main(int argc, char** argv) {
   std::optional<double> first_simulation_time;
   int result = 0;
   while (!demo::ProcessStopRequested()) {
-    mujoco_sim::v1::Tick tick;
+    mujoco_sim::v2::Tick tick;
     const auto wait_result = client.WaitForTick(
         std::chrono::milliseconds(config.wait_timeout_ms), &tick, &message);
     if (wait_result == mujoco_sim::adapter_sdk::TickWaitResult::kTimeout) {

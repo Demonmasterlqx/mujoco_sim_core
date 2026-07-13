@@ -40,7 +40,7 @@ int main(int argc, char** argv) {
   int result = 0;
   while (!demo::ProcessStopRequested() &&
          (config.max_frames == 0 || frames < config.max_frames)) {
-    mujoco_sim::v1::ObservationFrame frame;
+    mujoco_sim::v2::ObservationFrame frame;
     const auto wait_result = client.WaitForObservation(
         std::chrono::milliseconds(config.wait_timeout_ms), &frame, &message);
     if (wait_result ==

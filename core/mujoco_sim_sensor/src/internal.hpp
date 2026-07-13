@@ -45,7 +45,7 @@ inline bool CheckedMultiply(std::uint64_t lhs, std::uint64_t rhs,
   return true;
 }
 
-bool StreamShapeFor(mujoco_sim::v1::StreamFormat format,
+bool StreamShapeFor(mujoco_sim::v2::StreamFormat format,
                     std::uint32_t width, std::uint32_t height,
                     StreamShape* shape, std::string* error_message);
 
@@ -55,17 +55,17 @@ bool ValidateCaptureMetadata(const CaptureMetadata& metadata,
 bool BuildCameraDescriptors(
     const mujoco_sim::core::SimulationSnapshot& snapshot,
     const CameraProfile& profile,
-    std::vector<mujoco_sim::v1::StreamDescriptor>* descriptors,
+    std::vector<mujoco_sim::v2::StreamDescriptor>* descriptors,
     int* camera_id, std::string* error_message);
 
 bool BuildRayLidarDescriptor(
     const mujoco_sim::core::SimulationSnapshot& snapshot,
     const RayLidarProfile& profile,
-    mujoco_sim::v1::StreamDescriptor* descriptor,
+    mujoco_sim::v2::StreamDescriptor* descriptor,
     std::vector<double>* vertical_angles, int* site_id,
     std::string* error_message);
 
-RawFrame MakeRawFrame(const mujoco_sim::v1::StreamDescriptor& descriptor,
+RawFrame MakeRawFrame(const mujoco_sim::v2::StreamDescriptor& descriptor,
                       const CaptureMetadata& metadata,
                       std::vector<std::byte> payload);
 

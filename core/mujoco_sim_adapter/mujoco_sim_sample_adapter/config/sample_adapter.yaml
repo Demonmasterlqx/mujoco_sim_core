@@ -9,11 +9,11 @@ fields:
     description: Server namespace
     default: default
     cli: [--server-name]
-  controller_id:
+  adapter_id:
     type: string
-    description: Controller identifier
+    description: Adapter identifier
     default: sample_controller
-    cli: [--controller-id]
+    cli: [--adapter-id]
   observation_names:
     type: vector<string>
     description: Observation sensor names

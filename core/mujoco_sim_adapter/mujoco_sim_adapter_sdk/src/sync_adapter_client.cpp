@@ -9,6 +9,8 @@
 #include <utility>
 
 #include <ecal/ecal.h>
+#include <mujoco_sim/protocol/identifier.hpp>
+#include <mujoco_sim/protocol/layout_hash.hpp>
 #include <mujoco_sim/protocol/topics.hpp>
 
 #include "ecal_runtime.hpp"
@@ -16,8 +18,8 @@
 namespace mujoco_sim::adapter_sdk {
 namespace {
 
-using mujoco_sim::v1::COMMIT_OK;
-using mujoco_sim::v1::OK;
+using mujoco_sim::v2::COMMIT_OK;
+using mujoco_sim::v2::OK;
 
 eCAL::SServiceMethodInformation MethodInfo(const std::string& method) {
   eCAL::SServiceMethodInformation info;
@@ -25,9 +27,9 @@ eCAL::SServiceMethodInformation MethodInfo(const std::string& method) {
   return info;
 }
 
-bool SameTickStream(const mujoco_sim::v1::Tick& lhs,
-                    const mujoco_sim::v1::Tick& rhs) {
-  return lhs.controller_id() == rhs.controller_id() &&
+bool SameTickStream(const mujoco_sim::v2::Tick& lhs,
+                    const mujoco_sim::v2::Tick& rhs) {
+  return lhs.adapter_id() == rhs.adapter_id() &&
          lhs.header().server_name() == rhs.header().server_name() &&
          lhs.header().session_id() == rhs.header().session_id() &&
          lhs.header().epoch() == rhs.header().epoch() &&
@@ -35,14 +37,14 @@ bool SameTickStream(const mujoco_sim::v1::Tick& lhs,
          lhs.header().protocol_minor() == rhs.header().protocol_minor();
 }
 
-bool SameTickIdentity(const mujoco_sim::v1::Tick& lhs,
-                      const mujoco_sim::v1::Tick& rhs) {
+bool SameTickIdentity(const mujoco_sim::v2::Tick& lhs,
+                      const mujoco_sim::v2::Tick& rhs) {
   return SameTickStream(lhs, rhs) &&
          lhs.header().tick_id() == rhs.header().tick_id();
 }
 
-bool SameTickPayload(const mujoco_sim::v1::Tick& lhs,
-                     const mujoco_sim::v1::Tick& rhs) {
+bool SameTickPayload(const mujoco_sim::v2::Tick& lhs,
+                     const mujoco_sim::v2::Tick& rhs) {
   auto normalized_lhs = lhs;
   auto normalized_rhs = rhs;
   normalized_lhs.mutable_header()->set_timestamp_unix_nanos(0);
@@ -51,11 +53,12 @@ bool SameTickPayload(const mujoco_sim::v1::Tick& lhs,
          normalized_rhs.SerializeAsString();
 }
 
-mujoco_sim::v1::Heartbeat BuildHeartbeat(
-    const mujoco_sim::v1::Tick& tick) {
-  mujoco_sim::v1::Heartbeat heartbeat;
+mujoco_sim::v2::AdapterHeartbeat BuildHeartbeat(
+    const mujoco_sim::v2::Tick& tick) {
+  mujoco_sim::v2::AdapterHeartbeat heartbeat;
   *heartbeat.mutable_header() = tick.header();
-  heartbeat.set_controller_id(tick.controller_id());
+  heartbeat.set_adapter_id(tick.adapter_id());
+  heartbeat.set_role(mujoco_sim::v2::CONTROLLER);
   return heartbeat;
 }
 
@@ -98,8 +101,16 @@ bool SyncAdapterClient::Start(std::string* error_message) {
     *error_message = "adapter client has been stopped";
     return false;
   }
-  if (options_.controller_id.empty()) {
-    *error_message = "controller_id is required";
+  if (options_.adapter_id.empty()) {
+    *error_message = "adapter_id is required";
+    return false;
+  }
+  if (!mujoco_sim::protocol::ValidateIdentifier(
+          options_.server_name,
+          mujoco_sim::protocol::IdentifierKind::kServer, error_message) ||
+      !mujoco_sim::protocol::ValidateIdentifier(
+          options_.adapter_id,
+          mujoco_sim::protocol::IdentifierKind::kAdapter, error_message)) {
     return false;
   }
   if (options_.command_names.empty()) {
@@ -107,26 +118,35 @@ bool SyncAdapterClient::Start(std::string* error_message) {
     return false;
   }
   ecal_runtime_ = internal::AcquireEcalRuntime(
-      "mujoco-sim-adapter-" + options_.controller_id, error_message);
+      "mujoco-sim-adapter-" + options_.adapter_id, error_message);
   if (!ecal_runtime_) {
     return false;
   }
 
   eCAL::ServiceMethodInformationSetT methods;
   methods.insert(MethodInfo(mujoco_sim::protocol::kGetAvailableResourcesMethod));
-  methods.insert(MethodInfo(mujoco_sim::protocol::kRegisterControllerMethod));
-  methods.insert(MethodInfo(mujoco_sim::protocol::kActivateControllerMethod));
-  methods.insert(MethodInfo(mujoco_sim::protocol::kUnregisterControllerMethod));
+  methods.insert(MethodInfo(mujoco_sim::protocol::kRegisterAdapterMethod));
+  methods.insert(MethodInfo(mujoco_sim::protocol::kActivateAdapterMethod));
+  methods.insert(MethodInfo(mujoco_sim::protocol::kUnregisterAdapterMethod));
   registry_client_ = std::make_unique<eCAL::CServiceClient>(
       mujoco_sim::protocol::RegistryServiceName(options_.server_name), methods);
   if (!Register(error_message)) {
+    std::string ignored;
+    UnregisterWith(
+        [this](const mujoco_sim::v2::UnregisterAdapterRequest& request,
+               mujoco_sim::v2::UnregisterAdapterResponse* response,
+               std::string* error) {
+          return CallService(mujoco_sim::protocol::kUnregisterAdapterMethod,
+                             request, response, error, true);
+        },
+        &ignored);
     return false;
   }
 
   commit_publisher_ = std::make_unique<eCAL::CPublisher>(
       mujoco_sim::protocol::CommitTopicName(options_.server_name));
   heartbeat_publisher_ = std::make_unique<eCAL::CPublisher>(
-      mujoco_sim::protocol::HeartbeatTopicName(options_.server_name));
+      mujoco_sim::protocol::AdapterHeartbeatTopicName(options_.server_name));
   {
     std::lock_guard callback_lock(callback_state_->mutex);
     callback_state_->client = this;
@@ -135,7 +155,7 @@ bool SyncAdapterClient::Start(std::string* error_message) {
   const auto callback_state = callback_state_;
   tick_subscriber_ = std::make_unique<eCAL::CSubscriber>(
       mujoco_sim::protocol::TickTopicName(options_.server_name,
-                                          options_.controller_id));
+                                          options_.adapter_id));
   tick_subscriber_->SetReceiveCallback(
       [callback_state](const eCAL::STopicId&,
                        const eCAL::SDataTypeInformation&,
@@ -162,11 +182,11 @@ bool SyncAdapterClient::Start(std::string* error_message) {
         std::string ignored;
         UnregisterWith(
             [this](
-                const mujoco_sim::v1::UnregisterControllerRequest& request,
-                mujoco_sim::v1::UnregisterControllerResponse* response,
+                const mujoco_sim::v2::UnregisterAdapterRequest& request,
+                mujoco_sim::v2::UnregisterAdapterResponse* response,
                 std::string* unregister_error) {
               return CallService(
-                  mujoco_sim::protocol::kUnregisterControllerMethod, request,
+                  mujoco_sim::protocol::kUnregisterAdapterMethod, request,
                   response, unregister_error, true);
             },
             &ignored);
@@ -196,9 +216,10 @@ bool SyncAdapterClient::FinishStart(
 }
 
 bool SyncAdapterClient::Register(std::string* error_message) {
-  mujoco_sim::v1::RegisterControllerRequest request;
+  mujoco_sim::v2::RegisterAdapterRequest request;
   request.set_server_name(options_.server_name);
-  request.set_controller_id(options_.controller_id);
+  request.set_adapter_id(options_.adapter_id);
+  request.set_role(mujoco_sim::v2::CONTROLLER);
   request.set_protocol_major(mujoco_sim::protocol::kProtocolMajor);
   request.set_protocol_minor(mujoco_sim::protocol::kProtocolMinor);
   request.set_timeout_ms(options_.timeout_ms);
@@ -209,12 +230,27 @@ bool SyncAdapterClient::Register(std::string* error_message) {
     request.add_command_names(name);
   }
 
-  if (!CallService(mujoco_sim::protocol::kRegisterControllerMethod, request,
+  if (!CallService(mujoco_sim::protocol::kRegisterAdapterMethod, request,
                    &registration_, error_message)) {
     return false;
   }
   if (registration_.code() != OK) {
     *error_message = registration_.message();
+    return false;
+  }
+  {
+    std::lock_guard lock(mutex_);
+    registered_ = true;
+  }
+  if (registration_.adapter_id() != options_.adapter_id ||
+      registration_.role() != mujoco_sim::v2::CONTROLLER ||
+      registration_.session_id() == 0 || registration_.epoch() == 0 ||
+      registration_.state() != mujoco_sim::v2::PROVISIONAL ||
+      !mujoco_sim::protocol::ValidateLayoutHash(registration_.layout(),
+                                                error_message)) {
+    if (error_message->empty()) {
+      *error_message = "invalid controller registration response";
+    }
     return false;
   }
   {
@@ -225,7 +261,6 @@ bool SyncAdapterClient::Register(std::string* error_message) {
     cached_commit_.reset();
     terminal_error_.clear();
     lifecycle_warning_.clear();
-    registered_ = true;
   }
   return true;
 }
@@ -233,10 +268,10 @@ bool SyncAdapterClient::Register(std::string* error_message) {
 bool SyncAdapterClient::Activate(std::string* error_message) {
   std::lock_guard lifecycle_lock(lifecycle_mutex_);
   return ActivateWith(
-      [this](const mujoco_sim::v1::ActivateControllerRequest& request,
-             mujoco_sim::v1::ActivateControllerResponse* response,
+      [this](const mujoco_sim::v2::ActivateAdapterRequest& request,
+             mujoco_sim::v2::ActivateAdapterResponse* response,
              std::string* error) {
-        return CallService(mujoco_sim::protocol::kActivateControllerMethod,
+        return CallService(mujoco_sim::protocol::kActivateAdapterMethod,
                            request, response, error);
       },
       std::chrono::milliseconds(100), error_message);
@@ -244,8 +279,8 @@ bool SyncAdapterClient::Activate(std::string* error_message) {
 
 bool SyncAdapterClient::ActivateWith(
     const std::function<bool(
-        const mujoco_sim::v1::ActivateControllerRequest&,
-        mujoco_sim::v1::ActivateControllerResponse*, std::string*)>& call,
+        const mujoco_sim::v2::ActivateAdapterRequest&,
+        mujoco_sim::v2::ActivateAdapterResponse*, std::string*)>& call,
     std::chrono::milliseconds discovery_delay,
     std::string* error_message) {
   if (error_message == nullptr) {
@@ -272,8 +307,9 @@ bool SyncAdapterClient::ActivateWith(
     return false;
   }
 
-  mujoco_sim::v1::ActivateControllerRequest request;
-  request.set_controller_id(options_.controller_id);
+  mujoco_sim::v2::ActivateAdapterRequest request;
+  request.set_adapter_id(options_.adapter_id);
+  request.set_role(mujoco_sim::v2::CONTROLLER);
   request.set_session_id(registration_.session_id());
   request.set_epoch(registration_.epoch());
 
@@ -285,7 +321,7 @@ bool SyncAdapterClient::ActivateWith(
     }
     accepting_ticks_ = true;
   }
-  mujoco_sim::v1::ActivateControllerResponse response;
+  mujoco_sim::v2::ActivateAdapterResponse response;
   const bool called = call(request, &response, error_message);
   if (!called || response.code() != OK) {
     if (called) {
@@ -356,7 +392,7 @@ bool SyncAdapterClient::CallService(const std::string& method,
 }
 
 TickWaitResult SyncAdapterClient::WaitForTick(
-    std::chrono::milliseconds timeout, mujoco_sim::v1::Tick* tick,
+    std::chrono::milliseconds timeout, mujoco_sim::v2::Tick* tick,
     std::string* error_message) {
   if (tick == nullptr || error_message == nullptr) {
     if (error_message != nullptr) {
@@ -427,9 +463,9 @@ TickWaitResult SyncAdapterClient::WaitForTick(
 }
 
 bool SyncAdapterClient::BuildValidatedCommit(
-    const mujoco_sim::v1::Tick& tick,
+    const mujoco_sim::v2::Tick& tick,
     const std::vector<CommandValue>& commands,
-    mujoco_sim::v1::AdapterCommit* commit,
+    mujoco_sim::v2::AdapterCommit* commit,
     std::string* error_message) const {
   if (commit == nullptr || error_message == nullptr) {
     return false;
@@ -451,9 +487,9 @@ bool SyncAdapterClient::BuildValidatedCommit(
     }
   }
 
-  mujoco_sim::v1::AdapterCommit output;
+  mujoco_sim::v2::AdapterCommit output;
   *output.mutable_header() = tick.header();
-  output.set_controller_id(tick.controller_id());
+  output.set_adapter_id(tick.adapter_id());
   output.set_status(COMMIT_OK);
   for (const auto& descriptor : registration_.layout().commands()) {
     if (descriptor.dimension() != 1) {
@@ -499,29 +535,29 @@ bool SyncAdapterClient::BuildValidatedCommit(
 }
 
 bool SyncAdapterClient::Commit(
-    const mujoco_sim::v1::Tick& tick,
+    const mujoco_sim::v2::Tick& tick,
     const std::vector<CommandValue>& commands,
     std::string* error_message) {
   std::lock_guard lifecycle_lock(lifecycle_mutex_);
   return CommitWith(
       tick, commands,
-      [this](const mujoco_sim::v1::AdapterCommit& commit) {
+      [this](const mujoco_sim::v2::AdapterCommit& commit) {
         return PublishCommit(commit);
       },
       error_message);
 }
 
 bool SyncAdapterClient::CommitWith(
-    const mujoco_sim::v1::Tick& tick,
+    const mujoco_sim::v2::Tick& tick,
     const std::vector<CommandValue>& commands,
-    const std::function<bool(const mujoco_sim::v1::AdapterCommit&)>& publish,
+    const std::function<bool(const mujoco_sim::v2::AdapterCommit&)>& publish,
     std::string* error_message) {
   if (error_message == nullptr) {
     return false;
   }
   error_message->clear();
 
-  mujoco_sim::v1::Tick canonical_tick;
+  mujoco_sim::v2::Tick canonical_tick;
   {
     std::lock_guard lock(mutex_);
     if (!started_ || !activated_ || stop_requested_) {
@@ -542,7 +578,7 @@ bool SyncAdapterClient::CommitWith(
     }
   }
 
-  mujoco_sim::v1::AdapterCommit commit;
+  mujoco_sim::v2::AdapterCommit commit;
   if (!BuildValidatedCommit(canonical_tick, commands, &commit,
                             error_message)) {
     return false;
@@ -575,8 +611,11 @@ bool SyncAdapterClient::CommitWith(
   }
 
   const bool published = publish(commit);
-  (void)published;
   condition_.notify_all();
+  if (!published) {
+    *error_message = "failed to publish Commit";
+    return false;
+  }
   return true;
 }
 
@@ -599,10 +638,10 @@ void SyncAdapterClient::Stop() {
 bool SyncAdapterClient::Unregister(std::string* error_message) {
   std::lock_guard lifecycle_lock(lifecycle_mutex_);
   return UnregisterWith(
-      [this](const mujoco_sim::v1::UnregisterControllerRequest& request,
-             mujoco_sim::v1::UnregisterControllerResponse* response,
+      [this](const mujoco_sim::v2::UnregisterAdapterRequest& request,
+             mujoco_sim::v2::UnregisterAdapterResponse* response,
              std::string* error) {
-        return CallService(mujoco_sim::protocol::kUnregisterControllerMethod,
+        return CallService(mujoco_sim::protocol::kUnregisterAdapterMethod,
                            request, response, error, true);
       },
       error_message);
@@ -610,25 +649,26 @@ bool SyncAdapterClient::Unregister(std::string* error_message) {
 
 bool SyncAdapterClient::UnregisterWith(
     const std::function<bool(
-        const mujoco_sim::v1::UnregisterControllerRequest&,
-        mujoco_sim::v1::UnregisterControllerResponse*, std::string*)>& call,
+        const mujoco_sim::v2::UnregisterAdapterRequest&,
+        mujoco_sim::v2::UnregisterAdapterResponse*, std::string*)>& call,
     std::string* error_message) {
   if (error_message == nullptr) {
     return false;
   }
   error_message->clear();
-  mujoco_sim::v1::UnregisterControllerRequest request;
+  mujoco_sim::v2::UnregisterAdapterRequest request;
   {
     std::lock_guard lock(mutex_);
     if (!registered_) {
       return true;
     }
-    request.set_controller_id(options_.controller_id);
+    request.set_adapter_id(options_.adapter_id);
+    request.set_role(mujoco_sim::v2::CONTROLLER);
     request.set_session_id(registration_.session_id());
     request.set_epoch(registration_.epoch());
   }
 
-  mujoco_sim::v1::UnregisterControllerResponse response;
+  mujoco_sim::v2::UnregisterAdapterResponse response;
   if (!call(request, &response, error_message)) {
     return false;
   }
@@ -636,10 +676,10 @@ bool SyncAdapterClient::UnregisterWith(
 }
 
 bool SyncAdapterClient::CompleteUnregister(
-    const mujoco_sim::v1::UnregisterControllerResponse& response,
+    const mujoco_sim::v2::UnregisterAdapterResponse& response,
     std::string* error_message) {
-  if (response.code() != OK && response.code() != mujoco_sim::v1::NOT_FOUND &&
-      response.code() != mujoco_sim::v1::INVALID_SESSION) {
+  if (response.code() != OK && response.code() != mujoco_sim::v2::NOT_FOUND &&
+      response.code() != mujoco_sim::v2::INVALID_SESSION) {
     *error_message = response.message();
     return false;
   }
@@ -698,6 +738,11 @@ std::string SyncAdapterClient::lifecycle_warning() const {
   return lifecycle_warning_;
 }
 
+std::uint64_t SyncAdapterClient::layout_hash_mismatches() const {
+  std::lock_guard lock(mutex_);
+  return layout_hash_mismatches_;
+}
+
 SyncAdapterClient::CallbackLease::CallbackLease(
     std::shared_ptr<CallbackState> state)
     : state_(std::move(state)) {
@@ -745,19 +790,24 @@ void SyncAdapterClient::StopTickReception() {
   status_subscriber_.reset();
 }
 
-bool SyncAdapterClient::IsExpectedTick(
-    const mujoco_sim::v1::Tick& tick) const {
+bool SyncAdapterClient::HasExpectedTickIdentity(
+    const mujoco_sim::v2::Tick& tick) const {
   const auto& header = tick.header();
-  return tick.controller_id() == options_.controller_id &&
-         (tick.controller_state() == mujoco_sim::v1::ACTIVE ||
-          tick.controller_state() == mujoco_sim::v1::TIMED_OUT) &&
+  return tick.adapter_id() == options_.adapter_id &&
+         (tick.controller_state() == mujoco_sim::v2::ACTIVE ||
+          tick.controller_state() == mujoco_sim::v2::TIMED_OUT) &&
          header.server_name() == options_.server_name &&
          header.session_id() == registration_.session_id() &&
          header.epoch() == registration_.epoch() &&
-         header.protocol_major() == registration_.effective_protocol_major() &&
-         header.protocol_minor() == registration_.effective_protocol_minor() &&
-         tick.layout().SerializeAsString() ==
-             registration_.layout().SerializeAsString();
+         header.protocol_major() == mujoco_sim::protocol::kProtocolMajor &&
+         header.protocol_minor() == mujoco_sim::protocol::kProtocolMinor;
+}
+
+bool SyncAdapterClient::IsExpectedTick(
+    const mujoco_sim::v2::Tick& tick) const {
+  return HasExpectedTickIdentity(tick) &&
+         tick.layout_hash().size() == mujoco_sim::protocol::kLayoutHashSize &&
+         tick.layout_hash() == registration_.layout().layout_hash();
 }
 
 void SyncAdapterClient::HandleStatusBytes(const void* data, std::size_t size) {
@@ -765,38 +815,39 @@ void SyncAdapterClient::HandleStatusBytes(const void* data, std::size_t size) {
       size > static_cast<std::size_t>(std::numeric_limits<int>::max())) {
     return;
   }
-  mujoco_sim::v1::ServerStatus status;
+  mujoco_sim::v2::ServerStatus status;
   if (!status.ParseFromArray(data, static_cast<int>(size)) ||
       status.header().server_name() != options_.server_name ||
       status.header().epoch() != registration_.epoch() ||
       status.header().protocol_major() !=
-          registration_.effective_protocol_major() ||
+          mujoco_sim::protocol::kProtocolMajor ||
       status.header().protocol_minor() !=
-          registration_.effective_protocol_minor()) {
+          mujoco_sim::protocol::kProtocolMinor) {
     return;
   }
-  if (status.state() == mujoco_sim::v1::STOPPED) {
+  if (status.state() == mujoco_sim::v2::STOPPED) {
     TransitionToStopped();
     return;
   }
-  if (status.state() == mujoco_sim::v1::ERROR_PAUSED) {
+  if (status.state() == mujoco_sim::v2::ERROR_PAUSED) {
     SetTerminalError(status.message().empty()
                          ? "server entered ERROR_PAUSED"
                          : status.message());
     return;
   }
-  for (const auto& controller : status.controllers()) {
-    if (controller.controller_id() != options_.controller_id) {
+  for (const auto& adapter : status.adapters()) {
+    if (adapter.role() != mujoco_sim::v2::CONTROLLER ||
+        adapter.adapter_id() != options_.adapter_id) {
       continue;
     }
-    if (controller.session_id() != registration_.session_id()) {
+    if (adapter.session_id() != registration_.session_id()) {
       SetTerminalError("server replaced adapter session");
       return;
     }
-    if (controller.state() == mujoco_sim::v1::ERROR) {
-      SetTerminalError(controller.message().empty()
+    if (adapter.state() == mujoco_sim::v2::ERROR) {
+      SetTerminalError(adapter.message().empty()
                            ? "server marked adapter as ERROR"
-                           : controller.message());
+                           : adapter.message());
       return;
     }
   }
@@ -807,28 +858,41 @@ void SyncAdapterClient::HandleTickBytes(const void* data, std::size_t size) {
       size > static_cast<std::size_t>(std::numeric_limits<int>::max())) {
     return;
   }
-  mujoco_sim::v1::Tick tick;
+  mujoco_sim::v2::Tick tick;
   if (!tick.ParseFromArray(data, static_cast<int>(size)) ||
-      !IsExpectedTick(tick)) {
+      !HasExpectedTickIdentity(tick)) {
+    return;
+  }
+  if (tick.layout_hash().size() != mujoco_sim::protocol::kLayoutHashSize ||
+      tick.layout_hash() != registration_.layout().layout_hash()) {
+    {
+      std::lock_guard lock(mutex_);
+      ++layout_hash_mismatches_;
+    }
+    SetTerminalError(
+        "event=layout_hash_mismatch adapter_id=" + options_.adapter_id +
+        " expected_bytes=" +
+        std::to_string(mujoco_sim::protocol::kLayoutHashSize) +
+        " actual_bytes=" + std::to_string(tick.layout_hash().size()));
     return;
   }
   HandleTick(
       tick,
-      [this](const mujoco_sim::v1::Heartbeat& heartbeat) {
+      [this](const mujoco_sim::v2::AdapterHeartbeat& heartbeat) {
         PublishHeartbeat(heartbeat);
       },
-      [this](const mujoco_sim::v1::AdapterCommit& commit) {
+      [this](const mujoco_sim::v2::AdapterCommit& commit) {
         (void)PublishCommit(commit);
       });
 }
 
 void SyncAdapterClient::HandleTick(
-    const mujoco_sim::v1::Tick& tick,
-    const std::function<void(const mujoco_sim::v1::Heartbeat&)>&
+    const mujoco_sim::v2::Tick& tick,
+    const std::function<void(const mujoco_sim::v2::AdapterHeartbeat&)>&
         publish_heartbeat,
-    const std::function<void(const mujoco_sim::v1::AdapterCommit&)>&
+    const std::function<void(const mujoco_sim::v2::AdapterCommit&)>&
         publish_commit) {
-  std::optional<mujoco_sim::v1::AdapterCommit> retry_commit;
+  std::optional<mujoco_sim::v2::AdapterCommit> retry_commit;
   bool accepted = false;
   bool queued = false;
   {
@@ -905,7 +969,7 @@ void SyncAdapterClient::HandleTick(
 }
 
 bool SyncAdapterClient::PublishCommit(
-    const mujoco_sim::v1::AdapterCommit& commit) {
+    const mujoco_sim::v2::AdapterCommit& commit) {
   std::string bytes;
   if (!commit.SerializeToString(&bytes)) {
     return false;
@@ -916,7 +980,7 @@ bool SyncAdapterClient::PublishCommit(
 }
 
 void SyncAdapterClient::PublishHeartbeat(
-    const mujoco_sim::v1::Heartbeat& heartbeat) {
+    const mujoco_sim::v2::AdapterHeartbeat& heartbeat) {
   std::string bytes;
   if (heartbeat.SerializeToString(&bytes)) {
     (void)PublishSerialized([this, &bytes] {

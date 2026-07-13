@@ -7,8 +7,9 @@
 #include <vector>
 
 #include <control/msgs.hpp>
-#include <mujoco_sim/v1/sync.pb.h>
+#include <mujoco_sim/v2/sync.pb.h>
 #include <mujoco_sim/wbr_lqr_demo/interface_mapping.hpp>
+#include <mujoco_sim/protocol/layout_hash.hpp>
 
 namespace mujoco_sim::wbr_lqr_demo::test {
 
@@ -26,7 +27,7 @@ inline bool IsWheelActuator(std::string_view name) {
   return name == "lwheel_actuator" || name == "rwheel_actuator";
 }
 
-inline mujoco_sim::v1::ResourceLayout MakeValidLayout(
+inline mujoco_sim::v2::ResourceLayout MakeValidLayout(
     bool reverse_observations = false, bool reverse_commands = false) {
   auto observations = WbrObservationNames();
   auto commands = WbrCommandNames();
@@ -37,23 +38,24 @@ inline mujoco_sim::v1::ResourceLayout MakeValidLayout(
     std::reverse(commands.begin(), commands.end());
   }
 
-  mujoco_sim::v1::ResourceLayout layout;
+  mujoco_sim::v2::ResourceLayout layout;
   for (const auto& name : observations) {
     auto* descriptor = layout.add_observations();
     descriptor->set_name(name);
-    descriptor->set_type(mujoco_sim::v1::OBSERVATION_SENSOR);
+    descriptor->set_type(mujoco_sim::v2::OBSERVATION_SENSOR);
     descriptor->set_dimension(ObservationDimension(name));
   }
   for (const auto& name : commands) {
     auto* descriptor = layout.add_commands();
     descriptor->set_name(name);
-    descriptor->set_type(mujoco_sim::v1::COMMAND_ACTUATOR);
+    descriptor->set_type(mujoco_sim::v2::COMMAND_ACTUATOR);
     descriptor->set_dimension(1);
     descriptor->set_has_ctrl_range(true);
     const double limit = IsWheelActuator(name) ? 5.2 : 20.0;
     descriptor->set_ctrl_min(-limit);
     descriptor->set_ctrl_max(limit);
   }
+  layout.set_layout_hash(mujoco_sim::protocol::ComputeLayoutHash(layout));
   return layout;
 }
 
@@ -84,12 +86,12 @@ inline std::vector<double> DefaultValues(std::string_view name) {
   return {};
 }
 
-inline mujoco_sim::v1::Tick MakeValidTick(
-    const mujoco_sim::v1::ResourceLayout& layout, std::uint64_t tick_id = 0,
+inline mujoco_sim::v2::Tick MakeValidTick(
+    const mujoco_sim::v2::ResourceLayout& layout, std::uint64_t tick_id = 0,
     bool reverse_blocks = true) {
-  mujoco_sim::v1::Tick tick;
+  mujoco_sim::v2::Tick tick;
   tick.mutable_header()->set_tick_id(tick_id);
-  *tick.mutable_layout() = layout;
+  tick.set_layout_hash(layout.layout_hash());
 
   auto names = WbrObservationNames();
   if (reverse_blocks) {
@@ -105,8 +107,8 @@ inline mujoco_sim::v1::Tick MakeValidTick(
   return tick;
 }
 
-inline mujoco_sim::v1::ObservationBlock* FindBlock(
-    mujoco_sim::v1::Tick* tick, std::string_view name) {
+inline mujoco_sim::v2::ObservationBlock* FindBlock(
+    mujoco_sim::v2::Tick* tick, std::string_view name) {
   for (auto& block : *tick->mutable_observations()) {
     if (block.name() == name) {
       return &block;

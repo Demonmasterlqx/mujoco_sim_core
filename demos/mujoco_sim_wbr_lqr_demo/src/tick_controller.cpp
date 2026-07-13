@@ -8,7 +8,7 @@ mujoco_sim::adapter_sdk::AdapterOptions MakeAdapterOptions(
     const AdapterConfig& config) {
   mujoco_sim::adapter_sdk::AdapterOptions options;
   options.server_name = config.server_name;
-  options.controller_id = config.controller_id;
+  options.adapter_id = config.adapter_id;
   options.observation_names = WbrObservationNames(config.interfaces);
   options.command_names = WbrCommandNames(config.interfaces);
   options.timeout_ms = config.timeout_ms;
@@ -17,13 +17,13 @@ mujoco_sim::adapter_sdk::AdapterOptions MakeAdapterOptions(
 }
 
 TickController::TickController(
-    const mujoco_sim::v1::ResourceLayout& registered_layout,
+    const mujoco_sim::v2::ResourceLayout& registered_layout,
     PipelineConfig pipeline_config, InputScript input_script)
     : TickController(registered_layout, MakeUpstreamWbrInterfaceConfig(),
                      std::move(pipeline_config), std::move(input_script)) {}
 
 TickController::TickController(
-    const mujoco_sim::v1::ResourceLayout& registered_layout,
+    const mujoco_sim::v2::ResourceLayout& registered_layout,
     InterfaceConfig interface_config, PipelineConfig pipeline_config,
     InputScript input_script)
     : decoder_(interface_config, registered_layout),
@@ -32,12 +32,12 @@ TickController::TickController(
       input_script_(std::move(input_script)) {}
 
 std::vector<mujoco_sim::adapter_sdk::CommandValue>
-TickController::HandleTick(const mujoco_sim::v1::Tick& tick) {
+TickController::HandleTick(const mujoco_sim::v2::Tick& tick) {
   return HandleTick(tick, input_script_.InputAt(pipeline_.tick_count()));
 }
 
 std::vector<mujoco_sim::adapter_sdk::CommandValue>
-TickController::HandleTick(const mujoco_sim::v1::Tick& tick,
+TickController::HandleTick(const mujoco_sim::v2::Tick& tick,
                            const control::input_snapshot_t& input) {
   const control::msg_raw_state_t raw = decoder_.Decode(tick);
   last_input_ = input;

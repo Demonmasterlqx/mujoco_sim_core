@@ -1,8 +1,10 @@
-#include <mujoco_sim/server/ecal_server.hpp>
+#include <mujoco_sim/server/server_application.hpp>
 
 #include "server_logging.hpp"
 #include "server_runtime.hpp"
+#include "endpoints.hpp"
 #include "sensor_runtime.hpp"
+#include "simulation_scheduler.hpp"
 #include "sim_viewer.hpp"
 
 #include <algorithm>
@@ -18,7 +20,7 @@
 
 #include <ecal/ecal.h>
 #include <mujoco_sim/protocol/topics.hpp>
-#include <mujoco_sim/v1/sync.pb.h>
+#include <mujoco_sim/v2/sync.pb.h>
 
 namespace mujoco_sim::server {
 
@@ -43,12 +45,12 @@ class CallbackGuard {
   bool entered_ = false;
 };
 
-std::string ErrorCodeName(mujoco_sim::v1::ErrorCode code) {
-  return mujoco_sim::v1::ErrorCode_Name(code);
+std::string ErrorCodeName(mujoco_sim::v2::ErrorCode code) {
+  return mujoco_sim::v2::ErrorCode_Name(code);
 }
 
-std::string ServerStateName(mujoco_sim::v1::ServerState state) {
-  return mujoco_sim::v1::ServerState_Name(state);
+std::string ServerStateName(mujoco_sim::v2::ServerState state) {
+  return mujoco_sim::v2::ServerState_Name(state);
 }
 
 struct SummarySnapshot {
@@ -57,15 +59,9 @@ struct SummarySnapshot {
   std::size_t active_controllers = 0;
   std::size_t timed_out_controllers = 0;
   std::size_t error_controllers = 0;
-  mujoco_sim::v1::ServerState state =
-      mujoco_sim::v1::SERVER_STATE_UNSPECIFIED;
+  mujoco_sim::v2::ServerState state =
+      mujoco_sim::v2::SERVER_STATE_UNSPECIFIED;
 };
-
-eCAL::SServiceMethodInformation MethodInfo(const std::string& method) {
-  eCAL::SServiceMethodInformation info;
-  info.method_name = method;
-  return info;
-}
 
 void LogBoundaryFailure(const std::shared_ptr<spdlog::logger>& logger,
                         std::string_view boundary, std::string_view operation,
@@ -142,25 +138,17 @@ void InvokeGuardedSubscriberCallback(
 }
 
 template <typename Response>
-int SerializeResponse(const Response& message, std::string* response) {
-  if (!message.SerializeToString(response)) {
-    return 1;
-  }
-  return 0;
-}
-
-template <typename Response>
-int ParseError(mujoco_sim::v1::ErrorCode code, const std::string& message,
-               std::string* response) {
+int ParseError(mujoco_sim::v2::ErrorCode code, const std::string& message,
+               const RegistryEndpoint& endpoint, std::string* response) {
   Response out;
   out.set_code(code);
   out.set_message(message);
-  return SerializeResponse(out, response);
+  return endpoint.Serialize(out, response);
 }
 
 }  // namespace
 
-EcalServer::EcalServer(ServerConfig config)
+ServerApplication::ServerApplication(ServerConfig config)
     : config_(std::move(config)),
       logger_(std::make_unique<ServerLogger>()),
       warning_limiter_(std::make_unique<WarningLimiter>(kWarningPeriod)),
@@ -170,11 +158,14 @@ EcalServer::EcalServer(ServerConfig config)
           config_.server_name, config_.tick_timeout_ms,
           config_.activation_timeout_ms,
           config_.allow_timed_out_adapter_replacement}),
-      sensor_runtime_(std::make_unique<SensorRuntime>()) {}
+      sensor_runtime_(std::make_unique<SensorRuntime>()),
+      control_endpoint_(std::make_unique<ControlEndpoint>()),
+      observation_endpoint_(std::make_unique<ObservationEndpoint>()),
+      scheduler_(std::make_unique<SimulationScheduler>()) {}
 
-EcalServer::~EcalServer() {
+ServerApplication::~ServerApplication() {
   std::string error;
-  if (!RunWithExceptionBoundary([&] { Stop(); }, &error)) {
+  if (!RunWithExceptionBoundary([&] { RequestStop(); }, &error)) {
     LogBoundaryFailure(logger_->get(), "server_destructor", "Stop", error);
   }
   if (!RunWithExceptionBoundary([&] { ShutdownTransport(); }, &error)) {
@@ -204,7 +195,7 @@ EcalServer::~EcalServer() {
   RunWithExceptionBoundary([&] { logger_->Flush(); }, nullptr);
 }
 
-bool EcalServer::Start(std::string* error_message) {
+bool ServerApplication::Start(std::string* error_message) {
   if (error_message == nullptr ||
       !ValidateServerConfig(config_, error_message)) {
     if (error_message != nullptr) {
@@ -219,21 +210,18 @@ bool EcalServer::Start(std::string* error_message) {
   const auto log = logger_->get();
   log->info(
       "event=server_starting server_name={} model_path={} initial_keyframe={} "
-      "mode={} max_ticks={} tick_timeout_ms={} startup_timeout_ms={} "
+      "mode={} max_ticks={} tick_timeout_ms={} "
       "activation_timeout_ms={} allow_timed_out_adapter_replacement={} "
       "status_period_ms={} log_level={} log_file={} "
       "log_summary_period_ms={}",
       LogValue(config_.server_name), LogValue(config_.model_path),
       LogValue(config_.initial_keyframe),
       config_.headless ? "headless" : "gui", config_.max_ticks,
-      config_.tick_timeout_ms, config_.startup_timeout_ms,
+      config_.tick_timeout_ms,
       config_.activation_timeout_ms,
       config_.allow_timed_out_adapter_replacement,
       config_.status_period_ms, config_.log_level, LogValue(config_.log_file),
       config_.log_summary_period_ms);
-  log->warn(
-      "event=deprecated_config field=startup_timeout_ms behavior=ignored");
-
   bool ecal_was_initialized = false;
   bool ecal_initialized = false;
   std::string ecal_error;
@@ -336,187 +324,83 @@ bool EcalServer::Start(std::string* error_message) {
   return true;
 }
 
-bool EcalServer::RegisterServices(std::string* error_message) {
+bool ServerApplication::RegisterServices(std::string* error_message) {
   const std::string service_name =
       mujoco_sim::protocol::RegistryServiceName(config_.server_name);
-  registry_ = std::make_unique<eCAL::CServiceServer>(
-      service_name);
+  registry_endpoint_ = std::make_unique<RegistryEndpoint>(service_name);
   const auto callback_logger = logger_->get();
-
-  if (!registry_->SetMethodCallback(
-      MethodInfo(mujoco_sim::protocol::kGetAvailableResourcesMethod),
-      [this, callback_state = callback_state_, callback_logger](
-          const eCAL::SServiceMethodInformation&, const std::string& request,
-          std::string& response) noexcept {
-        return InvokeGuardedServiceCallback(
-            callback_state, callback_logger,
-            mujoco_sim::protocol::kGetAvailableResourcesMethod,
-            [&] { return HandleGetAvailableResources(request, &response); });
-      })) {
-    *error_message = "failed to register method: " +
-                     std::string(
-                         mujoco_sim::protocol::kGetAvailableResourcesMethod);
-    return false;
-  }
-  if (!registry_->SetMethodCallback(
-      MethodInfo(mujoco_sim::protocol::kRegisterControllerMethod),
-      [this, callback_state = callback_state_, callback_logger](
-          const eCAL::SServiceMethodInformation&, const std::string& request,
-          std::string& response) noexcept {
-        return InvokeGuardedServiceCallback(
-            callback_state, callback_logger,
-            mujoco_sim::protocol::kRegisterControllerMethod,
-            [&] { return HandleRegisterController(request, &response); });
-      })) {
-    *error_message = "failed to register method: " +
-                     std::string(
-                         mujoco_sim::protocol::kRegisterControllerMethod);
-    return false;
-  }
-  if (!registry_->SetMethodCallback(
-      MethodInfo(mujoco_sim::protocol::kActivateControllerMethod),
-      [this, callback_state = callback_state_, callback_logger](
-          const eCAL::SServiceMethodInformation&, const std::string& request,
-          std::string& response) noexcept {
-        return InvokeGuardedServiceCallback(
-            callback_state, callback_logger,
-            mujoco_sim::protocol::kActivateControllerMethod,
-            [&] { return HandleActivateController(request, &response); });
-      })) {
-    *error_message = "failed to register method: " +
-                     std::string(
-                         mujoco_sim::protocol::kActivateControllerMethod);
-    return false;
-  }
-  if (!registry_->SetMethodCallback(
-      MethodInfo(mujoco_sim::protocol::kUnregisterControllerMethod),
-      [this, callback_state = callback_state_, callback_logger](
-          const eCAL::SServiceMethodInformation&, const std::string& request,
-          std::string& response) noexcept {
-        return InvokeGuardedServiceCallback(
-            callback_state, callback_logger,
-            mujoco_sim::protocol::kUnregisterControllerMethod,
-            [&] { return HandleUnregisterController(request, &response); });
-      })) {
-    *error_message = "failed to register method: " +
-                     std::string(
-                         mujoco_sim::protocol::kUnregisterControllerMethod);
-    return false;
-  }
-  if (!registry_->SetMethodCallback(
-          MethodInfo(mujoco_sim::protocol::kRegisterAdapterMethod),
-          [this, callback_state = callback_state_, callback_logger](
-              const eCAL::SServiceMethodInformation&,
-              const std::string& request, std::string& response) noexcept {
-            return InvokeGuardedServiceCallback(
-                callback_state, callback_logger,
-                mujoco_sim::protocol::kRegisterAdapterMethod,
-                [&] { return HandleRegisterAdapter(request, &response); });
-          })) {
-    *error_message = "failed to register method: " +
-                     std::string(mujoco_sim::protocol::kRegisterAdapterMethod);
-    return false;
-  }
-  if (!registry_->SetMethodCallback(
-          MethodInfo(mujoco_sim::protocol::kActivateAdapterMethod),
-          [this, callback_state = callback_state_, callback_logger](
-              const eCAL::SServiceMethodInformation&,
-              const std::string& request, std::string& response) noexcept {
-            return InvokeGuardedServiceCallback(
-                callback_state, callback_logger,
-                mujoco_sim::protocol::kActivateAdapterMethod,
-                [&] { return HandleActivateAdapter(request, &response); });
-          })) {
-    *error_message = "failed to register method: " +
-                     std::string(mujoco_sim::protocol::kActivateAdapterMethod);
-    return false;
-  }
-  if (!registry_->SetMethodCallback(
-          MethodInfo(mujoco_sim::protocol::kUnregisterAdapterMethod),
-          [this, callback_state = callback_state_, callback_logger](
-              const eCAL::SServiceMethodInformation&,
-              const std::string& request, std::string& response) noexcept {
-            return InvokeGuardedServiceCallback(
-                callback_state, callback_logger,
-                mujoco_sim::protocol::kUnregisterAdapterMethod,
-                [&] { return HandleUnregisterAdapter(request, &response); });
-          })) {
-    *error_message = "failed to register method: " + std::string(
-                         mujoco_sim::protocol::kUnregisterAdapterMethod);
-    return false;
-  }
-  if (!registry_->SetMethodCallback(
-          MethodInfo(mujoco_sim::protocol::kGetSensorStreamsMethod),
-          [this, callback_state = callback_state_, callback_logger](
-              const eCAL::SServiceMethodInformation&,
-              const std::string& request, std::string& response) noexcept {
-            return InvokeGuardedServiceCallback(
-                callback_state, callback_logger,
-                mujoco_sim::protocol::kGetSensorStreamsMethod,
-                [&] { return HandleGetSensorStreams(request, &response); });
-          })) {
-    *error_message = "failed to register method: " +
-                     std::string(mujoco_sim::protocol::kGetSensorStreamsMethod);
+  using Handler = int (ServerApplication::*)(const std::string&, std::string*);
+  const auto register_method =
+      [this, callback_logger, error_message](const char* method,
+                                             Handler handler) {
+        const bool registered = registry_endpoint_->RegisterMethod(
+            method,
+            [this, callback_state = callback_state_, callback_logger, method,
+             handler](const std::string& request, std::string* response) {
+              return InvokeGuardedServiceCallback(
+                  callback_state, callback_logger, method,
+                  [&] { return (this->*handler)(request, response); });
+            });
+        if (!registered) {
+          *error_message = "failed to register method: " +
+                           std::string(method);
+        }
+        return registered;
+      };
+  if (!register_method(mujoco_sim::protocol::kGetAvailableResourcesMethod,
+                       &ServerApplication::HandleGetAvailableResources) ||
+      !register_method(mujoco_sim::protocol::kRegisterAdapterMethod,
+                       &ServerApplication::HandleRegisterAdapter) ||
+      !register_method(mujoco_sim::protocol::kActivateAdapterMethod,
+                       &ServerApplication::HandleActivateAdapter) ||
+      !register_method(mujoco_sim::protocol::kUnregisterAdapterMethod,
+                       &ServerApplication::HandleUnregisterAdapter) ||
+      !register_method(mujoco_sim::protocol::kGetSensorStreamsMethod,
+                       &ServerApplication::HandleGetSensorStreams)) {
     return false;
   }
   logger_->get()->info(
-      "event=registry_registered service={} methods=8",
+      "event=registry_registered service={} methods=5",
       LogValue(service_name));
   return true;
 }
 
-void EcalServer::RegisterSubscribersAndPublishers() {
+void ServerApplication::RegisterSubscribersAndPublishers() {
   const std::string commit_topic =
       mujoco_sim::protocol::CommitTopicName(config_.server_name);
-  const std::string heartbeat_topic =
-      mujoco_sim::protocol::HeartbeatTopicName(config_.server_name);
   const std::string status_topic =
       mujoco_sim::protocol::StatusTopicName(config_.server_name);
   const std::string adapter_heartbeat_topic =
       mujoco_sim::protocol::AdapterHeartbeatTopicName(config_.server_name);
   const auto callback_logger = logger_->get();
-  commit_subscriber_ = std::make_unique<eCAL::CSubscriber>(commit_topic);
-  commit_subscriber_->SetReceiveCallback(
+  control_endpoint_->SubscribeCommits(
+      commit_topic,
       [this, callback_state = callback_state_, callback_logger](
-          const eCAL::STopicId&, const eCAL::SDataTypeInformation&,
-          const eCAL::SReceiveCallbackData& data) noexcept {
+          const void* data, std::size_t size) noexcept {
         InvokeGuardedSubscriberCallback(
             callback_state, callback_logger, "AdapterCommit",
-            [&] { HandleCommitBytes(data.buffer, data.buffer_size); });
+            [&] { HandleCommitBytes(data, size); });
       });
 
-  heartbeat_subscriber_ =
-      std::make_unique<eCAL::CSubscriber>(heartbeat_topic);
-  heartbeat_subscriber_->SetReceiveCallback(
+  registry_endpoint_->SubscribeHeartbeat(
+      adapter_heartbeat_topic,
       [this, callback_state = callback_state_, callback_logger](
-          const eCAL::STopicId&, const eCAL::SDataTypeInformation&,
-          const eCAL::SReceiveCallbackData& data) noexcept {
-        InvokeGuardedSubscriberCallback(
-            callback_state, callback_logger, "Heartbeat",
-            [&] { HandleHeartbeatBytes(data.buffer, data.buffer_size); });
-      });
-
-  adapter_heartbeat_subscriber_ =
-      std::make_unique<eCAL::CSubscriber>(adapter_heartbeat_topic);
-  adapter_heartbeat_subscriber_->SetReceiveCallback(
-      [this, callback_state = callback_state_, callback_logger](
-          const eCAL::STopicId&, const eCAL::SDataTypeInformation&,
-          const eCAL::SReceiveCallbackData& data) noexcept {
+          const void* data, std::size_t size) noexcept {
         InvokeGuardedSubscriberCallback(
             callback_state, callback_logger, "AdapterHeartbeat", [&] {
-              HandleAdapterHeartbeatBytes(data.buffer, data.buffer_size);
+              HandleAdapterHeartbeatBytes(data, size);
             });
       });
 
-  status_publisher_ = std::make_unique<eCAL::CPublisher>(status_topic);
+  status_endpoint_ = std::make_unique<StatusEndpoint>(status_topic);
   logger_->get()->info(
-      "event=runtime_endpoints_registered commit_topic={} heartbeat_topic={} "
+      "event=runtime_endpoints_registered commit_topic={} "
       "adapter_heartbeat_topic={} status_topic={}",
-      LogValue(commit_topic), LogValue(heartbeat_topic),
-      LogValue(adapter_heartbeat_topic), LogValue(status_topic));
+      LogValue(commit_topic), LogValue(adapter_heartbeat_topic),
+      LogValue(status_topic));
 }
 
-void EcalServer::ShutdownTransport() {
+void ServerApplication::ShutdownTransport() {
   BestEffortCleanup cleanup(
       [this](std::string_view operation, const std::string& error) {
         LogBoundaryFailure(logger_->get(), "transport_cleanup", operation,
@@ -527,56 +411,35 @@ void EcalServer::ShutdownTransport() {
   });
   cleanup.Run("callback_state.StopAccepting",
               [this] { callback_state_->StopAccepting(); });
-  cleanup.Run("commit_subscriber.RemoveReceiveCallback", [this] {
-    if (commit_subscriber_) commit_subscriber_->RemoveReceiveCallback();
+  cleanup.Run("commit_subscriber.stop", [this] {
+    if (control_endpoint_) control_endpoint_->StopSubscriber();
   });
-  cleanup.Run("heartbeat_subscriber.RemoveReceiveCallback", [this] {
-    if (heartbeat_subscriber_) heartbeat_subscriber_->RemoveReceiveCallback();
+  cleanup.Run("registry_callbacks.stop", [this] {
+    if (registry_endpoint_) registry_endpoint_->StopCallbacks();
   });
-  cleanup.Run("adapter_heartbeat_subscriber.RemoveReceiveCallback", [this] {
-    if (adapter_heartbeat_subscriber_) {
-      adapter_heartbeat_subscriber_->RemoveReceiveCallback();
-    }
-  });
-  const auto remove_method = [this, &cleanup](const char* method) {
-    cleanup.Run(method, [this, method] {
-      if (registry_) registry_->RemoveMethodCallback(method);
-    });
-  };
-  remove_method(mujoco_sim::protocol::kGetAvailableResourcesMethod);
-  remove_method(mujoco_sim::protocol::kRegisterControllerMethod);
-  remove_method(mujoco_sim::protocol::kActivateControllerMethod);
-  remove_method(mujoco_sim::protocol::kUnregisterControllerMethod);
-  remove_method(mujoco_sim::protocol::kRegisterAdapterMethod);
-  remove_method(mujoco_sim::protocol::kActivateAdapterMethod);
-  remove_method(mujoco_sim::protocol::kUnregisterAdapterMethod);
-  remove_method(mujoco_sim::protocol::kGetSensorStreamsMethod);
   cleanup.Run("callback_state.WaitForIdle",
               [this] { callback_state_->WaitForIdle(); });
   cleanup.Run("sensor_runtime.Stop", [this] {
     if (sensor_runtime_) sensor_runtime_->Stop();
   });
-  cleanup.Run("commit_subscriber.reset",
-              [this] { commit_subscriber_.reset(); });
-  cleanup.Run("heartbeat_subscriber.reset",
-              [this] { heartbeat_subscriber_.reset(); });
-  cleanup.Run("adapter_heartbeat_subscriber.reset",
-              [this] { adapter_heartbeat_subscriber_.reset(); });
-  cleanup.Run("registry.reset", [this] { registry_.reset(); });
+  cleanup.Run("registry.reset", [this] {
+    if (registry_endpoint_) registry_endpoint_->ResetService();
+  });
   cleanup.Run("adapter_publishers.clear", [this] {
-    std::lock_guard publisher_lock(publisher_mutex_);
-    tick_publishers_.clear();
-    observation_publishers_.clear();
+    if (control_endpoint_) control_endpoint_->ClearPublishers();
+    if (observation_endpoint_) observation_endpoint_->ClearPublishers();
   });
   cleanup.Run("status_publisher.reset",
-              [this] { status_publisher_.reset(); });
+              [this] {
+                if (status_endpoint_) status_endpoint_->Reset();
+              });
   transport_shutdown_succeeded_ = cleanup.succeeded();
   if (logger_->get()) {
     logger_->get()->debug("event=transport_stopped");
   }
 }
 
-int EcalServer::Run() {
+int ServerApplication::Run() {
   try {
     if (viewer_ != nullptr) {
       return RunGraphical();
@@ -597,7 +460,7 @@ int EcalServer::Run() {
   }
 }
 
-int EcalServer::RunGraphical() {
+int ServerApplication::RunGraphical() {
   int result = 1;
   std::thread server_thread([this, &result]() noexcept {
     try {
@@ -654,7 +517,7 @@ int EcalServer::RunGraphical() {
   return render_succeeded ? result : 2;
 }
 
-int EcalServer::RunLoop() {
+int ServerApplication::RunLoop() {
   const auto started_at = std::chrono::steady_clock::now();
   const auto step_period = std::chrono::duration_cast<
       std::chrono::steady_clock::duration>(
@@ -672,8 +535,9 @@ int EcalServer::RunLoop() {
   logger_->get()->info("event=run_loop_started");
 
   while (!stop_requested_ && eCAL::Ok()) {
-    std::vector<mujoco_sim::v1::Tick> ticks;
-    std::vector<mujoco_sim::v1::ObservationFrame> observation_frames;
+    std::vector<mujoco_sim::core::IssuedTickHandle> ticks;
+    std::vector<mujoco_sim::v2::ObservationFrame> observation_frames;
+    std::optional<mujoco_sim::core::StepCompletedEvent> scheduled_event;
     bool should_stop_success = false;
     bool should_stop_error = false;
     bool tick_retransmission = false;
@@ -682,51 +546,55 @@ int EcalServer::RunLoop() {
     bool scheduled_completed_barrier = false;
     bool publish_status = false;
     bool state_changed = false;
-    mujoco_sim::v1::ServerState old_state =
-        mujoco_sim::v1::SERVER_STATE_UNSPECIFIED;
-    mujoco_sim::v1::ServerState new_state =
-        mujoco_sim::v1::SERVER_STATE_UNSPECIFIED;
+    mujoco_sim::v2::ServerState old_state =
+        mujoco_sim::v2::SERVER_STATE_UNSPECIFIED;
+    mujoco_sim::v2::ServerState new_state =
+        mujoco_sim::v2::SERVER_STATE_UNSPECIFIED;
     std::string stop_reason;
     std::string state_message;
     std::string viewer_error;
     double deadline_barrier_latency_ms = 0.0;
     double scheduled_barrier_latency_ms = 0.0;
-    std::vector<mujoco_sim::core::ControllerTransition> transitions;
-    std::vector<mujoco_sim::core::DeadlineResult::AdapterTransition>
-        adapter_transitions;
+    std::vector<mujoco_sim::core::AdapterTransition> transitions;
     const auto now = std::chrono::steady_clock::now();
+
+    if (scheduler_->step_pipeline_busy()) {
+      std::unique_lock lock(mutex_);
+      const auto deadline = now + std::chrono::milliseconds(1);
+      scheduler_->WaitUntil(lock, deadline);
+      metrics_->RecordSchedulerWakeup(
+          std::chrono::steady_clock::now() > deadline);
+      continue;
+    }
 
     {
       std::unique_lock simulation_lock(simulation_mutex_);
       std::unique_lock lock(mutex_);
-      auto deadlines = core_.CheckControllerDeadlines(now);
+      auto deadlines = core_.CheckDeadlines(now);
       transitions = std::move(deadlines.transitions);
-      adapter_transitions = std::move(deadlines.adapter_transitions);
-      if (deadlines.stepped) {
+      if (deadlines.step_completed) {
+        if (!scheduler_->BeginStepPipeline()) {
+          core_.EnterFatalError("step pipeline overlap after deadline");
+          should_stop_error = true;
+          stop_reason = "step_pipeline_overlap";
+        }
         deadline_completed_barrier = true;
         deadline_barrier_latency_ms = metrics_->RecordBarrierCompleted(
             std::chrono::steady_clock::now());
-        observation_frames = core_.CollectObservationFrames();
+        observation_frames =
+            std::move(deadlines.step_completed->observer_frames);
         sensor_runtime_->OnStepCompleted(&core_);
       }
       for (const auto& transition : transitions) {
-        if (transition.new_state == mujoco_sim::v1::TIMED_OUT) {
+        if (transition.new_state == mujoco_sim::v2::TIMED_OUT) {
           metrics_->RecordTimeout();
-        } else if (transition.old_state == mujoco_sim::v1::PROVISIONAL &&
-                   transition.new_state == mujoco_sim::v1::UNREGISTERED) {
+        } else if (transition.old_state == mujoco_sim::v2::PROVISIONAL &&
+                   transition.new_state == mujoco_sim::v2::UNREGISTERED) {
           metrics_->RecordActivationExpiration();
         }
       }
-      for (const auto& transition : adapter_transitions) {
-        if (transition.new_state == mujoco_sim::v1::TIMED_OUT) {
-          metrics_->RecordTimeout();
-        } else if (transition.old_state == mujoco_sim::v1::PROVISIONAL &&
-                   transition.new_state == mujoco_sim::v1::UNREGISTERED) {
-          metrics_->RecordActivationExpiration();
-        }
-      }
-      if (!transitions.empty() || !adapter_transitions.empty() ||
-          deadlines.stepped) {
+      if (!transitions.empty() ||
+          deadlines.step_completed.has_value()) {
         status_dirty_ = true;
       }
       if (core_.current_tick_id() != observed_tick_id) {
@@ -734,14 +602,15 @@ int EcalServer::RunLoop() {
         next_tick = std::chrono::steady_clock::now() + step_period;
       }
 
-      if (core_.server_state() == mujoco_sim::v1::ERROR_PAUSED) {
+      if (core_.server_state() == mujoco_sim::v2::ERROR_PAUSED) {
         should_stop_error = true;
         stop_reason = "core_error_paused";
       } else if (config_.max_ticks > 0 &&
                  core_.current_tick_id() >= config_.max_ticks) {
         should_stop_success = true;
         stop_reason = "max_ticks";
-      } else if (!core_.tick_open() && now >= next_tick) {
+      } else if (!scheduler_->step_pipeline_busy() && !core_.tick_open() &&
+                 now >= next_tick) {
         ticks = OpenTickLocked();
         tick_opened = true;
       } else if (core_.tick_open()) {
@@ -776,33 +645,26 @@ int EcalServer::RunLoop() {
                       std::chrono::milliseconds(config_.status_period_ms);
       }
       lock.unlock();
+      simulation_lock.unlock();
       if (should_stop_success || should_stop_error) {
         sensor_runtime_->RequestStop();
       }
-      sensor_runtime_->CompleteBlockingEnqueues(
-          [this] { return stop_requested_.load() || !eCAL::Ok(); });
+      if (deadlines.step_completed) {
+        CompleteSensorFence();
+      }
       if (!observation_frames.empty()) {
         PublishObservationFrames(observation_frames);
         observation_frames.clear();
       }
-      const bool remove_publishers =
-          std::any_of(transitions.begin(), transitions.end(), [](const auto& t) {
-            return t.new_state == mujoco_sim::v1::UNREGISTERED;
-          }) ||
-          std::any_of(adapter_transitions.begin(), adapter_transitions.end(),
-                      [](const auto& t) {
-                        return t.new_state == mujoco_sim::v1::UNREGISTERED;
-                      });
-      if (remove_publishers) {
-        std::lock_guard publisher_lock(publisher_mutex_);
-        for (const auto& transition : transitions) {
-          if (transition.new_state == mujoco_sim::v1::UNREGISTERED) {
-            tick_publishers_.erase(transition.controller_id);
-          }
-        }
-        for (const auto& transition : adapter_transitions) {
-          if (transition.new_state == mujoco_sim::v1::UNREGISTERED) {
-            observation_publishers_.erase(transition.adapter_id);
+      if (deadlines.step_completed) {
+        FinishStepPipeline(*deadlines.step_completed);
+      }
+      for (const auto& transition : transitions) {
+        if (transition.new_state == mujoco_sim::v2::UNREGISTERED) {
+          if (transition.role == mujoco_sim::v2::OBSERVER) {
+            observation_endpoint_->ErasePublisher(transition.adapter_id);
+          } else {
+            control_endpoint_->ErasePublisher(transition.adapter_id);
           }
         }
       }
@@ -815,14 +677,20 @@ int EcalServer::RunLoop() {
       std::unique_lock simulation_lock(simulation_mutex_);
       {
         std::lock_guard lock(mutex_);
-        if (core_.StepIfBarrierComplete()) {
+        auto empty_barrier = core_.CompleteEmptyBarrier();
+        if (empty_barrier.step_completed) {
+          scheduled_event = std::move(empty_barrier.step_completed);
+          if (!scheduler_->BeginStepPipeline()) {
+            core_.EnterFatalError("step pipeline overlap after empty barrier");
+          }
           const auto completed_at = std::chrono::steady_clock::now();
           observed_tick_id = core_.current_tick_id();
           next_tick = completed_at + step_period;
           scheduled_completed_barrier = true;
           scheduled_barrier_latency_ms =
               metrics_->RecordBarrierCompleted(completed_at);
-          auto scheduled_frames = core_.CollectObservationFrames();
+          auto scheduled_frames =
+              std::move(scheduled_event->observer_frames);
           sensor_runtime_->OnStepCompleted(&core_);
           observation_frames.insert(
               observation_frames.end(),
@@ -830,40 +698,30 @@ int EcalServer::RunLoop() {
               std::make_move_iterator(scheduled_frames.end()));
         }
       }
-      sensor_runtime_->CompleteBlockingEnqueues(
-          [this] { return stop_requested_.load() || !eCAL::Ok(); });
+      simulation_lock.unlock();
+      if (scheduled_event) {
+        CompleteSensorFence();
+      }
       if (!observation_frames.empty()) {
         PublishObservationFrames(observation_frames);
         observation_frames.clear();
       }
-    }
-    for (const auto& transition : transitions) {
-      if (transition.new_state == mujoco_sim::v1::TIMED_OUT) {
-        logger_->get()->warn(
-            "event=controller_timed_out controller_id={} session_id={} "
-            "tick_id={} message={}",
-            LogValue(transition.controller_id), transition.session_id,
-            transition.tick_id, LogValue(transition.message));
-      } else if (transition.old_state == mujoco_sim::v1::PROVISIONAL &&
-                 transition.new_state == mujoco_sim::v1::UNREGISTERED) {
-        logger_->get()->warn(
-            "event=controller_activation_expired controller_id={} "
-            "session_id={} tick_id={}",
-            LogValue(transition.controller_id), transition.session_id,
-            transition.tick_id);
+      if (scheduled_event) {
+        FinishStepPipeline(*scheduled_event);
       }
     }
-    for (const auto& transition : adapter_transitions) {
-      if (transition.new_state == mujoco_sim::v1::TIMED_OUT) {
+    for (const auto& transition : transitions) {
+      if (transition.new_state == mujoco_sim::v2::TIMED_OUT) {
         logger_->get()->warn(
-            "event=observer_timed_out adapter_id={} session_id={} tick_id={} "
-            "message={}",
+            "event=adapter_timed_out adapter_id={} session_id={} "
+            "tick_id={} message={}",
             LogValue(transition.adapter_id), transition.session_id,
             transition.tick_id, LogValue(transition.message));
-      } else if (transition.new_state == mujoco_sim::v1::UNREGISTERED) {
+      } else if (transition.old_state == mujoco_sim::v2::PROVISIONAL &&
+                 transition.new_state == mujoco_sim::v2::UNREGISTERED) {
         logger_->get()->warn(
-            "event=observer_activation_expired adapter_id={} session_id={} "
-            "tick_id={}",
+            "event=adapter_activation_expired adapter_id={} "
+            "session_id={} tick_id={}",
             LogValue(transition.adapter_id), transition.session_id,
             transition.tick_id);
       }
@@ -915,7 +773,9 @@ int EcalServer::RunLoop() {
     const auto wait_now = std::chrono::steady_clock::now();
     const auto wake_deadline = ComputeLoopWakeDeadline(
         wait_now, next_tick, core_.tick_open(), std::chrono::milliseconds(5));
-    condition_.wait_until(lock, wake_deadline);
+    scheduler_->WaitUntil(lock, wake_deadline);
+    metrics_->RecordSchedulerWakeup(
+        std::chrono::steady_clock::now() > wake_deadline);
   }
   if (stop_requested_) {
     std::string reason;
@@ -928,7 +788,7 @@ int EcalServer::RunLoop() {
   return FinishRun(1, "ecal_stopped");
 }
 
-void EcalServer::MaybeLogSummary(
+void ServerApplication::MaybeLogSummary(
     std::chrono::steady_clock::time_point now, bool final) {
   if (config_.log_summary_period_ms == 0) {
     return;
@@ -946,13 +806,13 @@ void EcalServer::MaybeLogSummary(
       return;
     }
     summary.provisional_controllers =
-        core_.controller_count(mujoco_sim::v1::PROVISIONAL);
+        core_.controller_count(mujoco_sim::v2::PROVISIONAL);
     summary.active_controllers =
-        core_.controller_count(mujoco_sim::v1::ACTIVE);
+        core_.controller_count(mujoco_sim::v2::ACTIVE);
     summary.timed_out_controllers =
-        core_.controller_count(mujoco_sim::v1::TIMED_OUT);
+        core_.controller_count(mujoco_sim::v2::TIMED_OUT);
     summary.error_controllers =
-        core_.controller_count(mujoco_sim::v1::ERROR);
+        core_.controller_count(mujoco_sim::v2::ERROR);
     summary.state = core_.server_state();
     summary.runtime = metrics_->TakeSummary(
         now, core_.current_tick_id(), core_.simulation_time());
@@ -967,7 +827,11 @@ void EcalServer::MaybeLogSummary(
       "tick_publish_attempts={} tick_serialization_failures={} "
       "tick_messages_sent={} "
       "tick_send_rejected_with_subscribers={} tick_no_subscribers={} "
-      "tick_retransmissions={} commits={} "
+      "tick_retransmissions={} tick_serializations={} tick_cache_hits={} "
+      "tick_cache_misses={} tick_cached_bytes={} layout_bytes_avoided={} "
+      "layout_hash_mismatches={} blocking_wait_count={} "
+      "blocking_wait_total_ms={:.3f} blocking_wait_max_ms={:.3f} "
+      "scheduler_wakeups={} scheduler_late_wakeups={} commits={} "
       "duplicate_commits={} rejected_commits={} timeouts={} recoveries={} "
       "replacements={} local_errors={} activation_expirations={} "
       "malformed_messages={} suppressed_warnings={} step_rate_hz={:.3f} "
@@ -981,6 +845,12 @@ void EcalServer::MaybeLogSummary(
       runtime.tick_serialization_failures, runtime.tick_messages_sent,
       runtime.tick_send_rejected_with_subscribers,
       runtime.tick_no_subscribers, runtime.tick_retransmissions,
+      runtime.tick_serializations, runtime.tick_cache_hits,
+      runtime.tick_cache_misses, runtime.tick_cached_bytes,
+      runtime.layout_bytes_avoided, runtime.layout_hash_mismatches,
+      runtime.blocking_wait_count, runtime.blocking_wait_total_ms,
+      runtime.blocking_wait_max_ms, runtime.scheduler_wakeups,
+      runtime.scheduler_late_wakeups,
       runtime.commits, runtime.duplicate_commits, runtime.rejected_commits,
       runtime.timeouts, runtime.recoveries, runtime.replacements,
       runtime.local_errors, runtime.activation_expirations,
@@ -991,7 +861,7 @@ void EcalServer::MaybeLogSummary(
       runtime.rates.barrier_latency_max_ms);
 }
 
-int EcalServer::FinishRun(int exit_code, const std::string& reason) {
+int ServerApplication::FinishRun(int exit_code, const std::string& reason) {
   if (sensor_runtime_) {
     sensor_runtime_->RequestStop();
   }
@@ -1001,7 +871,7 @@ int EcalServer::FinishRun(int exit_code, const std::string& reason) {
     std::lock_guard lock(mutex_);
     if (exit_code == 0) {
       core_.MarkStopped(reason);
-    } else if (core_.server_state() != mujoco_sim::v1::ERROR_PAUSED) {
+    } else if (core_.server_state() != mujoco_sim::v2::ERROR_PAUSED) {
       core_.EnterFatalError(reason);
     }
   }
@@ -1026,7 +896,7 @@ int EcalServer::FinishRun(int exit_code, const std::string& reason) {
   return exit_code;
 }
 
-void EcalServer::StopWithReason(const std::string& reason) {
+void ServerApplication::StopWithReason(const std::string& reason) {
   bool changed = false;
   bool should_log = false;
   {
@@ -1040,7 +910,7 @@ void EcalServer::StopWithReason(const std::string& reason) {
   if (sensor_runtime_) {
     sensor_runtime_->RequestStop();
   }
-  condition_.notify_all();
+  scheduler_->NotifyLifecycleChanged();
   if (changed && should_log && logger_->get()) {
     try {
       logger_->get()->debug("event=stop_requested reason={}", reason);
@@ -1049,9 +919,11 @@ void EcalServer::StopWithReason(const std::string& reason) {
   }
 }
 
-void EcalServer::Stop() { StopWithReason("external_stop"); }
+void ServerApplication::RequestStop(std::string reason) {
+  StopWithReason(reason);
+}
 
-bool EcalServer::ShouldLogWarning(const char* key,
+bool ServerApplication::ShouldLogWarning(const char* key,
                                   std::uint64_t* suppressed) {
   const WarningDecision decision = warning_limiter_->Admit(key);
   *suppressed = decision.suppressed;
@@ -1062,37 +934,92 @@ bool EcalServer::ShouldLogWarning(const char* key,
   return decision.emit;
 }
 
-void EcalServer::RecordMalformedMessage() {
+void ServerApplication::RecordMalformedMessage() {
   std::lock_guard lock(mutex_);
   metrics_->RecordMalformedMessage();
 }
 
-std::vector<mujoco_sim::v1::Tick> EcalServer::OpenTickLocked() {
+void ServerApplication::FinishStepPipeline(
+    const mujoco_sim::core::StepCompletedEvent& event) {
+  logger_->get()->debug(
+      "event=tick_cache_invalidated completed_tick_id={} next_tick_id={}",
+      event.completed_tick_id, event.next_tick_id);
+  logger_->get()->debug(
+      "event=scheduler_step_completed completed_tick_id={} next_tick_id={} "
+      "simulation_time_s={:.6f} source={}",
+      event.completed_tick_id, event.next_tick_id, event.simulation_time_s,
+      static_cast<int>(event.source));
+  scheduler_->CompleteStepPipeline();
+}
+
+void ServerApplication::CompleteSensorFence() {
+  const auto started = std::chrono::steady_clock::now();
+  logger_->get()->trace("event=blocking_sensor_fence_started");
+  sensor_runtime_->CompleteBlockingEnqueues(
+      [this] { return stop_requested_.load() || !eCAL::Ok(); });
+  const double elapsed_ms =
+      std::chrono::duration<double, std::milli>(
+          std::chrono::steady_clock::now() - started)
+          .count();
+  {
+    std::lock_guard lock(mutex_);
+    metrics_->RecordBlockingWait(elapsed_ms);
+  }
+  logger_->get()->trace(
+      "event=blocking_sensor_fence_completed elapsed_ms={:.3f}", elapsed_ms);
+}
+
+std::vector<mujoco_sim::core::IssuedTickHandle> ServerApplication::OpenTickLocked() {
+  if (scheduler_->step_pipeline_busy()) {
+    core_.EnterFatalError("attempted to open Tick while step pipeline is busy");
+    return {};
+  }
   const bool was_open = core_.tick_open();
   std::unordered_map<std::string, std::uint64_t> timed_out_sessions;
   if (!was_open) {
     const auto before = core_.MakeStatus();
-    for (const auto& controller : before.controllers()) {
-      if (controller.state() == mujoco_sim::v1::TIMED_OUT) {
-        timed_out_sessions.emplace(controller.controller_id(),
-                                   controller.session_id());
+    for (const auto& adapter : before.adapters()) {
+      if (adapter.role() == mujoco_sim::v2::CONTROLLER &&
+          adapter.state() == mujoco_sim::v2::TIMED_OUT) {
+        timed_out_sessions.emplace(adapter.adapter_id(),
+                                   adapter.session_id());
       }
     }
   }
-  auto ticks = core_.OpenTick();
+  auto ticks = core_.OpenIssuedTicks();
+  std::uint64_t cached_bytes = 0;
+  std::uint64_t layout_bytes_avoided = 0;
+  for (const auto& tick : ticks) {
+    cached_bytes += tick->serialized_bytes.size();
+    layout_bytes_avoided += tick->layout_bytes_avoided;
+  }
+  metrics_->RecordTickCache(was_open ? 0U : ticks.size(),
+                            was_open ? ticks.size() : 0U, 0U, cached_bytes,
+                            layout_bytes_avoided);
   if (!was_open && core_.tick_open()) {
     metrics_->RecordTickOpened(std::chrono::steady_clock::now());
+    for (const auto& tick : ticks) {
+      logger_->get()->debug(
+          "event=tick_cache_created adapter_id={} tick_id={} bytes={} "
+          "layout_bytes_avoided={} serializations={}",
+          LogValue(tick->identity.adapter_id), tick->identity.tick_id,
+          tick->serialized_bytes.size(), tick->layout_bytes_avoided,
+          tick->serialization_count);
+    }
     const auto after = core_.MakeStatus();
-    for (const auto& controller : after.controllers()) {
-      const auto previous = timed_out_sessions.find(controller.controller_id());
+    for (const auto& adapter : after.adapters()) {
+      if (adapter.role() != mujoco_sim::v2::CONTROLLER) {
+        continue;
+      }
+      const auto previous = timed_out_sessions.find(adapter.adapter_id());
       if (previous != timed_out_sessions.end() &&
-          previous->second == controller.session_id() &&
-          controller.state() == mujoco_sim::v1::ACTIVE) {
+          previous->second == adapter.session_id() &&
+          adapter.state() == mujoco_sim::v2::ACTIVE) {
         status_dirty_ = true;
         logger_->get()->info(
-            "event=controller_recovered controller_id={} session_id={} "
+            "event=adapter_recovered adapter_id={} session_id={} "
             "tick_id={}",
-            LogValue(controller.controller_id()), controller.session_id(),
+            LogValue(adapter.adapter_id()), adapter.session_id(),
             core_.current_tick_id());
       }
     }
@@ -1100,11 +1027,11 @@ std::vector<mujoco_sim::v1::Tick> EcalServer::OpenTickLocked() {
   return ticks;
 }
 
-void EcalServer::PublishTicks(
-    const std::vector<mujoco_sim::v1::Tick>& ticks, bool retransmission) {
+void ServerApplication::PublishTicks(
+    const std::vector<mujoco_sim::core::IssuedTickHandle>& ticks,
+    bool retransmission) {
   struct PublishAttempt {
-    const mujoco_sim::v1::Tick* tick = nullptr;
-    std::string bytes;
+    mujoco_sim::core::IssuedTickHandle issued;
     std::string topic;
     std::size_t subscribers_before = 0;
     std::size_t subscribers_after = 0;
@@ -1121,55 +1048,39 @@ void EcalServer::PublishTicks(
   std::uint64_t no_subscriber_count = 0;
   std::vector<PublishAttempt> attempts;
   attempts.reserve(ticks.size());
-  for (const auto& tick : ticks) {
+  for (const auto& issued : ticks) {
     PublishAttempt attempt;
-    attempt.tick = &tick;
-    if (!tick.SerializeToString(&attempt.bytes)) {
-      logger_->get()->error(
-          "event=message_serialize_failed message_type=Tick "
-          "controller_id={} tick_id={}",
-          LogValue(tick.controller_id()), tick.header().tick_id());
-      ++serialization_failure_count;
-      continue;
-    }
+    attempt.issued = issued;
     attempts.push_back(std::move(attempt));
   }
 
-  {
-    std::unique_lock core_lock(mutex_);
-    std::lock_guard publisher_lock(publisher_mutex_);
-    for (auto& attempt : attempts) {
-      const auto& tick = *attempt.tick;
-      if (!core_.IsTickIssued(tick)) {
-        continue;
-      }
-      attempt.attempted = true;
-      RunWithExceptionBoundary(
-          [&] {
-            auto& publisher = tick_publishers_[tick.controller_id()];
-            if (!publisher) {
-              attempt.topic = mujoco_sim::protocol::TickTopicName(
-                  config_.server_name, tick.controller_id());
-              publisher = std::make_unique<eCAL::CPublisher>(attempt.topic);
-              attempt.publisher_created = true;
-            }
-            attempt.subscribers_before = publisher->GetSubscriberCount();
-            attempt.sent = publisher->Send(attempt.bytes);
-            attempt.subscribers_after = publisher->GetSubscriberCount();
-          },
-          &attempt.transport_error);
+  for (auto& attempt : attempts) {
+    bool current = false;
+    {
+      std::lock_guard lock(mutex_);
+      current = core_.IsIssuedTickCurrent(attempt.issued->identity);
     }
+    if (!current) continue;
+    const auto result =
+        control_endpoint_->Publish(attempt.issued, config_.server_name);
+    attempt.topic = result.topic;
+    attempt.subscribers_before = result.subscribers_before;
+    attempt.subscribers_after = result.subscribers_after;
+    attempt.attempted = result.attempted;
+    attempt.sent = result.sent;
+    attempt.publisher_created = result.publisher_created;
+    attempt.transport_error = result.transport_error;
   }
 
   for (const auto& attempt : attempts) {
     if (!attempt.attempted) {
       continue;
     }
-    const auto& tick = *attempt.tick;
+    const auto& tick = attempt.issued->message;
     if (attempt.publisher_created) {
       logger_->get()->debug(
-          "event=tick_publisher_created controller_id={} topic={}",
-          LogValue(tick.controller_id()), LogValue(attempt.topic));
+          "event=tick_publisher_created adapter_id={} topic={}",
+          LogValue(tick.adapter_id()), LogValue(attempt.topic));
     }
     ++attempted_count;
     if (!attempt.transport_error.empty()) {
@@ -1177,8 +1088,8 @@ void EcalServer::PublishTicks(
       if (ShouldLogWarning("tick_transport_exception", &suppressed)) {
         logger_->get()->error(
             "event=ecal_exception boundary=publisher operation=Tick "
-            "controller_id={} tick_id={} error={} suppressed={}",
-            LogValue(tick.controller_id()), tick.header().tick_id(),
+            "adapter_id={} tick_id={} error={} suppressed={}",
+            LogValue(tick.adapter_id()), tick.header().tick_id(),
             LogValue(attempt.transport_error), suppressed);
       }
       ++failure_count;
@@ -1191,21 +1102,21 @@ void EcalServer::PublishTicks(
         ++no_subscriber_count;
         logger_->get()->trace(
             "event=message_not_sent message_type=Tick reason=no_subscribers "
-            "controller_id={} tick_id={} bytes={} subscribers_before={} "
+            "adapter_id={} tick_id={} bytes={} subscribers_before={} "
             "subscribers_after={}",
-            LogValue(tick.controller_id()), tick.header().tick_id(),
-            attempt.bytes.size(), attempt.subscribers_before,
+            LogValue(tick.adapter_id()), tick.header().tick_id(),
+            attempt.issued->serialized_bytes.size(), attempt.subscribers_before,
             attempt.subscribers_after);
         continue;
       }
       std::uint64_t suppressed = 0;
       if (ShouldLogWarning("tick_send_rejected", &suppressed)) {
         logger_->get()->warn(
-            "event=message_send_rejected message_type=Tick controller_id={} "
+            "event=message_send_rejected message_type=Tick adapter_id={} "
             "tick_id={} bytes={} subscribers_before={} subscribers_after={} "
             "suppressed={}",
-            LogValue(tick.controller_id()), tick.header().tick_id(),
-            attempt.bytes.size(), attempt.subscribers_before,
+            LogValue(tick.adapter_id()), tick.header().tick_id(),
+            attempt.issued->serialized_bytes.size(), attempt.subscribers_before,
             attempt.subscribers_after, suppressed);
       }
       ++failure_count;
@@ -1213,9 +1124,9 @@ void EcalServer::PublishTicks(
     }
     ++sent_count;
     logger_->get()->trace(
-        "event=tick_published controller_id={} tick_id={} bytes={}",
-        LogValue(tick.controller_id()), tick.header().tick_id(),
-        attempt.bytes.size());
+        "event=tick_published adapter_id={} tick_id={} bytes={}",
+        LogValue(tick.adapter_id()), tick.header().tick_id(),
+        attempt.issued->serialized_bytes.size());
   }
   if (attempted_count > 0 || serialization_failure_count > 0) {
     std::lock_guard lock(mutex_);
@@ -1226,45 +1137,30 @@ void EcalServer::PublishTicks(
   }
 }
 
-void EcalServer::PublishObservationFrames(
-    const std::vector<mujoco_sim::v1::ObservationFrame>& frames) {
+void ServerApplication::PublishObservationFrames(
+    const std::vector<mujoco_sim::v2::ObservationFrame>& frames) {
   for (const auto& frame : frames) {
-    std::string bytes;
-    if (!frame.SerializeToString(&bytes)) {
+    const auto publish =
+        observation_endpoint_->Publish(frame, config_.server_name);
+    if (publish.serialization_failed) {
       logger_->get()->error(
           "event=message_serialize_failed message_type=ObservationFrame "
-          "observer_id={} sequence={}",
-          LogValue(frame.observer_id()), frame.sequence());
+          "adapter_id={} sequence={}",
+          LogValue(frame.adapter_id()), frame.sequence());
       continue;
     }
-    bool sent = false;
-    std::size_t subscribers_before = 0;
-    std::size_t subscribers_after = 0;
-    std::string transport_error;
-    {
-      std::lock_guard publisher_lock(publisher_mutex_);
-      RunWithExceptionBoundary(
-          [&] {
-            auto& publisher = observation_publishers_[frame.observer_id()];
-            if (!publisher) {
-              publisher = std::make_unique<eCAL::CPublisher>(
-                  mujoco_sim::protocol::ObservationTopicName(
-                      config_.server_name, frame.observer_id()));
-            }
-            subscribers_before = publisher->GetSubscriberCount();
-            sent = publisher->Send(bytes);
-            subscribers_after = publisher->GetSubscriberCount();
-          },
-          &transport_error);
-    }
+    const bool sent = publish.sent;
+    const auto subscribers_before = publish.subscribers_before;
+    const auto subscribers_after = publish.subscribers_after;
+    const auto& transport_error = publish.transport_error;
     if (!transport_error.empty()) {
       std::uint64_t suppressed = 0;
       if (ShouldLogWarning("observation_transport_exception", &suppressed)) {
         logger_->get()->error(
             "event=ecal_exception boundary=publisher "
-            "operation=ObservationFrame observer_id={} sequence={} error={} "
+            "operation=ObservationFrame adapter_id={} sequence={} error={} "
             "suppressed={}",
-            LogValue(frame.observer_id()), frame.sequence(),
+            LogValue(frame.adapter_id()), frame.sequence(),
             LogValue(transport_error), suppressed);
       }
       continue;
@@ -1273,54 +1169,44 @@ void EcalServer::PublishObservationFrames(
         sent, subscribers_before, subscribers_after);
     if (outcome == SendOutcome::kSent) {
       logger_->get()->trace(
-          "event=observation_published observer_id={} sequence={} tick_id={} "
+          "event=observation_published adapter_id={} sequence={} tick_id={} "
           "bytes={}",
-          LogValue(frame.observer_id()), frame.sequence(),
-          frame.header().tick_id(), bytes.size());
+          LogValue(frame.adapter_id()), frame.sequence(),
+          frame.header().tick_id(), publish.bytes);
     } else if (outcome == SendOutcome::kRejectedWithSubscribers) {
       std::uint64_t suppressed = 0;
       if (ShouldLogWarning("observation_send_rejected", &suppressed)) {
         logger_->get()->warn(
             "event=message_send_rejected message_type=ObservationFrame "
-            "observer_id={} sequence={} subscribers_before={} "
+            "adapter_id={} sequence={} subscribers_before={} "
             "subscribers_after={} suppressed={}",
-            LogValue(frame.observer_id()), frame.sequence(),
+            LogValue(frame.adapter_id()), frame.sequence(),
             subscribers_before, subscribers_after, suppressed);
       }
     }
   }
 }
 
-void EcalServer::PublishStatus() {
-  if (!status_publisher_) {
+void ServerApplication::PublishStatus() {
+  if (!status_endpoint_ || !status_endpoint_->available()) {
     return;
   }
-  mujoco_sim::v1::ServerStatus status;
+  mujoco_sim::v2::ServerStatus status;
   {
     std::lock_guard lock(mutex_);
     status = core_.MakeStatus();
   }
   sensor_runtime_->AppendStatus(&status);
-  std::string bytes;
-  if (!status.SerializeToString(&bytes)) {
+  const auto publish = status_endpoint_->Publish(status);
+  if (publish.serialization_failed) {
     logger_->get()->error(
         "event=message_serialize_failed message_type=ServerStatus");
     return;
   }
-  std::size_t subscribers_before = 0;
-  std::size_t subscribers_after = 0;
-  bool sent = false;
-  std::string transport_error;
-  {
-    std::lock_guard publisher_lock(publisher_mutex_);
-    RunWithExceptionBoundary(
-        [&] {
-          subscribers_before = status_publisher_->GetSubscriberCount();
-          sent = status_publisher_->Send(bytes);
-          subscribers_after = status_publisher_->GetSubscriberCount();
-        },
-        &transport_error);
-  }
+  const auto subscribers_before = publish.subscribers_before;
+  const auto subscribers_after = publish.subscribers_after;
+  const bool sent = publish.sent;
+  const auto& transport_error = publish.transport_error;
   if (!transport_error.empty()) {
     std::uint64_t suppressed = 0;
     if (ShouldLogWarning("status_transport_exception", &suppressed)) {
@@ -1339,7 +1225,7 @@ void EcalServer::PublishStatus() {
           "event=message_not_sent message_type=ServerStatus "
           "reason=no_subscribers tick_id={} bytes={} subscribers_before={} "
           "subscribers_after={}",
-          status.header().tick_id(), bytes.size(), subscribers_before,
+          status.header().tick_id(), publish.bytes, subscribers_before,
           subscribers_after);
       return;
     }
@@ -1348,22 +1234,21 @@ void EcalServer::PublishStatus() {
       logger_->get()->warn(
           "event=message_send_rejected message_type=ServerStatus tick_id={} "
           "bytes={} subscribers_before={} subscribers_after={} suppressed={}",
-          status.header().tick_id(), bytes.size(), subscribers_before,
+          status.header().tick_id(), publish.bytes, subscribers_before,
           subscribers_after, suppressed);
     }
     return;
   }
   logger_->get()->debug(
-      "event=status_published state={} tick_id={} controllers={} bytes={}",
+      "event=status_published state={} tick_id={} adapters={} bytes={}",
       ServerStateName(status.state()), status.header().tick_id(),
-      status.controllers_size(), bytes.size());
+      status.adapters_size(), publish.bytes);
 }
 
-int EcalServer::HandleGetAvailableResources(const std::string& request,
+int ServerApplication::HandleGetAvailableResources(const std::string& request,
                                             std::string* response) {
-  mujoco_sim::v1::GetAvailableResourcesRequest parsed;
-  if (!IsProtocolPayloadSizeAllowed(request.size()) ||
-      !parsed.ParseFromString(request)) {
+  mujoco_sim::v2::GetAvailableResourcesRequest parsed;
+  if (!registry_endpoint_->Parse(request, &parsed)) {
     RecordMalformedMessage();
     std::uint64_t suppressed = 0;
     if (ShouldLogWarning("resources_request_malformed", &suppressed)) {
@@ -1372,8 +1257,9 @@ int EcalServer::HandleGetAvailableResources(const std::string& request,
           "bytes={} max_bytes={} suppressed={}",
           request.size(), kMaxProtocolPayloadBytes, suppressed);
     }
-    const int result = ParseError<mujoco_sim::v1::GetAvailableResourcesResponse>(
-        mujoco_sim::v1::INVALID_ARGUMENT, "invalid request", response);
+    const int result = ParseError<mujoco_sim::v2::GetAvailableResourcesResponse>(
+        mujoco_sim::v2::INVALID_ARGUMENT, "invalid request",
+        *registry_endpoint_, response);
     if (result != 0) {
       logger_->get()->error(
           "event=message_serialize_failed "
@@ -1381,17 +1267,24 @@ int EcalServer::HandleGetAvailableResources(const std::string& request,
     }
     return result;
   }
-  mujoco_sim::v1::GetAvailableResourcesResponse result;
+  mujoco_sim::v2::GetAvailableResourcesResponse result;
   {
     std::lock_guard lock(mutex_);
     result = core_.GetAvailableResources(parsed);
   }
-  if (result.code() == mujoco_sim::v1::OK) {
+  if (result.code() == mujoco_sim::v2::OK) {
     logger_->get()->debug(
         "event=resources_requested code={} observations={} commands={}",
         ErrorCodeName(result.code()), result.observations_size(),
         result.commands_size());
   } else {
+    if (result.code() == mujoco_sim::v2::VERSION_MISMATCH) {
+      logger_->get()->warn(
+          "event=protocol_version_rejected method=GetAvailableResources "
+          "requested_major={} requested_minor={} expected_major=2 "
+          "expected_minor=0",
+          parsed.protocol_major(), parsed.protocol_minor());
+    }
     std::uint64_t suppressed = 0;
     if (ShouldLogWarning("resources_request_rejected", &suppressed)) {
       logger_->get()->warn(
@@ -1400,7 +1293,7 @@ int EcalServer::HandleGetAvailableResources(const std::string& request,
           ErrorCodeName(result.code()), LogValue(result.message()), suppressed);
     }
   }
-  const int serialized = SerializeResponse(result, response);
+  const int serialized = registry_endpoint_->Serialize(result, response);
   if (serialized != 0) {
     logger_->get()->error(
         "event=message_serialize_failed "
@@ -1409,247 +1302,57 @@ int EcalServer::HandleGetAvailableResources(const std::string& request,
   return serialized;
 }
 
-int EcalServer::HandleGetSensorStreams(const std::string& request,
+int ServerApplication::HandleGetSensorStreams(const std::string& request,
                                        std::string* response) {
-  mujoco_sim::v1::GetSensorStreamsRequest parsed;
-  if (!IsProtocolPayloadSizeAllowed(request.size()) ||
-      !parsed.ParseFromString(request)) {
+  mujoco_sim::v2::GetSensorStreamsRequest parsed;
+  if (!registry_endpoint_->Parse(request, &parsed)) {
     RecordMalformedMessage();
-    return ParseError<mujoco_sim::v1::GetSensorStreamsResponse>(
-        mujoco_sim::v1::INVALID_ARGUMENT, "invalid request", response);
+    return ParseError<mujoco_sim::v2::GetSensorStreamsResponse>(
+        mujoco_sim::v2::INVALID_ARGUMENT, "invalid request",
+        *registry_endpoint_, response);
   }
   const auto result = sensor_runtime_->GetCatalog(parsed);
-  if (result.code() == mujoco_sim::v1::OK) {
+  if (result.code() == mujoco_sim::v2::OK) {
     logger_->get()->debug("event=sensor_streams_requested streams={}",
                           result.streams_size());
   } else {
+    if (result.code() == mujoco_sim::v2::VERSION_MISMATCH) {
+      logger_->get()->warn(
+          "event=protocol_version_rejected method=GetSensorStreams "
+          "requested_major={} requested_minor={} expected_major=2 "
+          "expected_minor=0",
+          parsed.protocol_major(), parsed.protocol_minor());
+    }
     logger_->get()->warn(
         "event=service_request_rejected method=GetSensorStreams code={} "
         "message={}",
         ErrorCodeName(result.code()), LogValue(result.message()));
   }
-  return SerializeResponse(result, response);
+  return registry_endpoint_->Serialize(result, response);
 }
 
-int EcalServer::HandleRegisterController(const std::string& request,
-                                         std::string* response) {
-  mujoco_sim::v1::RegisterControllerRequest parsed;
-  if (!IsProtocolPayloadSizeAllowed(request.size()) ||
-      !parsed.ParseFromString(request)) {
-    RecordMalformedMessage();
-    std::uint64_t suppressed = 0;
-    if (ShouldLogWarning("register_request_malformed", &suppressed)) {
-      logger_->get()->warn(
-          "event=service_request_malformed method=RegisterController "
-          "bytes={} max_bytes={} suppressed={}",
-          request.size(), kMaxProtocolPayloadBytes, suppressed);
-    }
-    const int result = ParseError<mujoco_sim::v1::RegisterControllerResponse>(
-        mujoco_sim::v1::INVALID_ARGUMENT, "invalid request", response);
-    if (result != 0) {
-      logger_->get()->error(
-          "event=message_serialize_failed "
-          "message_type=RegisterControllerResponse");
-    }
-    return result;
-  }
-  mujoco_sim::v1::RegisterControllerResponse result;
-  bool replaced = false;
-  {
-    std::lock_guard lock(mutex_);
-    result = core_.RegisterController(parsed);
-    if (result.code() == mujoco_sim::v1::OK) {
-      status_dirty_ = true;
-      replaced = result.message() == "replaced timed-out controller session";
-      if (replaced) {
-        metrics_->RecordReplacement();
-      }
-    }
-  }
-  if (result.code() == mujoco_sim::v1::OK) {
-    logger_->get()->info(
-        "event=controller_registered controller_id={} session_id={} epoch={} "
-        "observations={} commands={} timeout_ms={}",
-        LogValue(result.controller_id()), result.session_id(), result.epoch(),
-        result.layout().observations_size(), result.layout().commands_size(),
-        parsed.timeout_ms() == 0 ? config_.tick_timeout_ms
-                                 : parsed.timeout_ms());
-    if (replaced) {
-      logger_->get()->info(
-          "event=controller_replaced controller_id={} new_session_id={} "
-          "epoch={}",
-          LogValue(result.controller_id()), result.session_id(), result.epoch());
-    }
-  } else {
-    std::uint64_t suppressed = 0;
-    if (ShouldLogWarning("register_request_rejected", &suppressed)) {
-      logger_->get()->warn(
-          "event=controller_request_rejected operation=register "
-          "controller_id={} code={} message={} suppressed={}",
-          LogValue(parsed.controller_id()), ErrorCodeName(result.code()),
-          LogValue(result.message()), suppressed);
-    }
-  }
-  const int serialized = SerializeResponse(result, response);
-  if (serialized != 0) {
-    logger_->get()->error(
-        "event=message_serialize_failed "
-        "message_type=RegisterControllerResponse");
-  }
-  condition_.notify_all();
-  return serialized;
-}
-
-int EcalServer::HandleActivateController(const std::string& request,
-                                         std::string* response) {
-  mujoco_sim::v1::ActivateControllerRequest parsed;
-  if (!IsProtocolPayloadSizeAllowed(request.size()) ||
-      !parsed.ParseFromString(request)) {
-    RecordMalformedMessage();
-    std::uint64_t suppressed = 0;
-    if (ShouldLogWarning("activate_request_malformed", &suppressed)) {
-      logger_->get()->warn(
-          "event=service_request_malformed method=ActivateController "
-          "bytes={} max_bytes={} suppressed={}",
-          request.size(), kMaxProtocolPayloadBytes, suppressed);
-    }
-    const int result = ParseError<mujoco_sim::v1::ActivateControllerResponse>(
-        mujoco_sim::v1::INVALID_ARGUMENT, "invalid request", response);
-    if (result != 0) {
-      logger_->get()->error(
-          "event=message_serialize_failed "
-          "message_type=ActivateControllerResponse");
-    }
-    return result;
-  }
-  mujoco_sim::v1::ActivateControllerResponse result;
-  {
-    std::lock_guard lock(mutex_);
-    result = core_.ActivateController(parsed);
-    if (result.code() == mujoco_sim::v1::OK) {
-      status_dirty_ = true;
-    }
-  }
-  if (result.code() == mujoco_sim::v1::OK) {
-    logger_->get()->info(
-        "event=controller_activated controller_id={} session_id={} epoch={}",
-        LogValue(parsed.controller_id()), parsed.session_id(), parsed.epoch());
-  } else {
-    std::uint64_t suppressed = 0;
-    if (ShouldLogWarning("activate_request_rejected", &suppressed)) {
-      logger_->get()->warn(
-          "event=controller_request_rejected operation=activate "
-          "controller_id={} code={} message={} suppressed={}",
-          LogValue(parsed.controller_id()), ErrorCodeName(result.code()),
-          LogValue(result.message()), suppressed);
-    }
-  }
-  const int serialized = SerializeResponse(result, response);
-  if (serialized != 0) {
-    logger_->get()->error(
-        "event=message_serialize_failed "
-        "message_type=ActivateControllerResponse");
-  }
-  condition_.notify_all();
-  return serialized;
-}
-
-int EcalServer::HandleUnregisterController(const std::string& request,
-                                           std::string* response) {
-  mujoco_sim::v1::UnregisterControllerRequest parsed;
-  if (!IsProtocolPayloadSizeAllowed(request.size()) ||
-      !parsed.ParseFromString(request)) {
-    RecordMalformedMessage();
-    std::uint64_t suppressed = 0;
-    if (ShouldLogWarning("unregister_request_malformed", &suppressed)) {
-      logger_->get()->warn(
-          "event=service_request_malformed method=UnregisterController "
-          "bytes={} max_bytes={} suppressed={}",
-          request.size(), kMaxProtocolPayloadBytes, suppressed);
-    }
-    const int result = ParseError<mujoco_sim::v1::UnregisterControllerResponse>(
-        mujoco_sim::v1::INVALID_ARGUMENT, "invalid request", response);
-    if (result != 0) {
-      logger_->get()->error(
-          "event=message_serialize_failed "
-          "message_type=UnregisterControllerResponse");
-    }
-    return result;
-  }
-  mujoco_sim::v1::UnregisterControllerResponse result;
-  bool stepped = false;
-  std::vector<mujoco_sim::v1::ObservationFrame> observation_frames;
-  std::uint64_t completed_tick_id = 0;
-  double barrier_latency_ms = 0.0;
-  std::unique_lock simulation_lock(simulation_mutex_);
-  {
-    std::lock_guard lock(mutex_);
-    const auto tick_id_before = core_.current_tick_id();
-    result = core_.UnregisterController(parsed);
-    if (result.code() == mujoco_sim::v1::OK) {
-      status_dirty_ = true;
-      stepped = core_.current_tick_id() != tick_id_before;
-      if (stepped) {
-        completed_tick_id = core_.current_tick_id() - 1;
-        barrier_latency_ms = metrics_->RecordBarrierCompleted(
-            std::chrono::steady_clock::now());
-        observation_frames = core_.CollectObservationFrames();
-        sensor_runtime_->OnStepCompleted(&core_);
-      }
-    }
-  }
-  sensor_runtime_->CompleteBlockingEnqueues();
-  if (!observation_frames.empty()) {
-    PublishObservationFrames(observation_frames);
-  }
-  if (result.code() == mujoco_sim::v1::OK) {
-    logger_->get()->info(
-        "event=controller_unregistered controller_id={} session_id={} epoch={}",
-        LogValue(parsed.controller_id()), parsed.session_id(), parsed.epoch());
-    if (stepped) {
-      logger_->get()->trace(
-          "event=barrier_completed source=unregister completed_tick_id={} "
-          "barrier_latency_ms={:.3f}",
-          completed_tick_id, barrier_latency_ms);
-    }
-    std::lock_guard publisher_lock(publisher_mutex_);
-    tick_publishers_.erase(parsed.controller_id());
-  } else {
-    std::uint64_t suppressed = 0;
-    if (ShouldLogWarning("unregister_request_rejected", &suppressed)) {
-      logger_->get()->warn(
-          "event=controller_request_rejected operation=unregister "
-          "controller_id={} code={} message={} suppressed={}",
-          LogValue(parsed.controller_id()), ErrorCodeName(result.code()),
-          LogValue(result.message()), suppressed);
-    }
-  }
-  simulation_lock.unlock();
-  const int serialized = SerializeResponse(result, response);
-  if (serialized != 0) {
-    logger_->get()->error(
-        "event=message_serialize_failed "
-        "message_type=UnregisterControllerResponse");
-  }
-  condition_.notify_all();
-  return serialized;
-}
-
-int EcalServer::HandleRegisterAdapter(const std::string& request,
+ int ServerApplication::HandleRegisterAdapter(const std::string& request,
                                       std::string* response) {
-  mujoco_sim::v1::RegisterAdapterRequest parsed;
-  if (!IsProtocolPayloadSizeAllowed(request.size()) ||
-      !parsed.ParseFromString(request)) {
+  mujoco_sim::v2::RegisterAdapterRequest parsed;
+  if (!registry_endpoint_->Parse(request, &parsed)) {
     RecordMalformedMessage();
-    return ParseError<mujoco_sim::v1::RegisterAdapterResponse>(
-        mujoco_sim::v1::INVALID_ARGUMENT, "invalid request", response);
+    std::uint64_t suppressed = 0;
+    if (ShouldLogWarning("register_adapter_request_malformed", &suppressed)) {
+      logger_->get()->warn(
+          "event=service_request_malformed method=RegisterAdapter bytes={} "
+          "max_bytes={} suppressed={}",
+          request.size(), kMaxProtocolPayloadBytes, suppressed);
+    }
+    return ParseError<mujoco_sim::v2::RegisterAdapterResponse>(
+        mujoco_sim::v2::INVALID_ARGUMENT, "invalid request",
+        *registry_endpoint_, response);
   }
-  mujoco_sim::v1::RegisterAdapterResponse result;
+  mujoco_sim::v2::RegisterAdapterResponse result;
   bool replaced = false;
   {
     std::lock_guard lock(mutex_);
     result = core_.RegisterAdapter(parsed);
-    if (result.code() == mujoco_sim::v1::OK) {
+    if (result.code() == mujoco_sim::v2::OK) {
       status_dirty_ = true;
       replaced = result.message().find("replaced") != std::string::npos;
       if (replaced) {
@@ -1657,122 +1360,142 @@ int EcalServer::HandleRegisterAdapter(const std::string& request,
       }
     }
   }
-  if (result.code() == mujoco_sim::v1::OK) {
+  if (result.code() == mujoco_sim::v2::OK) {
+    logger_->get()->debug(
+        "event=layout_hash_validated adapter_id={} hash_bytes={}",
+        LogValue(result.adapter_id()), result.layout().layout_hash().size());
     logger_->get()->info(
         "event=adapter_registered adapter_id={} role={} session_id={} "
         "epoch={} observations={} commands={} timeout_ms={} replaced={}",
         LogValue(result.adapter_id()),
-        mujoco_sim::v1::AdapterRole_Name(result.role()), result.session_id(),
+        mujoco_sim::v2::AdapterRole_Name(result.role()), result.session_id(),
         result.epoch(), result.layout().observations_size(),
         result.layout().commands_size(),
         parsed.timeout_ms() == 0 ? config_.tick_timeout_ms
                                  : parsed.timeout_ms(),
         replaced);
   } else {
+    if (result.code() == mujoco_sim::v2::VERSION_MISMATCH) {
+      logger_->get()->warn(
+          "event=protocol_version_rejected method=RegisterAdapter "
+          "requested_major={} requested_minor={} expected_major=2 "
+          "expected_minor=0",
+          parsed.protocol_major(), parsed.protocol_minor());
+    }
     logger_->get()->warn(
         "event=adapter_request_rejected operation=register adapter_id={} "
         "role={} code={} message={}",
         LogValue(parsed.adapter_id()),
-        mujoco_sim::v1::AdapterRole_Name(parsed.role()),
+        mujoco_sim::v2::AdapterRole_Name(parsed.role()),
         ErrorCodeName(result.code()), LogValue(result.message()));
   }
-  condition_.notify_all();
-  return SerializeResponse(result, response);
+  scheduler_->NotifyLifecycleChanged();
+  return registry_endpoint_->Serialize(result, response);
 }
 
-int EcalServer::HandleActivateAdapter(const std::string& request,
+int ServerApplication::HandleActivateAdapter(const std::string& request,
                                       std::string* response) {
-  mujoco_sim::v1::ActivateAdapterRequest parsed;
-  if (!IsProtocolPayloadSizeAllowed(request.size()) ||
-      !parsed.ParseFromString(request)) {
+  mujoco_sim::v2::ActivateAdapterRequest parsed;
+  if (!registry_endpoint_->Parse(request, &parsed)) {
     RecordMalformedMessage();
-    return ParseError<mujoco_sim::v1::ActivateAdapterResponse>(
-        mujoco_sim::v1::INVALID_ARGUMENT, "invalid request", response);
+    return ParseError<mujoco_sim::v2::ActivateAdapterResponse>(
+        mujoco_sim::v2::INVALID_ARGUMENT, "invalid request",
+        *registry_endpoint_, response);
   }
-  mujoco_sim::v1::ActivateAdapterResponse result;
+  mujoco_sim::v2::ActivateAdapterResponse result;
   {
     std::lock_guard lock(mutex_);
     result = core_.ActivateAdapter(parsed);
-    if (result.code() == mujoco_sim::v1::OK) {
+    if (result.code() == mujoco_sim::v2::OK) {
       status_dirty_ = true;
     }
   }
-  if (result.code() == mujoco_sim::v1::OK) {
+  if (result.code() == mujoco_sim::v2::OK) {
     logger_->get()->info(
         "event=adapter_activated adapter_id={} role={} session_id={} epoch={}",
         LogValue(parsed.adapter_id()),
-        mujoco_sim::v1::AdapterRole_Name(parsed.role()), parsed.session_id(),
+        mujoco_sim::v2::AdapterRole_Name(parsed.role()), parsed.session_id(),
         parsed.epoch());
   } else {
     logger_->get()->warn(
         "event=adapter_request_rejected operation=activate adapter_id={} "
         "role={} code={} message={}",
         LogValue(parsed.adapter_id()),
-        mujoco_sim::v1::AdapterRole_Name(parsed.role()),
+        mujoco_sim::v2::AdapterRole_Name(parsed.role()),
         ErrorCodeName(result.code()), LogValue(result.message()));
   }
-  condition_.notify_all();
-  return SerializeResponse(result, response);
+  scheduler_->NotifyLifecycleChanged();
+  return registry_endpoint_->Serialize(result, response);
 }
 
-int EcalServer::HandleUnregisterAdapter(const std::string& request,
+int ServerApplication::HandleUnregisterAdapter(const std::string& request,
                                         std::string* response) {
-  mujoco_sim::v1::UnregisterAdapterRequest parsed;
-  if (!IsProtocolPayloadSizeAllowed(request.size()) ||
-      !parsed.ParseFromString(request)) {
+  mujoco_sim::v2::UnregisterAdapterRequest parsed;
+  if (!registry_endpoint_->Parse(request, &parsed)) {
     RecordMalformedMessage();
-    return ParseError<mujoco_sim::v1::UnregisterAdapterResponse>(
-        mujoco_sim::v1::INVALID_ARGUMENT, "invalid request", response);
+    return ParseError<mujoco_sim::v2::UnregisterAdapterResponse>(
+        mujoco_sim::v2::INVALID_ARGUMENT, "invalid request",
+        *registry_endpoint_, response);
   }
-  mujoco_sim::v1::UnregisterAdapterResponse result;
-  std::vector<mujoco_sim::v1::ObservationFrame> observation_frames;
+  mujoco_sim::v2::UnregisterAdapterResponse result;
+  std::vector<mujoco_sim::v2::ObservationFrame> observation_frames;
+  std::optional<mujoco_sim::core::StepCompletedEvent> step_event;
   bool stepped = false;
   std::unique_lock simulation_lock(simulation_mutex_);
   {
     std::lock_guard lock(mutex_);
-    const auto before = core_.current_tick_id();
-    result = core_.UnregisterAdapter(parsed);
-    stepped = core_.current_tick_id() != before;
-    if (result.code() == mujoco_sim::v1::OK) {
+    auto unregister_result = core_.UnregisterAdapter(parsed);
+    result = std::move(unregister_result.response);
+    stepped = unregister_result.step_completed.has_value();
+    step_event = std::move(unregister_result.step_completed);
+    if (result.code() == mujoco_sim::v2::OK) {
       status_dirty_ = true;
       if (stepped) {
+        if (!scheduler_->BeginStepPipeline()) {
+          core_.EnterFatalError("step pipeline overlap after unregister");
+        }
         metrics_->RecordBarrierCompleted(std::chrono::steady_clock::now());
-        observation_frames = core_.CollectObservationFrames();
+        observation_frames =
+            std::move(step_event->observer_frames);
         sensor_runtime_->OnStepCompleted(&core_);
       }
     }
   }
-  sensor_runtime_->CompleteBlockingEnqueues();
+  simulation_lock.unlock();
+  if (step_event) {
+    CompleteSensorFence();
+  }
   if (!observation_frames.empty()) {
     PublishObservationFrames(observation_frames);
   }
-  if (result.code() == mujoco_sim::v1::OK) {
+  if (step_event) {
+    FinishStepPipeline(*step_event);
+  }
+  if (result.code() == mujoco_sim::v2::OK) {
     logger_->get()->info(
         "event=adapter_unregistered adapter_id={} role={} session_id={} "
         "epoch={} stepped={}",
         LogValue(parsed.adapter_id()),
-        mujoco_sim::v1::AdapterRole_Name(parsed.role()), parsed.session_id(),
+        mujoco_sim::v2::AdapterRole_Name(parsed.role()), parsed.session_id(),
         parsed.epoch(), stepped);
-    std::lock_guard publisher_lock(publisher_mutex_);
-    if (parsed.role() == mujoco_sim::v1::OBSERVER) {
-      observation_publishers_.erase(parsed.adapter_id());
+    if (parsed.role() == mujoco_sim::v2::OBSERVER) {
+      observation_endpoint_->ErasePublisher(parsed.adapter_id());
     } else {
-      tick_publishers_.erase(parsed.adapter_id());
+      control_endpoint_->ErasePublisher(parsed.adapter_id());
     }
   } else {
     logger_->get()->warn(
         "event=adapter_request_rejected operation=unregister adapter_id={} "
         "role={} code={} message={}",
         LogValue(parsed.adapter_id()),
-        mujoco_sim::v1::AdapterRole_Name(parsed.role()),
+        mujoco_sim::v2::AdapterRole_Name(parsed.role()),
         ErrorCodeName(result.code()), LogValue(result.message()));
   }
-  simulation_lock.unlock();
-  condition_.notify_all();
-  return SerializeResponse(result, response);
+  scheduler_->NotifyLifecycleChanged();
+  return registry_endpoint_->Serialize(result, response);
 }
 
-void EcalServer::HandleCommitBytes(const void* data, std::size_t size) {
+void ServerApplication::HandleCommitBytes(const void* data, std::size_t size) {
   const auto record_malformed = [this, size]() {
     RecordMalformedMessage();
     std::uint64_t suppressed = 0;
@@ -1783,20 +1506,15 @@ void EcalServer::HandleCommitBytes(const void* data, std::size_t size) {
           size, kMaxProtocolPayloadBytes, suppressed);
     }
   };
-  if (data == nullptr || size == 0 ||
-      !IsProtocolPayloadSizeAllowed(size)) {
-    record_malformed();
-    return;
-  }
-  mujoco_sim::v1::AdapterCommit commit;
-  if (!commit.ParseFromArray(data, static_cast<int>(size))) {
+  mujoco_sim::v2::AdapterCommit commit;
+  if (!control_endpoint_->ParseCommit(data, size, &commit)) {
     record_malformed();
     return;
   }
 
   mujoco_sim::core::CommitResult result;
   double barrier_latency_ms = 0.0;
-  std::vector<mujoco_sim::v1::ObservationFrame> observation_frames;
+  std::vector<mujoco_sim::v2::ObservationFrame> observation_frames;
   std::unique_lock simulation_lock(simulation_mutex_);
   {
     std::lock_guard lock(mutex_);
@@ -1805,7 +1523,8 @@ void EcalServer::HandleCommitBytes(const void* data, std::size_t size) {
       status_dirty_ = true;
     }
     barrier_latency_ms = metrics_->RecordCommit(
-        result.duplicate, result.code != mujoco_sim::v1::OK, result.stepped,
+        result.duplicate, result.code != mujoco_sim::v2::OK,
+        result.step_completed.has_value(),
         std::chrono::steady_clock::now());
     if (result.controller_state_changed) {
       metrics_->RecordLocalError();
@@ -1813,80 +1532,82 @@ void EcalServer::HandleCommitBytes(const void* data, std::size_t size) {
     if (result.recovery_pending) {
       metrics_->RecordRecovery();
     }
-    if (result.stepped) {
-      observation_frames = core_.CollectObservationFrames();
+    if (result.step_completed) {
+      if (!scheduler_->BeginStepPipeline()) {
+        core_.EnterFatalError("step pipeline overlap after commit");
+      }
+      observation_frames = std::move(result.step_completed->observer_frames);
       sensor_runtime_->OnStepCompleted(&core_);
     }
   }
-  sensor_runtime_->CompleteBlockingEnqueues();
+  simulation_lock.unlock();
+  if (result.step_completed) {
+    CompleteSensorFence();
+  }
   if (!observation_frames.empty()) {
     PublishObservationFrames(observation_frames);
   }
-  simulation_lock.unlock();
-  if (result.code != mujoco_sim::v1::OK) {
+  if (result.step_completed) FinishStepPipeline(*result.step_completed);
+  if (result.code != mujoco_sim::v2::OK) {
     std::uint64_t suppressed = 0;
     if (ShouldLogWarning("commit_rejected", &suppressed)) {
       logger_->get()->warn(
-          "event=commit_rejected controller_id={} tick_id={} session_id={} "
+          "event=commit_rejected adapter_id={} tick_id={} session_id={} "
           "epoch={} code={} message={} suppressed={}",
-          LogValue(commit.controller_id()), commit.header().tick_id(),
+          LogValue(commit.adapter_id()), commit.header().tick_id(),
           commit.header().session_id(), commit.header().epoch(),
           ErrorCodeName(result.code), LogValue(result.message), suppressed);
     }
   } else if (result.duplicate) {
     logger_->get()->debug(
-        "event=commit_duplicate controller_id={} tick_id={} message={}",
-        LogValue(commit.controller_id()), commit.header().tick_id(),
+        "event=commit_duplicate adapter_id={} tick_id={} message={}",
+        LogValue(commit.adapter_id()), commit.header().tick_id(),
         LogValue(result.message));
   } else {
     logger_->get()->trace(
-        "event=commit_accepted controller_id={} tick_id={} stepped={} "
+        "event=commit_accepted adapter_id={} tick_id={} stepped={} "
         "commands={}",
-        LogValue(commit.controller_id()), commit.header().tick_id(),
-        result.stepped, commit.commands_size());
+        LogValue(commit.adapter_id()), commit.header().tick_id(),
+        result.step_completed.has_value(), commit.commands_size());
   }
   if (result.controller_state_changed) {
     logger_->get()->error(
-        "event=controller_local_error controller_id={} session_id={} "
+        "event=adapter_local_error adapter_id={} session_id={} "
         "tick_id={} state={} message={}",
-        LogValue(commit.controller_id()), commit.header().session_id(),
+        LogValue(commit.adapter_id()), commit.header().session_id(),
         commit.header().tick_id(),
-        mujoco_sim::v1::ControllerState_Name(result.controller_state),
+        mujoco_sim::v2::ControllerState_Name(result.controller_state),
         LogValue(result.message));
   } else if (result.recovery_pending) {
     logger_->get()->info(
-        "event=controller_recovery_pending controller_id={} session_id={} "
+        "event=adapter_recovery_pending adapter_id={} session_id={} "
         "tick_id={}",
-        LogValue(commit.controller_id()), commit.header().session_id(),
+        LogValue(commit.adapter_id()), commit.header().session_id(),
         commit.header().tick_id());
   }
-  if (result.stepped) {
+  if (result.step_completed) {
     logger_->get()->trace(
         "event=barrier_completed completed_tick_id={} "
         "barrier_latency_ms={:.3f}",
         commit.header().tick_id(), barrier_latency_ms);
   }
-  condition_.notify_all();
+  scheduler_->NotifyLifecycleChanged();
 }
 
-void EcalServer::HandleHeartbeatBytes(const void* data, std::size_t size) {
+ void ServerApplication::HandleAdapterHeartbeatBytes(const void* data,
+                                             std::size_t size) {
   const auto record_malformed = [this, size]() {
     RecordMalformedMessage();
     std::uint64_t suppressed = 0;
-    if (ShouldLogWarning("heartbeat_payload_malformed", &suppressed)) {
+    if (ShouldLogWarning("adapter_heartbeat_payload_malformed", &suppressed)) {
       logger_->get()->warn(
-          "event=topic_payload_malformed message_type=Heartbeat bytes={} "
-          "max_bytes={} suppressed={}",
+          "event=topic_payload_malformed message_type=AdapterHeartbeat "
+          "bytes={} max_bytes={} suppressed={}",
           size, kMaxProtocolPayloadBytes, suppressed);
     }
   };
-  if (data == nullptr || size == 0 ||
-      !IsProtocolPayloadSizeAllowed(size)) {
-    record_malformed();
-    return;
-  }
-  mujoco_sim::v1::Heartbeat heartbeat;
-  if (!heartbeat.ParseFromArray(data, static_cast<int>(size))) {
+  mujoco_sim::v2::AdapterHeartbeat heartbeat;
+  if (!registry_endpoint_->ParseHeartbeat(data, size, &heartbeat)) {
     record_malformed();
     return;
   }
@@ -1895,36 +1616,13 @@ void EcalServer::HandleHeartbeatBytes(const void* data, std::size_t size) {
     core_.AcceptHeartbeat(heartbeat);
   }
   logger_->get()->trace(
-      "event=heartbeat_received controller_id={} tick_id={} session_id={} "
-      "epoch={}",
-      LogValue(heartbeat.controller_id()), heartbeat.header().tick_id(),
-      heartbeat.header().session_id(), heartbeat.header().epoch());
-  condition_.notify_all();
-}
-
-void EcalServer::HandleAdapterHeartbeatBytes(const void* data,
-                                             std::size_t size) {
-  if (data == nullptr || size == 0 || !IsProtocolPayloadSizeAllowed(size)) {
-    RecordMalformedMessage();
-    return;
-  }
-  mujoco_sim::v1::AdapterHeartbeat heartbeat;
-  if (!heartbeat.ParseFromArray(data, static_cast<int>(size))) {
-    RecordMalformedMessage();
-    return;
-  }
-  {
-    std::lock_guard lock(mutex_);
-    core_.AcceptAdapterHeartbeat(heartbeat);
-  }
-  logger_->get()->trace(
       "event=adapter_heartbeat_received adapter_id={} role={} sequence={} "
       "session_id={} epoch={}",
       LogValue(heartbeat.adapter_id()),
-      mujoco_sim::v1::AdapterRole_Name(heartbeat.role()),
+      mujoco_sim::v2::AdapterRole_Name(heartbeat.role()),
       heartbeat.last_observation_sequence(), heartbeat.header().session_id(),
       heartbeat.header().epoch());
-  condition_.notify_all();
+  scheduler_->NotifyLifecycleChanged();
 }
 
 }  // namespace mujoco_sim::server

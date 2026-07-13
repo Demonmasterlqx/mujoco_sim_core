@@ -10,7 +10,6 @@ set +e
 timeout 10s "${server_bin}" \
   --model "${model_path}" \
   --max-ticks 1 \
-  --startup-timeout-ms 100 \
   --log-summary-period-ms 0 \
   >"${log_path}" 2>&1
 status="$?"

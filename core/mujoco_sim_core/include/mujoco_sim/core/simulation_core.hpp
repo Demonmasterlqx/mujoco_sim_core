@@ -1,6 +1,7 @@
 #pragma once
 
 #include <chrono>
+#include <atomic>
 #include <cstdint>
 #include <memory>
 #include <optional>
@@ -8,12 +9,27 @@
 #include <unordered_map>
 #include <vector>
 
-#include <mujoco_sim/v1/sync.pb.h>
+#include <mujoco_sim/v2/sync.pb.h>
 
 struct mjData_;
 struct mjModel_;
 
 namespace mujoco_sim::core {
+
+class SimulationSnapshot;
+
+namespace detail {
+struct Controller;
+struct Observer;
+class AdapterRegistry;
+class BarrierCoordinator;
+class TickStore;
+class ModelState;
+class ResourceCatalog;
+class SnapshotManager;
+class ObservationScheduler;
+class StatusBuilder;
+}  // namespace detail
 
 struct CoreOptions {
   std::string server_name = "default";
@@ -26,45 +42,79 @@ struct ModelLoadOptions {
   std::string initial_keyframe;
 };
 
-struct CommitResult {
-  mujoco_sim::v1::ErrorCode code = mujoco_sim::v1::OK;
-  std::string message;
-  bool duplicate = false;
-  bool stepped = false;
-  bool recovery_pending = false;
-  bool controller_state_changed = false;
-  mujoco_sim::v1::ControllerState controller_state =
-      mujoco_sim::v1::CONTROLLER_STATE_UNSPECIFIED;
+enum class StepCompletionSource {
+  kCommit,
+  kDeadline,
+  kUnregister,
+  kLocalError,
+  kEmptyBarrier,
 };
 
-struct ControllerTransition {
-  std::string controller_id;
+struct StepCompletedEvent {
+  std::uint64_t completed_tick_id = 0;
+  std::uint64_t next_tick_id = 0;
+  double simulation_time_s = 0.0;
+  StepCompletionSource source = StepCompletionSource::kCommit;
+  std::vector<mujoco_sim::v2::ObservationFrame> observer_frames;
+};
+
+struct CommitResult {
+  mujoco_sim::v2::ErrorCode code = mujoco_sim::v2::OK;
+  std::string message;
+  bool duplicate = false;
+  std::optional<StepCompletedEvent> step_completed;
+  bool recovery_pending = false;
+  bool controller_state_changed = false;
+  mujoco_sim::v2::ControllerState controller_state =
+      mujoco_sim::v2::CONTROLLER_STATE_UNSPECIFIED;
+};
+
+struct AdapterTransition {
+  std::string adapter_id;
+  mujoco_sim::v2::AdapterRole role =
+      mujoco_sim::v2::ADAPTER_ROLE_UNSPECIFIED;
   std::uint64_t session_id = 0;
-  mujoco_sim::v1::ControllerState old_state =
-      mujoco_sim::v1::CONTROLLER_STATE_UNSPECIFIED;
-  mujoco_sim::v1::ControllerState new_state =
-      mujoco_sim::v1::CONTROLLER_STATE_UNSPECIFIED;
+  mujoco_sim::v2::ControllerState old_state =
+      mujoco_sim::v2::CONTROLLER_STATE_UNSPECIFIED;
+  mujoco_sim::v2::ControllerState new_state =
+      mujoco_sim::v2::CONTROLLER_STATE_UNSPECIFIED;
   std::string message;
   std::uint64_t tick_id = 0;
 };
 
 struct DeadlineResult {
-  std::vector<ControllerTransition> transitions;
-  struct AdapterTransition {
-    std::string adapter_id;
-    mujoco_sim::v1::AdapterRole role =
-        mujoco_sim::v1::ADAPTER_ROLE_UNSPECIFIED;
-    std::uint64_t session_id = 0;
-    mujoco_sim::v1::ControllerState old_state =
-        mujoco_sim::v1::CONTROLLER_STATE_UNSPECIFIED;
-    mujoco_sim::v1::ControllerState new_state =
-        mujoco_sim::v1::CONTROLLER_STATE_UNSPECIFIED;
-    std::string message;
-    std::uint64_t tick_id = 0;
-  };
-  std::vector<AdapterTransition> adapter_transitions;
-  bool stepped = false;
+  std::vector<AdapterTransition> transitions;
+  std::optional<StepCompletedEvent> step_completed;
 };
+
+struct UnregisterAdapterResult {
+  mujoco_sim::v2::UnregisterAdapterResponse response;
+  std::optional<StepCompletedEvent> step_completed;
+};
+
+struct EmptyBarrierResult {
+  std::optional<StepCompletedEvent> step_completed;
+};
+
+struct IssuedTickIdentity {
+  std::string adapter_id;
+  std::uint64_t session_id = 0;
+  std::uint64_t epoch = 0;
+  std::uint64_t tick_id = 0;
+  std::uint64_t issue_generation = 0;
+};
+
+struct IssuedTick {
+  mujoco_sim::v2::Tick message;
+  std::string serialized_bytes;
+  std::size_t layout_bytes_avoided = 0;
+  std::uint32_t serialization_count = 0;
+  IssuedTickIdentity identity;
+  mutable std::atomic<bool> current{true};
+};
+
+using IssuedTickHandle = std::shared_ptr<const IssuedTick>;
+
 
 class SimulationSnapshot {
  public:
@@ -85,6 +135,7 @@ class SimulationSnapshot {
   std::unique_ptr<Impl> impl_;
 
   friend class SimulationCore;
+  friend class detail::SnapshotManager;
 };
 
 class SimulationCore {
@@ -109,113 +160,94 @@ class SimulationCore {
   bool UpdateSnapshot(SimulationSnapshot* snapshot,
                       std::string* error_message) const;
 
-  const std::vector<mujoco_sim::v1::ResourceDescriptor>& observations() const;
-  const std::vector<mujoco_sim::v1::ResourceDescriptor>& commands() const;
+  const std::vector<mujoco_sim::v2::ResourceDescriptor>& observations() const;
+  const std::vector<mujoco_sim::v2::ResourceDescriptor>& commands() const;
 
-  mujoco_sim::v1::GetAvailableResourcesResponse GetAvailableResources(
-      const mujoco_sim::v1::GetAvailableResourcesRequest& request) const;
-  mujoco_sim::v1::RegisterControllerResponse RegisterController(
-      const mujoco_sim::v1::RegisterControllerRequest& request);
-  mujoco_sim::v1::ActivateControllerResponse ActivateController(
-      const mujoco_sim::v1::ActivateControllerRequest& request);
-  mujoco_sim::v1::UnregisterControllerResponse UnregisterController(
-      const mujoco_sim::v1::UnregisterControllerRequest& request);
-  mujoco_sim::v1::RegisterAdapterResponse RegisterAdapter(
-      const mujoco_sim::v1::RegisterAdapterRequest& request);
-  mujoco_sim::v1::ActivateAdapterResponse ActivateAdapter(
-      const mujoco_sim::v1::ActivateAdapterRequest& request);
-  mujoco_sim::v1::UnregisterAdapterResponse UnregisterAdapter(
-      const mujoco_sim::v1::UnregisterAdapterRequest& request);
+  mujoco_sim::v2::GetAvailableResourcesResponse GetAvailableResources(
+      const mujoco_sim::v2::GetAvailableResourcesRequest& request) const;
+  mujoco_sim::v2::RegisterAdapterResponse RegisterAdapter(
+      const mujoco_sim::v2::RegisterAdapterRequest& request);
+  mujoco_sim::v2::ActivateAdapterResponse ActivateAdapter(
+      const mujoco_sim::v2::ActivateAdapterRequest& request);
+  UnregisterAdapterResult UnregisterAdapter(
+      const mujoco_sim::v2::UnregisterAdapterRequest& request);
 
-  std::vector<mujoco_sim::v1::Tick> OpenTick();
-  std::vector<mujoco_sim::v1::ObservationFrame> CollectObservationFrames();
-  bool IsTickIssued(const mujoco_sim::v1::Tick& tick) const;
-  bool StepIfBarrierComplete();
-  CommitResult SubmitCommit(const mujoco_sim::v1::AdapterCommit& commit);
-  void AcceptHeartbeat(const mujoco_sim::v1::Heartbeat& heartbeat);
-  void AcceptAdapterHeartbeat(
-      const mujoco_sim::v1::AdapterHeartbeat& heartbeat,
+  std::vector<IssuedTickHandle> OpenIssuedTicks();
+  bool IsIssuedTickCurrent(const IssuedTickIdentity& identity) const;
+  EmptyBarrierResult CompleteEmptyBarrier();
+  CommitResult SubmitCommit(const mujoco_sim::v2::AdapterCommit& commit);
+  void AcceptHeartbeat(
+      const mujoco_sim::v2::AdapterHeartbeat& heartbeat,
       std::chrono::steady_clock::time_point now =
           std::chrono::steady_clock::now());
-  DeadlineResult CheckControllerDeadlines(
+  DeadlineResult CheckDeadlines(
       std::chrono::steady_clock::time_point now);
-  bool CheckTickTimeout(std::chrono::steady_clock::time_point now);
 
   void EnterFatalError(const std::string& message);
   void MarkStopped(const std::string& message = {});
 
-  mujoco_sim::v1::ServerStatus MakeStatus() const;
+  mujoco_sim::v2::ServerStatus MakeStatus() const;
 
   std::uint64_t epoch() const;
   std::uint64_t current_tick_id() const;
   double simulation_time() const;
   double timestep() const;
-  mujoco_sim::v1::ServerState server_state() const;
+  mujoco_sim::v2::ServerState server_state() const;
   bool tick_open() const;
   std::size_t active_controller_count() const;
-  std::size_t controller_count(mujoco_sim::v1::ControllerState state) const;
-  std::size_t observer_count(mujoco_sim::v1::ControllerState state) const;
+  std::size_t controller_count(mujoco_sim::v2::ControllerState state) const;
+  std::size_t observer_count(mujoco_sim::v2::ControllerState state) const;
 
  private:
-  struct Controller;
-  struct Observer;
-  struct MjModelDeleter {
-    void operator()(mjModel_* model) const;
-  };
-  struct MjDataDeleter {
-    void operator()(mjData_* data) const;
-  };
-
   void BuildCatalogs();
-  mujoco_sim::v1::Tick BuildTickFor(const Controller& controller) const;
-  mujoco_sim::v1::ObservationFrame BuildObservationFrame(
-      Observer* observer) const;
-  void QueueObservationFramesForCompletedStep();
-  mujoco_sim::v1::Header MakeHeader(std::uint64_t session_id) const;
+  mujoco_sim::v2::RegisterAdapterResponse RegisterControlAdapter(
+      const mujoco_sim::v2::RegisterAdapterRequest& request);
+  mujoco_sim::v2::ActivateAdapterResponse ActivateControlAdapter(
+      const mujoco_sim::v2::ActivateAdapterRequest& request);
+  UnregisterAdapterResult UnregisterControlAdapter(
+      const mujoco_sim::v2::UnregisterAdapterRequest& request);
+  mujoco_sim::v2::Tick BuildTickFor(
+      const detail::Controller& controller) const;
+  mujoco_sim::v2::ObservationFrame BuildObservationFrame(
+      detail::Observer* observer) const;
+  std::vector<mujoco_sim::v2::ObservationFrame>
+  BuildObservationFramesForCompletedStep();
+  std::optional<StepCompletedEvent> CompleteBarrier(
+      StepCompletionSource source);
+  mujoco_sim::v2::Header MakeHeader(std::uint64_t session_id) const;
   void EnterErrorPaused(const std::string& message);
-  bool ValidateCommands(const Controller& controller,
-                        const mujoco_sim::v1::AdapterCommit& commit,
+  bool ValidateCommands(const detail::Controller& controller,
+                        const mujoco_sim::v2::AdapterCommit& commit,
                         std::string* message) const;
-  void ZeroControllerCommands(const Controller& controller);
-  void SetControllerState(Controller* controller,
-                          mujoco_sim::v1::ControllerState state,
+  void ZeroControllerCommands(const detail::Controller& controller);
+  void SetControllerState(detail::Controller* controller,
+                          mujoco_sim::v2::ControllerState state,
                           const std::string& message);
-  bool EnterControllerError(Controller* controller,
-                            const std::string& message);
-  void ReleaseControllerResources(const Controller& controller);
-  bool ValidateCommonHeader(const mujoco_sim::v1::Header& header,
-                            const Controller& controller,
+  std::optional<StepCompletedEvent> EnterControllerError(
+      detail::Controller* controller, const std::string& message);
+  void ReleaseControllerResources(const detail::Controller& controller);
+  bool ValidateCommonHeader(const mujoco_sim::v2::Header& header,
+                            const detail::Controller& controller,
                             std::string* message) const;
+  void InvalidateIssuedTick(const std::string& adapter_id);
+  void InvalidateAllIssuedTicks();
+  void EnsureInternalComponents();
 
   CoreOptions options_;
-  std::unique_ptr<mjModel_, MjModelDeleter> model_;
-  std::unique_ptr<mjData_, MjDataDeleter> data_;
-  std::vector<mujoco_sim::v1::ResourceDescriptor> observations_;
-  std::vector<mujoco_sim::v1::ResourceDescriptor> commands_;
-  std::unordered_map<std::string, mujoco_sim::v1::ResourceDescriptor>
-      observations_by_name_;
-  std::unordered_map<std::string, mujoco_sim::v1::ResourceDescriptor>
-      commands_by_name_;
-  std::unordered_map<std::string, Controller> controllers_;
-  std::unordered_map<std::string, Observer> observers_;
-  std::unordered_map<std::string, std::string> actuator_owner_;
-  std::unordered_map<std::string, mujoco_sim::v1::AdapterCommit>
-      pending_commits_;
-  std::unordered_map<std::string, mujoco_sim::v1::Tick> open_ticks_;
-  std::unordered_map<std::string, bool> tick_required_controllers_;
-  std::unordered_map<std::string, bool> tick_recipient_controllers_;
-  std::vector<mujoco_sim::v1::ObservationFrame>
-      pending_observation_frames_;
+  std::unique_ptr<detail::ModelState> model_state_;
+  std::unique_ptr<detail::ResourceCatalog> resource_catalog_;
+  std::unique_ptr<detail::SnapshotManager> snapshot_manager_;
+  std::unique_ptr<detail::ObservationScheduler> observation_scheduler_;
+  std::unique_ptr<detail::StatusBuilder> status_builder_;
+  std::unique_ptr<detail::AdapterRegistry> adapter_registry_;
+  std::unique_ptr<detail::BarrierCoordinator> barrier_coordinator_;
+  std::unique_ptr<detail::TickStore> tick_store_;
   std::uint64_t epoch_ = 1;
   std::uint64_t current_tick_id_ = 0;
-  std::uint64_t next_session_id_ = 1;
-  double simulation_time_ = 0.0;
-  mujoco_sim::v1::ServerState server_state_ = mujoco_sim::v1::IDLE;
+  mujoco_sim::v2::ServerState server_state_ = mujoco_sim::v2::IDLE;
   bool tick_open_ = false;
   std::chrono::steady_clock::time_point tick_started_at_{};
   std::string status_message_;
-  std::shared_ptr<void> snapshot_identity_ = std::make_shared<char>();
-  std::uint64_t model_generation_ = 0;
 };
 
 }  // namespace mujoco_sim::core

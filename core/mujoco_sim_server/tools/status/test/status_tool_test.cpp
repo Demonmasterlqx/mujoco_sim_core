@@ -46,9 +46,9 @@ CommandLineResult ParseArgs(const std::vector<std::string>& arguments,
                           message);
 }
 
-mujoco_sim::v1::ServerStatus MakeStatus(
+mujoco_sim::v2::ServerStatus MakeStatus(
     const std::string& server_name = "default", std::uint64_t epoch = 1) {
-  mujoco_sim::v1::ServerStatus status;
+  mujoco_sim::v2::ServerStatus status;
   auto* header = status.mutable_header();
   header->set_server_name(server_name);
   header->set_protocol_major(mujoco_sim::protocol::kProtocolMajor);
@@ -56,7 +56,7 @@ mujoco_sim::v1::ServerStatus MakeStatus(
   header->set_epoch(epoch);
   header->set_tick_id(2);
   header->set_timestamp_unix_nanos(1700000000123456789ULL);
-  status.set_state(mujoco_sim::v1::RUNNING);
+  status.set_state(mujoco_sim::v2::RUNNING);
   return status;
 }
 
@@ -64,55 +64,49 @@ StatusReport MakeReport() {
   StatusReport report;
   report.status = MakeStatus();
   report.status.set_message("healthy");
-  auto* zeta = report.status.add_controllers();
-  zeta->set_controller_id("zeta");
+  auto* zeta = report.status.add_adapters();
+  zeta->set_adapter_id("zeta");
+  zeta->set_role(mujoco_sim::v2::CONTROLLER);
   zeta->set_session_id(9);
-  zeta->set_last_tick_id(8);
-  zeta->set_state(mujoco_sim::v1::ACTIVE);
+  zeta->set_last_delivery_tick_id(8);
+  zeta->set_state(mujoco_sim::v2::ACTIVE);
   zeta->set_last_commit_tick_id(8);
   zeta->set_state_since_tick_id(3);
   zeta->set_required_for_barrier(true);
-  auto* alpha = report.status.add_controllers();
-  alpha->set_controller_id("alpha");
+  auto* alpha = report.status.add_adapters();
+  alpha->set_adapter_id("alpha");
+  alpha->set_role(mujoco_sim::v2::CONTROLLER);
   alpha->set_session_id(7);
-  alpha->set_last_tick_id(6);
-  alpha->set_state(mujoco_sim::v1::TIMED_OUT);
+  alpha->set_state(mujoco_sim::v2::TIMED_OUT);
   alpha->set_message("controller timed out");
   alpha->set_state_since_tick_id(5);
   alpha->set_timeout_count(2);
   alpha->set_required_for_barrier(false);
-  auto* error = report.status.add_controllers();
-  error->set_controller_id("error");
+  auto* error = report.status.add_adapters();
+  error->set_adapter_id("error");
+  error->set_role(mujoco_sim::v2::CONTROLLER);
   error->set_session_id(8);
-  error->set_last_tick_id(7);
-  error->set_state(mujoco_sim::v1::ERROR);
+  error->set_state(mujoco_sim::v2::ERROR);
   error->set_message("invalid command");
   error->set_last_commit_tick_id(6);
   error->set_state_since_tick_id(7);
   error->set_required_for_barrier(false);
-  auto* controller_adapter = report.status.add_adapters();
-  controller_adapter->set_adapter_id("zeta");
-  controller_adapter->set_role(mujoco_sim::v1::CONTROLLER);
-  controller_adapter->set_session_id(9);
-  controller_adapter->set_state(mujoco_sim::v1::ACTIVE);
-  controller_adapter->set_last_delivery_tick_id(8);
-  controller_adapter->set_state_since_tick_id(3);
   auto* observer = report.status.add_adapters();
   observer->set_adapter_id("observer");
-  observer->set_role(mujoco_sim::v1::OBSERVER);
+  observer->set_role(mujoco_sim::v2::OBSERVER);
   observer->set_session_id(10);
-  observer->set_state(mujoco_sim::v1::ACTIVE);
+  observer->set_state(mujoco_sim::v2::ACTIVE);
   observer->set_last_delivery_tick_id(8);
   observer->set_last_observation_sequence(4);
   auto* stream = report.status.add_streams();
   stream->set_name("front_rgb");
-  stream->set_state(mujoco_sim::v1::STREAM_RUNNING);
+  stream->set_state(mujoco_sim::v2::STREAM_RUNNING);
   stream->set_subscriber_count(1);
   stream->set_captures(5);
   stream->set_published(4);
   stream->set_dropped(1);
   report.resources.emplace();
-  report.resources->set_code(mujoco_sim::v1::OK);
+  report.resources->set_code(mujoco_sim::v2::OK);
   report.resources->set_epoch(1);
   auto* z_sensor = report.resources->add_observations();
   z_sensor->set_name("z_sensor");
@@ -259,7 +253,7 @@ TEST(StatusPayloadTest, RejectsInvalidPayloadsAndHeaders) {
   const auto input = MakeStatus();
   std::string bytes;
   ASSERT_TRUE(input.SerializeToString(&bytes));
-  mujoco_sim::v1::ServerStatus parsed;
+  mujoco_sim::v2::ServerStatus parsed;
   EXPECT_TRUE(ParseStatusPayload(bytes.data(), bytes.size(), "default",
                                  &parsed));
   EXPECT_FALSE(
@@ -318,32 +312,25 @@ TEST(StatusFormattingTest, PreservesUint64AndEscapesJson) {
   EXPECT_EQ(header.at("tick_id").string_value(), "18446744073709551615");
   EXPECT_EQ(status.at("message").string_value(),
             "quote \" slash \\ newline\n");
-  const auto& controllers = status.at("controllers").list_value();
-  ASSERT_EQ(controllers.values_size(), 3);
-  const auto& timed_out = controllers.values(0).struct_value().fields();
-  EXPECT_EQ(timed_out.at("controller_id").string_value(), "alpha");
+  EXPECT_EQ(status.count("controllers"), 0);
+  const auto& adapters = status.at("adapters").list_value();
+  ASSERT_EQ(adapters.values_size(), 4);
+  const auto& timed_out = adapters.values(0).struct_value().fields();
+  EXPECT_EQ(timed_out.at("adapter_id").string_value(), "alpha");
   EXPECT_EQ(timed_out.at("state").string_value(), "TIMED_OUT");
   EXPECT_EQ(timed_out.count("last_commit_tick_id"), 0);
   EXPECT_EQ(timed_out.at("state_since_tick_id").string_value(), "5");
   EXPECT_EQ(timed_out.at("timeout_count").string_value(), "2");
   EXPECT_FALSE(timed_out.at("required_for_barrier").bool_value());
   const auto& controller_error =
-      controllers.values(1).struct_value().fields();
-  EXPECT_EQ(controller_error.at("controller_id").string_value(), "error");
+      adapters.values(1).struct_value().fields();
+  EXPECT_EQ(controller_error.at("adapter_id").string_value(), "error");
   EXPECT_EQ(controller_error.at("state").string_value(), "ERROR");
   EXPECT_EQ(controller_error.at("last_commit_tick_id").string_value(), "6");
-  const auto& active = controllers.values(2).struct_value().fields();
-  EXPECT_EQ(active.at("controller_id").string_value(), "zeta");
+  const auto& active = adapters.values(2).struct_value().fields();
+  EXPECT_EQ(active.at("adapter_id").string_value(), "zeta");
   EXPECT_TRUE(active.at("required_for_barrier").bool_value());
-  const auto& adapters = status.at("adapters").list_value();
-  ASSERT_EQ(adapters.values_size(), 2);
-  EXPECT_EQ(adapters.values(0)
-                .struct_value()
-                .fields()
-                .at("adapter_id")
-                .string_value(),
-            "zeta");
-  EXPECT_EQ(adapters.values(1)
+  EXPECT_EQ(adapters.values(3)
                 .struct_value()
                 .fields()
                 .at("role")
@@ -398,23 +385,23 @@ TEST(StatusFormattingTest, WritesUnavailableResourcesAsNdjson) {
               google::protobuf::Value::kNullValue);
     EXPECT_EQ(root.fields().at("resource_error").string_value(),
               report.resource_error);
-    const auto& controllers = root.fields()
+    const auto& adapters = root.fields()
                                   .at("status")
                                   .struct_value()
                                   .fields()
-                                  .at("controllers")
+                                  .at("adapters")
                                   .list_value();
-    ASSERT_EQ(controllers.values_size(), 3);
-    const auto& timed_out = controllers.values(0).struct_value().fields();
+    ASSERT_EQ(adapters.values_size(), 4);
+    const auto& timed_out = adapters.values(0).struct_value().fields();
     EXPECT_EQ(timed_out.at("state").string_value(), "TIMED_OUT");
     EXPECT_EQ(timed_out.count("last_commit_tick_id"), 0);
     EXPECT_FALSE(timed_out.at("required_for_barrier").bool_value());
     const auto& controller_error =
-        controllers.values(1).struct_value().fields();
+        adapters.values(1).struct_value().fields();
     EXPECT_EQ(controller_error.at("state").string_value(), "ERROR");
     EXPECT_EQ(controller_error.at("last_commit_tick_id").string_value(),
               "6");
-    EXPECT_TRUE(controllers.values(2)
+    EXPECT_TRUE(adapters.values(2)
                     .struct_value()
                     .fields()
                     .at("required_for_barrier")
