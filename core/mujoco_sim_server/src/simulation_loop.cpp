@@ -11,7 +11,6 @@
 #include <future>
 #include <iterator>
 #include <string_view>
-#include <unordered_map>
 #include <utility>
 
 namespace mujoco_sim::server {
@@ -64,17 +63,21 @@ bool SimulationLoop::Initialize(std::string* error_message) {
     if (error_message) *error_message = "simulation loop dependencies are invalid";
     return false;
   }
-  if (!core_.LoadModel(config_.model_path,
-                       mujoco_sim::core::ModelLoadOptions{
-                           config_.initial_keyframe},
-                       error_message)) {
+  auto loaded = core_.LoadModel(
+      config_.model_path,
+      mujoco_sim::core::ModelLoadOptions{config_.initial_keyframe});
+  if (!loaded.response.loaded) {
+    *error_message = std::move(loaded.response.message);
     return false;
   }
+  ApplyEffects(std::move(loaded.effects));
+  const auto resources = core_.resources();
+  const auto state = core_.state();
   logger_->info(
       "event=model_loaded model_path={} observations={} commands={} "
       "simulation_time_s={:.6f}",
-      LogValue(config_.model_path), core_.observations().size(),
-      core_.commands().size(), core_.simulation_time());
+      LogValue(config_.model_path), resources.observations.size(),
+      resources.commands.size(), state.simulation_time_s);
   if (!sensor_runtime_->Initialize(core_, config_, error_message)) return false;
   logger_->info("event=sensor_runtime_initialized streams={}",
                 config_.sensor_streams.size());
@@ -185,14 +188,15 @@ int SimulationLoop::Join() {
 void SimulationLoop::Run(std::stop_token stop_token) noexcept {
   try {
     const auto started_at = Clock::now();
+    const auto state = core_.state();
     step_period_ = std::chrono::duration_cast<Clock::duration>(
-        std::chrono::duration<double>(std::max(core_.timestep(), 1e-6)));
+        std::chrono::duration<double>(std::max(state.timestep_s, 1e-6)));
     next_tick_ = started_at;
     next_retransmission_ = started_at;
     next_status_ = started_at;
     next_viewer_sync_ = started_at;
-    metrics_.Initialize(started_at, core_.current_tick_id(),
-                        core_.simulation_time());
+    metrics_.Initialize(started_at, state.current_tick_id,
+                        state.simulation_time_s);
     logger_->info("event=run_loop_started");
 
     while (!stop_requested_.load() && !stop_token.stop_requested() &&
@@ -235,12 +239,15 @@ void SimulationLoop::Handle(GetAvailableResourcesEvent event) {
 }
 
 void SimulationLoop::Handle(RegisterAdapterEvent event) {
-  auto response = core_.RegisterAdapter(event.request);
+  auto result = core_.RegisterAdapter(event.request);
+  auto& response = result.response;
   if (response.code() == mujoco_sim::v2::OK) {
-    status_dirty_ = true;
-    const bool replaced =
-        response.message().find("replaced") != std::string::npos;
-    if (replaced) metrics_.RecordReplacement();
+    const bool replaced = std::any_of(
+        result.effects.adapter_changes.begin(),
+        result.effects.adapter_changes.end(), [](const auto& change) {
+          return change.kind ==
+                 mujoco_sim::core::AdapterChangeKind::kReplaced;
+        });
     logger_->info(
         "event=adapter_registered adapter_id={} role={} session_id={} "
         "epoch={} observations={} commands={} replaced={}",
@@ -256,13 +263,14 @@ void SimulationLoop::Handle(RegisterAdapterEvent event) {
         mujoco_sim::v2::AdapterRole_Name(event.request.role()),
         ErrorCodeName(response.code()), LogValue(response.message()));
   }
+  ApplyEffects(std::move(result.effects));
   event.completion.set_value(std::move(response));
 }
 
 void SimulationLoop::Handle(ActivateAdapterEvent event) {
-  auto response = core_.ActivateAdapter(event.request);
+  auto result = core_.ActivateAdapter(event.request);
+  auto& response = result.response;
   if (response.code() == mujoco_sim::v2::OK) {
-    status_dirty_ = true;
     logger_->info(
         "event=adapter_activated adapter_id={} role={} session_id={} epoch={}",
         LogValue(event.request.adapter_id()),
@@ -276,17 +284,14 @@ void SimulationLoop::Handle(ActivateAdapterEvent event) {
         mujoco_sim::v2::AdapterRole_Name(event.request.role()),
         ErrorCodeName(response.code()), LogValue(response.message()));
   }
+  ApplyEffects(std::move(result.effects));
   event.completion.set_value(std::move(response));
 }
 
 void SimulationLoop::Handle(UnregisterAdapterEvent event) {
   auto result = core_.UnregisterAdapter(event.request);
-  const bool stepped = result.step_completed.has_value();
+  const bool stepped = result.effects.step_completed.has_value();
   if (result.response.code() == mujoco_sim::v2::OK) {
-    status_dirty_ = true;
-    ApplyEffects(LoopEffects{std::move(result.step_completed), {}});
-    transport_->EraseAdapterPublisher(event.request.adapter_id(),
-                                      event.request.role());
     logger_->info(
         "event=adapter_unregistered adapter_id={} role={} session_id={} "
         "epoch={} stepped={}",
@@ -302,6 +307,7 @@ void SimulationLoop::Handle(UnregisterAdapterEvent event) {
         ErrorCodeName(result.response.code()),
         LogValue(result.response.message()));
   }
+  ApplyEffects(std::move(result.effects));
   event.completion.set_value(std::move(result.response));
 }
 
@@ -311,51 +317,32 @@ void SimulationLoop::Handle(GetSensorStreamsEvent event) {
 
 void SimulationLoop::Handle(CommitEvent event) {
   auto result = core_.SubmitCommit(event.message);
-  metrics_.RecordCommit(result.duplicate, result.code != mujoco_sim::v2::OK,
-                        result.step_completed.has_value(), Clock::now());
-  if (result.controller_state_changed) {
-    status_dirty_ = true;
-    metrics_.RecordLocalError();
-    logger_->error(
-        "event=adapter_local_error adapter_id={} session_id={} tick_id={} "
-        "state={} message={}",
-        LogValue(event.message.adapter_id()), event.message.header().session_id(),
-        event.message.header().tick_id(),
-        mujoco_sim::v2::ControllerState_Name(result.controller_state),
-        LogValue(result.message));
-  } else if (result.recovery_pending) {
-    status_dirty_ = true;
-    metrics_.RecordRecovery();
-    logger_->info(
-        "event=adapter_recovery_pending adapter_id={} session_id={} tick_id={}",
-        LogValue(event.message.adapter_id()), event.message.header().session_id(),
-        event.message.header().tick_id());
-  }
-  if (result.code != mujoco_sim::v2::OK) {
+  metrics_.RecordCommit(result.response.duplicate,
+                        result.response.code != mujoco_sim::v2::OK,
+                        result.effects.step_completed.has_value(), Clock::now());
+  if (result.response.code != mujoco_sim::v2::OK) {
     logger_->warn(
         "event=commit_rejected adapter_id={} tick_id={} code={} message={}",
         LogValue(event.message.adapter_id()), event.message.header().tick_id(),
-        ErrorCodeName(result.code), LogValue(result.message));
+        ErrorCodeName(result.response.code), LogValue(result.response.message));
   } else {
     logger_->trace("event=commit_accepted adapter_id={} tick_id={} stepped={}",
                    LogValue(event.message.adapter_id()),
                    event.message.header().tick_id(),
-                   result.step_completed.has_value());
+                   result.effects.step_completed.has_value());
   }
-  ApplyEffects(LoopEffects{std::move(result.step_completed), {}});
+  ApplyEffects(std::move(result.effects));
 }
 
 void SimulationLoop::Handle(HeartbeatEvent event) {
-  core_.AcceptHeartbeat(event.message);
+  ApplyEffects(core_.AcceptHeartbeat(event.message));
 }
 
 void SimulationLoop::ProcessTimers(Clock::time_point now) {
-  auto deadlines = core_.CheckDeadlines(now);
-  ApplyEffects(
-      LoopEffects{std::move(deadlines.step_completed),
-                  std::move(deadlines.transitions)});
+  ApplyEffects(core_.CheckDeadlines(now));
 
-  if (core_.server_state() == mujoco_sim::v2::ERROR_PAUSED) {
+  auto state = core_.state();
+  if (state.server_state == mujoco_sim::v2::ERROR_PAUSED) {
     {
       std::lock_guard lock(lifecycle_mutex_);
       exit_code_ = 2;
@@ -363,7 +350,7 @@ void SimulationLoop::ProcessTimers(Clock::time_point now) {
     RequestStop("core_error_paused");
     return;
   }
-  if (config_.max_ticks > 0 && core_.current_tick_id() >= config_.max_ticks) {
+  if (config_.max_ticks > 0 && state.current_tick_id >= config_.max_ticks) {
     {
       std::lock_guard lock(lifecycle_mutex_);
       exit_code_ = 0;
@@ -372,13 +359,12 @@ void SimulationLoop::ProcessTimers(Clock::time_point now) {
     return;
   }
 
-  if (!core_.tick_open() && now >= next_tick_) {
+  if (!state.tick_open && now >= next_tick_) {
     auto ticks = OpenTicks();
     PublishTicks(ticks, false);
     next_retransmission_ = now + kPollPeriod;
-    auto empty = core_.CompleteEmptyBarrier();
-    ApplyEffects(LoopEffects{std::move(empty.step_completed), {}});
-  } else if (core_.tick_open() && now >= next_retransmission_) {
+    ApplyEffects(core_.CompleteEmptyBarrier());
+  } else if (state.tick_open && now >= next_retransmission_) {
     PublishTicks(OpenTicks(), true);
     next_retransmission_ = now + kPollPeriod;
   }
@@ -387,7 +373,7 @@ void SimulationLoop::ProcessTimers(Clock::time_point now) {
     std::string error;
     if (!viewer_->Synchronize(core_, *viewer_snapshot_, &error) &&
         !viewer_->close_requested()) {
-      core_.EnterFatalError("viewer synchronization failed: " + error);
+      ApplyEffects(core_.MarkFailed("viewer synchronization failed: " + error));
       {
         std::lock_guard lock(lifecycle_mutex_);
         exit_code_ = 2;
@@ -398,12 +384,13 @@ void SimulationLoop::ProcessTimers(Clock::time_point now) {
     next_viewer_sync_ = now + std::chrono::milliseconds(16);
   }
 
-  const auto state = core_.server_state();
-  if (state != last_logged_state_) {
+  state = core_.state();
+  if (state.server_state != last_logged_state_) {
     logger_->info("event=server_state_changed old_state={} new_state={} message={}",
-                  ServerStateName(last_logged_state_), ServerStateName(state),
+                  ServerStateName(last_logged_state_),
+                  ServerStateName(state.server_state),
                   LogValue(core_.MakeStatus().message()));
-    last_logged_state_ = state;
+    last_logged_state_ = state.server_state;
   }
   if (status_dirty_ || now >= next_status_) {
     PublishStatus();
@@ -413,31 +400,67 @@ void SimulationLoop::ProcessTimers(Clock::time_point now) {
   MaybeLogSummary(now, false);
 }
 
-void SimulationLoop::ApplyEffects(LoopEffects effects) {
-  for (const auto& transition : effects.transitions) {
-    status_dirty_ = true;
-    if (transition.new_state == mujoco_sim::v2::TIMED_OUT) {
-      metrics_.RecordTimeout();
-      logger_->warn(
-          "event=adapter_timed_out adapter_id={} session_id={} tick_id={} "
-          "message={}",
-          LogValue(transition.adapter_id), transition.session_id,
-          transition.tick_id, LogValue(transition.message));
-    } else if (transition.old_state == mujoco_sim::v2::PROVISIONAL &&
-               transition.new_state == mujoco_sim::v2::UNREGISTERED) {
-      metrics_.RecordActivationExpiration();
-      logger_->warn(
-          "event=adapter_activation_expired adapter_id={} session_id={} "
-          "tick_id={}",
-          LogValue(transition.adapter_id), transition.session_id,
-          transition.tick_id);
-    }
-    if (transition.new_state == mujoco_sim::v2::UNREGISTERED) {
-      transport_->EraseAdapterPublisher(transition.adapter_id, transition.role);
+void SimulationLoop::ApplyEffects(mujoco_sim::core::EngineEffects effects) {
+  status_dirty_ |= effects.status_changed;
+  for (const auto& change : effects.adapter_changes) {
+    switch (change.kind) {
+      case mujoco_sim::core::AdapterChangeKind::kTimedOut:
+        metrics_.RecordTimeout();
+        logger_->warn(
+            "event=adapter_timed_out adapter_id={} session_id={} tick_id={} "
+            "message={}",
+            LogValue(change.adapter_id), change.session_id, change.tick_id,
+            LogValue(change.message));
+        break;
+      case mujoco_sim::core::AdapterChangeKind::kActivationExpired:
+        metrics_.RecordActivationExpiration();
+        logger_->warn(
+            "event=adapter_activation_expired adapter_id={} session_id={} "
+            "tick_id={}",
+            LogValue(change.adapter_id), change.session_id, change.tick_id);
+        break;
+      case mujoco_sim::core::AdapterChangeKind::kRecoveryPending:
+        metrics_.RecordRecovery();
+        logger_->info(
+            "event=adapter_recovery_pending adapter_id={} session_id={} "
+            "tick_id={}",
+            LogValue(change.adapter_id), change.session_id, change.tick_id);
+        break;
+      case mujoco_sim::core::AdapterChangeKind::kRecovered:
+        logger_->info(
+            "event=adapter_recovered adapter_id={} session_id={} tick_id={}",
+            LogValue(change.adapter_id), change.session_id, change.tick_id);
+        break;
+      case mujoco_sim::core::AdapterChangeKind::kLocalError:
+        metrics_.RecordLocalError();
+        logger_->error(
+            "event=adapter_local_error adapter_id={} session_id={} tick_id={} "
+            "state={} message={}",
+            LogValue(change.adapter_id), change.session_id, change.tick_id,
+            mujoco_sim::v2::ControllerState_Name(change.new_state),
+            LogValue(change.message));
+        break;
+      case mujoco_sim::core::AdapterChangeKind::kServerFailed:
+        logger_->error(
+            "event=adapter_server_failed adapter_id={} session_id={} "
+            "tick_id={} state={} message={}",
+            LogValue(change.adapter_id), change.session_id, change.tick_id,
+            mujoco_sim::v2::ControllerState_Name(change.new_state),
+            LogValue(change.message));
+        break;
+      case mujoco_sim::core::AdapterChangeKind::kReplaced:
+        metrics_.RecordReplacement();
+        break;
+      case mujoco_sim::core::AdapterChangeKind::kUnregistered:
+        transport_->EraseAdapterPublisher(change.adapter_id, change.role);
+        break;
+      case mujoco_sim::core::AdapterChangeKind::kRegistered:
+      case mujoco_sim::core::AdapterChangeKind::kActivated:
+        break;
     }
   }
-  if (effects.completed_step) {
-    ApplyCompletedStep(std::move(*effects.completed_step));
+  if (effects.step_completed) {
+    ApplyCompletedStep(std::move(*effects.step_completed));
   }
 }
 
@@ -463,18 +486,9 @@ void SimulationLoop::ApplyCompletedStep(
 }
 
 std::vector<mujoco_sim::core::IssuedTickHandle> SimulationLoop::OpenTicks() {
-  const bool was_open = core_.tick_open();
-  std::unordered_map<std::string, std::uint64_t> timed_out;
-  if (!was_open) {
-    const auto status_before = core_.MakeStatus();
-    for (const auto& adapter : status_before.adapters()) {
-      if (adapter.role() == mujoco_sim::v2::CONTROLLER &&
-          adapter.state() == mujoco_sim::v2::TIMED_OUT) {
-        timed_out.emplace(adapter.adapter_id(), adapter.session_id());
-      }
-    }
-  }
-  auto ticks = core_.OpenIssuedTicks();
+  const bool was_open = core_.state().tick_open;
+  auto result = core_.OpenIssuedTicks();
+  auto ticks = std::move(result.response);
   std::uint64_t bytes = 0;
   std::uint64_t layout_bytes = 0;
   for (const auto& tick : ticks) {
@@ -484,22 +498,10 @@ std::vector<mujoco_sim::core::IssuedTickHandle> SimulationLoop::OpenTicks() {
   metrics_.RecordTickCache(was_open ? 0U : ticks.size(),
                            was_open ? ticks.size() : 0U, 0U, bytes,
                            layout_bytes);
-  if (!was_open && core_.tick_open()) {
+  if (!was_open && core_.state().tick_open) {
     metrics_.RecordTickOpened(Clock::now());
-    const auto status_after = core_.MakeStatus();
-    for (const auto& adapter : status_after.adapters()) {
-      const auto previous = timed_out.find(adapter.adapter_id());
-      if (previous != timed_out.end() &&
-          previous->second == adapter.session_id() &&
-          adapter.state() == mujoco_sim::v2::ACTIVE) {
-        status_dirty_ = true;
-        logger_->info(
-            "event=adapter_recovered adapter_id={} session_id={} tick_id={}",
-            LogValue(adapter.adapter_id()), adapter.session_id(),
-            core_.current_tick_id());
-      }
-    }
   }
+  ApplyEffects(std::move(result.effects));
   return ticks;
 }
 
@@ -566,8 +568,9 @@ void SimulationLoop::MaybeLogSummary(Clock::time_point now, bool final) {
                               config_.log_summary_period_ms)))) {
     return;
   }
+  const auto state = core_.state();
   const auto summary = metrics_.TakeSummary(
-      now, core_.current_tick_id(), core_.simulation_time());
+      now, state.current_tick_id, state.simulation_time_s);
   logger_->info(
       "event=tick_summary final={} window_s={:.3f} state={} tick_id={} "
       "simulation_time_s={:.6f} ticks_opened={} commits={} timeouts={} "
@@ -575,7 +578,7 @@ void SimulationLoop::MaybeLogSummary(Clock::time_point now, bool final) {
       "queue_rejections={} queue_high_watermark={} step_rate_hz={:.3f} "
       "real_time_factor={:.3f} barrier_latency_avg_ms={:.3f} "
       "barrier_latency_max_ms={:.3f}",
-      final, summary.window_seconds, ServerStateName(core_.server_state()),
+      final, summary.window_seconds, ServerStateName(state.server_state),
       summary.tick_id, summary.simulation_time, summary.ticks_opened,
       summary.commits, summary.timeouts, summary.recoveries,
       summary.replacements, summary.local_errors,
@@ -632,7 +635,8 @@ Clock::time_point SimulationLoop::NextWakeDeadline(Clock::time_point now) const 
   deadline = std::min(deadline, next_status_);
   if (viewer_ != nullptr) deadline = std::min(deadline, next_viewer_sync_);
   deadline = std::min(deadline,
-                      core_.tick_open() ? next_retransmission_ : next_tick_);
+                      core_.state().tick_open ? next_retransmission_
+                                              : next_tick_);
   return deadline;
 }
 
@@ -640,9 +644,9 @@ void SimulationLoop::Finish(int exit_code, std::string reason) {
   queue_.Close("server stopped");
   sensor_runtime_->RequestStop();
   if (exit_code == 0) {
-    core_.MarkStopped(reason);
-  } else if (core_.server_state() != mujoco_sim::v2::ERROR_PAUSED) {
-    core_.EnterFatalError(reason);
+    ApplyEffects(core_.MarkStopped(reason));
+  } else if (core_.state().server_state != mujoco_sim::v2::ERROR_PAUSED) {
+    ApplyEffects(core_.MarkFailed(reason));
   }
   PublishStatus();
   MaybeLogSummary(Clock::now(), true);
@@ -652,12 +656,13 @@ void SimulationLoop::Finish(int exit_code, std::string reason) {
     exit_code_ = exit_code;
     stop_reason_ = std::move(reason);
   }
+  const auto final_state = core_.state();
   if (exit_code == 0) {
     logger_->info("event=server_stopped reason={} exit_code={} tick_id={}",
-                  stop_reason_, exit_code, core_.current_tick_id());
+                  stop_reason_, exit_code, final_state.current_tick_id);
   } else {
     logger_->error("event=server_stopped reason={} exit_code={} tick_id={}",
-                   stop_reason_, exit_code, core_.current_tick_id());
+                   stop_reason_, exit_code, final_state.current_tick_id);
   }
 }
 

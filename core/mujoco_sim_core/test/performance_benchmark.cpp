@@ -28,9 +28,9 @@ double CpuSeconds(const rusage& usage) {
 int main(int argc, char** argv) {
   if (argc != 2) return 2;
   mujoco_sim::core::SimulationCore core;
-  std::string error;
-  if (!core.LoadModel(argv[1], &error)) {
-    std::cerr << error << '\n';
+  const auto loaded = core.LoadModel(argv[1]);
+  if (!loaded.response.loaded) {
+    std::cerr << loaded.response.message << '\n';
     return 3;
   }
 
@@ -51,14 +51,14 @@ int main(int argc, char** argv) {
       request.add_observation_names("obs" + suffix);
     }
     request.add_command_names("motor" + std::to_string(controller));
-    auto registration = core.RegisterAdapter(request);
+    auto registration = core.RegisterAdapter(request).response;
     if (registration.code() != mujoco_sim::v2::OK) return 4;
     mujoco_sim::v2::ActivateAdapterRequest activate;
     activate.set_adapter_id(registration.adapter_id());
     activate.set_role(mujoco_sim::v2::CONTROLLER);
     activate.set_session_id(registration.session_id());
     activate.set_epoch(registration.epoch());
-    if (core.ActivateAdapter(activate).code() != mujoco_sim::v2::OK) return 5;
+    if (core.ActivateAdapter(activate).response.code() != mujoco_sim::v2::OK) return 5;
     registrations.push_back(std::move(registration));
   }
 
@@ -75,7 +75,7 @@ int main(int argc, char** argv) {
 
   for (std::uint64_t tick_id = 0; tick_id < kSteps; ++tick_id) {
     const auto barrier_start = std::chrono::steady_clock::now();
-    const auto ticks = core.OpenIssuedTicks();
+    const auto ticks = core.OpenIssuedTicks().response;
     if (ticks.size() != kControllerCount) return 6;
     for (const auto& tick : ticks) {
       serialization_count += tick->serialization_count;
@@ -104,9 +104,9 @@ int main(int argc, char** argv) {
       command->set_name("motor" + std::to_string(controller));
       command->add_values(0.0);
       const auto result = core.SubmitCommit(commit);
-      if (result.code != mujoco_sim::v2::OK) return 7;
+      if (result.response.code != mujoco_sim::v2::OK) return 7;
       if ((controller + 1 == kControllerCount) !=
-          result.step_completed.has_value()) {
+          result.effects.step_completed.has_value()) {
         return 8;
       }
     }
@@ -127,7 +127,7 @@ int main(int argc, char** argv) {
   std::cout << "{\"controllers\":" << kControllerCount
             << ",\"observations_per_controller\":" << kObservationCount
             << ",\"steps\":" << kSteps
-            << ",\"simulation_seconds\":" << core.simulation_time()
+            << ",\"simulation_seconds\":" << core.state().simulation_time_s
             << ",\"retransmission_ms\":5"
             << ",\"serialization_count\":" << serialization_count
             << ",\"published_messages\":" << message_count

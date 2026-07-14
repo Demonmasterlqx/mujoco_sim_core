@@ -75,7 +75,7 @@ bool SimViewer::Synchronize(mujoco_sim::core::SimulationCore& core,
   if (impl_->simulate->loadrequest != 0) {
     return true;
   }
-  if (!core.UpdateSnapshot(&snapshot, error_message)) {
+  if (!core.UpdateSnapshot(snapshot, error_message)) {
     return false;
   }
   impl_->simulate->Sync();

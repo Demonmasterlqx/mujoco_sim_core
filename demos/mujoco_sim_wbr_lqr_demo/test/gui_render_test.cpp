@@ -42,10 +42,10 @@ TEST(WbrGuiRenderTest, CapturesNonBlankModelFrame) {
   mujoco_sim::core::ModelLoadOptions load_options;
   load_options.initial_keyframe = "home";
   std::string error;
-  ASSERT_TRUE(core.LoadModel(
-      std::filesystem::path(WBR_LQR_MJCF_DIR) / "scene.xml", load_options,
-      &error))
-      << error;
+  const auto model_load = core.LoadModel(
+      (std::filesystem::path(WBR_LQR_MJCF_DIR) / "scene.xml").string(),
+      load_options);
+  ASSERT_TRUE(model_load.response.loaded) << model_load.response.message;
   auto snapshot = core.CreateSnapshot(&error);
   ASSERT_NE(snapshot, nullptr) << error;
 
@@ -55,7 +55,7 @@ TEST(WbrGuiRenderTest, CapturesNonBlankModelFrame) {
   bool loaded = false;
   bool captured = false;
   std::thread worker([&]() {
-    if (!viewer.QueueLoad(snapshot.get(), "WBR LQR", &error)) {
+    if (!viewer.QueueLoad(*snapshot, "WBR LQR", &error)) {
       viewer.RequestClose();
       return;
     }
@@ -65,7 +65,7 @@ TEST(WbrGuiRenderTest, CapturesNonBlankModelFrame) {
       std::this_thread::sleep_for(5ms);
     }
     loaded = viewer.model_loaded();
-    if (loaded && viewer.Synchronize(&core, snapshot.get(), &error)) {
+    if (loaded && viewer.Synchronize(core, *snapshot, &error)) {
       viewer.RequestScreenshot();
       const auto capture_deadline = std::chrono::steady_clock::now() + 3s;
       while (!std::filesystem::exists(screenshot.path()) &&

@@ -45,11 +45,6 @@ class SimulationLoop {
   int Join();
 
  private:
-  struct LoopEffects {
-    std::optional<mujoco_sim::core::StepCompletedEvent> completed_step;
-    std::vector<mujoco_sim::core::AdapterTransition> transitions;
-  };
-
   void Run(std::stop_token stop_token) noexcept;
   void HandleEvent(ServerEvent event);
   void Handle(GetAvailableResourcesEvent event);
@@ -60,7 +55,7 @@ class SimulationLoop {
   void Handle(CommitEvent event);
   void Handle(HeartbeatEvent event);
   void ProcessTimers(std::chrono::steady_clock::time_point now);
-  void ApplyEffects(LoopEffects effects);
+  void ApplyEffects(mujoco_sim::core::EngineEffects effects);
   void ApplyCompletedStep(mujoco_sim::core::StepCompletedEvent event);
   std::vector<mujoco_sim::core::IssuedTickHandle> OpenTicks();
   void PublishTicks(

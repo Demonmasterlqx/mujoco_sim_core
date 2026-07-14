@@ -1,0 +1,72 @@
+name: SimulationCore quality
+
+on:
+  pull_request:
+    paths:
+      - ".github/workflows/simulation-core-quality.yml"
+      - "core/mujoco_sim_core/**"
+      - "core/mujoco_sim_protocol/**"
+      - "tools/quality/**"
+  push:
+    paths:
+      - ".github/workflows/simulation-core-quality.yml"
+      - "core/mujoco_sim_core/**"
+      - "core/mujoco_sim_protocol/**"
+      - "tools/quality/**"
+
+permissions:
+  contents: read
+
+jobs:
+  quality:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes \
+            cmake \
+            doxygen \
+            libgtest-dev \
+            libprotobuf-dev \
+            ninja-build \
+            protobuf-compiler \
+            python3-venv
+
+      - name: Install pinned quality tools
+        run: |
+          python3 -m venv build/quality-venv
+          build/quality-venv/bin/pip install \
+            --requirement tools/quality/requirements.txt
+
+      - name: Build and install protocol
+        run: |
+          cmake -S core/mujoco_sim_protocol -B build/ci-protocol -G Ninja \
+            -DBUILD_TESTING=ON \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_INSTALL_PREFIX="$PWD/build/ci-install"
+          cmake --build build/ci-protocol
+          ctest --test-dir build/ci-protocol --output-on-failure
+          cmake --install build/ci-protocol
+
+      - name: Configure SimulationCore gates
+        run: |
+          export PATH="$PWD/build/quality-venv/bin:$PATH"
+          cmake -S core/mujoco_sim_core -B build/ci-core -G Ninja \
+            -DBUILD_TESTING=ON \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_PREFIX_PATH="$PWD/build/ci-install" \
+            -DMUJOCO_SIM_BUILD_DOCS=ON \
+            -DMUJOCO_SIM_ENABLE_QUALITY_GATES=ON
+
+      - name: Build and test SimulationCore
+        run: |
+          cmake --build build/ci-core
+          ctest --test-dir build/ci-core --output-on-failure
+
+      - name: Build warning-clean API documentation
+        run: cmake --build build/ci-core --target mujoco_sim_core_docs

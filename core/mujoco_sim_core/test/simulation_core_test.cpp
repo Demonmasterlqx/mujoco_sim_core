@@ -15,10 +15,26 @@
 
 namespace {
 
+bool LoadModel(mujoco_sim::core::SimulationCore* core,
+               const std::string& model_path, std::string* error) {
+  auto result = core->LoadModel(model_path);
+  *error = result.response.message;
+  return result.response.loaded;
+}
+
+bool LoadModel(mujoco_sim::core::SimulationCore* core,
+               const std::string& model_path,
+               const mujoco_sim::core::ModelLoadOptions& options,
+               std::string* error) {
+  auto result = core->LoadModel(model_path, options);
+  *error = result.response.message;
+  return result.response.loaded;
+}
+
 mujoco_sim::core::SimulationCore LoadedCoreFrom(const std::string& model_path) {
   mujoco_sim::core::SimulationCore core;
   std::string error;
-  EXPECT_TRUE(core.LoadModel(model_path, &error)) << error;
+  EXPECT_TRUE(LoadModel(&core, model_path, &error)) << error;
   return core;
 }
 
@@ -32,12 +48,20 @@ std::string SensorMetadataModelPath() {
       .string();
 }
 
+bool HasChange(const mujoco_sim::core::EngineEffects& effects,
+               mujoco_sim::core::AdapterChangeKind kind) {
+  return std::any_of(effects.adapter_changes.begin(),
+                     effects.adapter_changes.end(),
+                     [kind](const auto& change) { return change.kind == kind; });
+}
+
 const mujoco_sim::v2::ResourceDescriptor* FindObservation(
     const mujoco_sim::core::SimulationCore& core, const std::string& name) {
+  const auto observations = core.resources().observations;
   const auto found = std::find_if(
-      core.observations().begin(), core.observations().end(),
+      observations.begin(), observations.end(),
       [&name](const auto& descriptor) { return descriptor.name() == name; });
-  return found == core.observations().end() ? nullptr : &*found;
+  return found == observations.end() ? nullptr : &*found;
 }
 
 mujoco_sim::v2::RegisterAdapterRequest BasicRegisterRequest(
@@ -77,14 +101,14 @@ mujoco_sim::v2::AdapterCommit CommitFor(
 mujoco_sim::v2::RegisterAdapterResponse RegisterAndActivate(
     mujoco_sim::core::SimulationCore* core,
     const mujoco_sim::v2::RegisterAdapterRequest& request) {
-  auto registration = core->RegisterAdapter(request);
+  auto registration = core->RegisterAdapter(request).response;
   EXPECT_EQ(registration.code(), mujoco_sim::v2::OK);
   mujoco_sim::v2::ActivateAdapterRequest activate;
   activate.set_adapter_id(registration.adapter_id());
   activate.set_role(mujoco_sim::v2::CONTROLLER);
   activate.set_session_id(registration.session_id());
   activate.set_epoch(registration.epoch());
-  const auto activated = core->ActivateAdapter(activate);
+  const auto activated = core->ActivateAdapter(activate).response;
   EXPECT_EQ(activated.code(), mujoco_sim::v2::OK);
   return registration;
 }
@@ -107,14 +131,14 @@ mujoco_sim::v2::RegisterAdapterRequest ObserverRequest(
 mujoco_sim::v2::RegisterAdapterResponse RegisterAndActivateObserver(
     mujoco_sim::core::SimulationCore* core,
     const mujoco_sim::v2::RegisterAdapterRequest& request) {
-  auto registration = core->RegisterAdapter(request);
+  auto registration = core->RegisterAdapter(request).response;
   EXPECT_EQ(registration.code(), mujoco_sim::v2::OK);
   mujoco_sim::v2::ActivateAdapterRequest activate;
   activate.set_adapter_id(registration.adapter_id());
   activate.set_role(mujoco_sim::v2::OBSERVER);
   activate.set_session_id(registration.session_id());
   activate.set_epoch(registration.epoch());
-  EXPECT_EQ(core->ActivateAdapter(activate).code(), mujoco_sim::v2::OK);
+  EXPECT_EQ(core->ActivateAdapter(activate).response.code(), mujoco_sim::v2::OK);
   return registration;
 }
 
@@ -137,16 +161,17 @@ mujoco_sim::v2::RegisterAdapterResponse RegisterAndActivate(
 TEST(SimulationCoreTest, LoadsModelAndBuildsCatalogs) {
   auto core = LoadedCore();
   ASSERT_TRUE(core.IsModelLoaded());
-  EXPECT_EQ(core.observations().size(), 3);
-  ASSERT_EQ(core.commands().size(), 1);
-  EXPECT_EQ(core.commands()[0].name(), "hinge_motor");
-  EXPECT_TRUE(core.commands()[0].has_ctrl_range());
-  EXPECT_DOUBLE_EQ(core.commands()[0].ctrl_min(), -1.0);
-  EXPECT_DOUBLE_EQ(core.commands()[0].ctrl_max(), 1.0);
-  EXPECT_EQ(core.server_state(), mujoco_sim::v2::RUNNING);
-  EXPECT_GT(core.timestep(), 0.0);
-  EXPECT_EQ(core.observations()[0].mujoco_stage(), mjSTAGE_POS);
-  EXPECT_GE(core.observations()[0].interval_period_s(), 0.0);
+  const auto resources = core.resources();
+  EXPECT_EQ(resources.observations.size(), 3);
+  ASSERT_EQ(resources.commands.size(), 1);
+  EXPECT_EQ(resources.commands[0].name(), "hinge_motor");
+  EXPECT_TRUE(resources.commands[0].has_ctrl_range());
+  EXPECT_DOUBLE_EQ(resources.commands[0].ctrl_min(), -1.0);
+  EXPECT_DOUBLE_EQ(resources.commands[0].ctrl_max(), 1.0);
+  EXPECT_EQ(core.state().server_state, mujoco_sim::v2::RUNNING);
+  EXPECT_GT(core.state().timestep_s, 0.0);
+  EXPECT_EQ(resources.observations[0].mujoco_stage(), mjSTAGE_POS);
+  EXPECT_GE(resources.observations[0].interval_period_s(), 0.0);
   const auto* hinge_force = FindObservation(core, "hinge_force");
   ASSERT_NE(hinge_force, nullptr);
   EXPECT_EQ(hinge_force->unit(), "N*m");
@@ -281,7 +306,7 @@ TEST(SimulationCoreTest, BuildsJointTendonAndActuatorTransmissionUnits) {
 
 TEST(SimulationCoreTest, UnifiedControllerAdapterPreservesSynchronousTickData) {
   auto core = LoadedCore();
-  core.OpenIssuedTicks();
+  core.OpenIssuedTicks().response;
   ASSERT_TRUE(core.CompleteEmptyBarrier().step_completed.has_value());
   const auto defaults = BasicRegisterRequest();
   mujoco_sim::v2::RegisterAdapterRequest request;
@@ -293,7 +318,7 @@ TEST(SimulationCoreTest, UnifiedControllerAdapterPreservesSynchronousTickData) {
   request.mutable_observation_names()->CopyFrom(defaults.observation_names());
   request.mutable_command_names()->CopyFrom(defaults.command_names());
   request.set_timeout_ms(defaults.timeout_ms());
-  const auto registration = core.RegisterAdapter(request);
+  const auto registration = core.RegisterAdapter(request).response;
   ASSERT_EQ(registration.code(), mujoco_sim::v2::OK);
   ASSERT_EQ(registration.layout().observations_size(), 2);
 
@@ -302,13 +327,13 @@ TEST(SimulationCoreTest, UnifiedControllerAdapterPreservesSynchronousTickData) {
   activate.set_role(mujoco_sim::v2::CONTROLLER);
   activate.set_session_id(registration.session_id());
   activate.set_epoch(registration.epoch());
-  ASSERT_EQ(core.ActivateAdapter(activate).code(), mujoco_sim::v2::OK);
-  const auto ticks = core.OpenIssuedTicks();
+  ASSERT_EQ(core.ActivateAdapter(activate).response.code(), mujoco_sim::v2::OK);
+  const auto ticks = core.OpenIssuedTicks().response;
   ASSERT_EQ(ticks.size(), 1U);
   EXPECT_EQ(ticks[0]->message.observations_size(), 2);
   EXPECT_TRUE(ticks[0]->message.header().has_simulation_time_s());
   EXPECT_DOUBLE_EQ(ticks[0]->message.header().simulation_time_s(),
-                   core.simulation_time());
+                   core.state().simulation_time_s);
   EXPECT_TRUE(AdapterStatusFor(core, "arm").required_for_barrier());
 
   mujoco_sim::v2::AdapterHeartbeat heartbeat;
@@ -324,28 +349,28 @@ TEST(SimulationCoreTest, ObserverValidationIsStrictAndTransactional) {
   auto core = LoadedCore();
   auto request = ObserverRequest();
   request.add_command_names("hinge_motor");
-  EXPECT_EQ(core.RegisterAdapter(request).code(),
+  EXPECT_EQ(core.RegisterAdapter(request).response.code(),
             mujoco_sim::v2::INVALID_ARGUMENT);
-  EXPECT_EQ(core.observer_count(mujoco_sim::v2::PROVISIONAL), 0U);
+  EXPECT_EQ(core.state().observer_count(mujoco_sim::v2::PROVISIONAL), 0U);
 
   request = ObserverRequest();
   request.set_observation_names(0, "missing");
-  EXPECT_EQ(core.RegisterAdapter(request).code(), mujoco_sim::v2::NOT_FOUND);
-  EXPECT_EQ(core.observer_count(mujoco_sim::v2::PROVISIONAL), 0U);
+  EXPECT_EQ(core.RegisterAdapter(request).response.code(), mujoco_sim::v2::NOT_FOUND);
+  EXPECT_EQ(core.state().observer_count(mujoco_sim::v2::PROVISIONAL), 0U);
 
   request = ObserverRequest();
   request.mutable_delivery()->set_every_n_steps(0);
-  EXPECT_EQ(core.RegisterAdapter(request).code(),
+  EXPECT_EQ(core.RegisterAdapter(request).response.code(),
             mujoco_sim::v2::INVALID_ARGUMENT);
-  EXPECT_EQ(core.observer_count(mujoco_sim::v2::PROVISIONAL), 0U);
+  EXPECT_EQ(core.state().observer_count(mujoco_sim::v2::PROVISIONAL), 0U);
 
   request = ObserverRequest();
   request.set_protocol_minor(1);
-  EXPECT_EQ(core.RegisterAdapter(request).code(),
+  EXPECT_EQ(core.RegisterAdapter(request).response.code(),
             mujoco_sim::v2::VERSION_MISMATCH);
-  EXPECT_EQ(core.observer_count(mujoco_sim::v2::PROVISIONAL), 0U);
+  EXPECT_EQ(core.state().observer_count(mujoco_sim::v2::PROVISIONAL), 0U);
 
-  const auto valid = core.RegisterAdapter(ObserverRequest());
+  const auto valid = core.RegisterAdapter(ObserverRequest()).response;
   EXPECT_EQ(valid.code(), mujoco_sim::v2::OK);
   EXPECT_EQ(valid.session_id(), 1U);
 }
@@ -354,9 +379,9 @@ TEST(SimulationCoreTest, ObserverReceivesPostStepFramesWithoutJoiningBarrier) {
   auto core = LoadedCore();
   const auto registration =
       RegisterAndActivateObserver(&core, ObserverRequest());
-  EXPECT_EQ(core.active_controller_count(), 0U);
-  EXPECT_EQ(core.observer_count(mujoco_sim::v2::ACTIVE), 1U);
-  EXPECT_TRUE(core.OpenIssuedTicks().empty());
+  EXPECT_EQ(core.state().active_controller_count, 0U);
+  EXPECT_EQ(core.state().observer_count(mujoco_sim::v2::ACTIVE), 1U);
+  EXPECT_TRUE(core.OpenIssuedTicks().response.empty());
   auto completed = core.CompleteEmptyBarrier().step_completed;
   ASSERT_TRUE(completed.has_value());
   const auto& frames = completed->observer_frames;
@@ -365,7 +390,7 @@ TEST(SimulationCoreTest, ObserverReceivesPostStepFramesWithoutJoiningBarrier) {
   EXPECT_EQ(frames[0].sequence(), 1U);
   EXPECT_EQ(frames[0].header().tick_id(), 1U);
   EXPECT_DOUBLE_EQ(frames[0].header().simulation_time_s(),
-                   core.simulation_time());
+                   core.state().simulation_time_s);
   ASSERT_EQ(frames[0].observations_size(), 2);
   EXPECT_EQ(frames[0].observations(0).name(), "hinge_pos");
 }
@@ -376,11 +401,11 @@ TEST(SimulationCoreTest, ObserverSupportsStepAndSimulationTimeDecimation) {
   request.mutable_delivery()->set_every_n_steps(2);
   RegisterAndActivateObserver(&core, request);
   request = ObserverRequest("period-observer");
-  request.mutable_delivery()->set_period_s(core.timestep() * 2.0);
+  request.mutable_delivery()->set_period_s(core.state().timestep_s * 2.0);
   RegisterAndActivateObserver(&core, request);
 
   for (int step = 1; step <= 3; ++step) {
-    EXPECT_TRUE(core.OpenIssuedTicks().empty());
+    EXPECT_TRUE(core.OpenIssuedTicks().response.empty());
     auto completed = core.CompleteEmptyBarrier().step_completed;
     ASSERT_TRUE(completed.has_value());
     const auto& frames = completed->observer_frames;
@@ -394,14 +419,14 @@ TEST(SimulationCoreTest, ObserverSupportsStepAndSimulationTimeDecimation) {
 
 TEST(SimulationCoreTest, ObserverPeriodUsesPhaseLockedDeadlines) {
   auto core = LoadedCore();
-  ASSERT_DOUBLE_EQ(core.timestep(), 0.001);
+  ASSERT_DOUBLE_EQ(core.state().timestep_s, 0.001);
   auto request = ObserverRequest("phase-observer");
   request.mutable_delivery()->set_period_s(0.0015);
   RegisterAndActivateObserver(&core, request);
 
   std::vector<mujoco_sim::v2::ObservationFrame> frames;
   for (int step = 0; step < 10; ++step) {
-    EXPECT_TRUE(core.OpenIssuedTicks().empty());
+    EXPECT_TRUE(core.OpenIssuedTicks().response.empty());
     auto completed = core.CompleteEmptyBarrier().step_completed;
     ASSERT_TRUE(completed.has_value());
     frames.insert(frames.end(), completed->observer_frames.begin(),
@@ -423,7 +448,7 @@ TEST(SimulationCoreTest, ObserverPeriodRemainsPhaseLockedForLongRuns) {
 
   std::uint64_t period_index = 1;
   for (std::uint64_t tick = 1; tick <= 20000; ++tick) {
-    EXPECT_TRUE(core.OpenIssuedTicks().empty());
+    EXPECT_TRUE(core.OpenIssuedTicks().response.empty());
     auto completed = core.CompleteEmptyBarrier().step_completed;
     ASSERT_TRUE(completed.has_value());
     const auto& frames = completed->observer_frames;
@@ -446,7 +471,7 @@ TEST(SimulationCoreTest, ObserverPeriodBelowTimestepDeliversEveryStep) {
   RegisterAndActivateObserver(&core, request);
 
   for (std::uint64_t tick = 1; tick <= 4; ++tick) {
-    EXPECT_TRUE(core.OpenIssuedTicks().empty());
+    EXPECT_TRUE(core.OpenIssuedTicks().response.empty());
     auto completed = core.CompleteEmptyBarrier().step_completed;
     ASSERT_TRUE(completed.has_value());
     const auto& frames = completed->observer_frames;
@@ -461,7 +486,7 @@ TEST(SimulationCoreTest, CompletedFramesSurviveUnregisterUntilCollected) {
       RegisterAndActivateObserver(&core, ObserverRequest());
   std::vector<mujoco_sim::v2::ObservationFrame> frames;
   for (int step = 0; step < 2; ++step) {
-    EXPECT_TRUE(core.OpenIssuedTicks().empty());
+    EXPECT_TRUE(core.OpenIssuedTicks().response.empty());
     auto completed = core.CompleteEmptyBarrier().step_completed;
     ASSERT_TRUE(completed.has_value());
     frames.insert(frames.end(), completed->observer_frames.begin(),
@@ -486,13 +511,13 @@ TEST(SimulationCoreTest, ObserverCannotActivateWhenServerIsStoppedOrPaused) {
   for (const bool stopped : {false, true}) {
     SCOPED_TRACE(stopped ? "stopped" : "error-paused");
     auto core = LoadedCore();
-    const auto registration = core.RegisterAdapter(ObserverRequest());
+    const auto registration = core.RegisterAdapter(ObserverRequest()).response;
     ASSERT_EQ(registration.code(), mujoco_sim::v2::OK);
 
     if (stopped) {
       core.MarkStopped("shutdown");
     } else {
-      core.EnterFatalError("transport failed");
+      core.MarkFailed("transport failed");
     }
 
     mujoco_sim::v2::ActivateAdapterRequest activate;
@@ -500,9 +525,9 @@ TEST(SimulationCoreTest, ObserverCannotActivateWhenServerIsStoppedOrPaused) {
     activate.set_role(mujoco_sim::v2::OBSERVER);
     activate.set_session_id(registration.session_id());
     activate.set_epoch(registration.epoch());
-    EXPECT_EQ(core.ActivateAdapter(activate).code(),
+    EXPECT_EQ(core.ActivateAdapter(activate).response.code(),
               mujoco_sim::v2::FAILED_PRECONDITION);
-    EXPECT_EQ(core.observer_count(mujoco_sim::v2::PROVISIONAL), 1U);
+    EXPECT_EQ(core.state().observer_count(mujoco_sim::v2::PROVISIONAL), 1U);
   }
 }
 
@@ -510,13 +535,13 @@ TEST(SimulationCoreTest, ControllerCannotActivateWhenServerIsStoppedOrPaused) {
   for (const bool stopped : {false, true}) {
     SCOPED_TRACE(stopped ? "stopped" : "error-paused");
     auto core = LoadedCore();
-    const auto registration = core.RegisterAdapter(BasicRegisterRequest());
+    const auto registration = core.RegisterAdapter(BasicRegisterRequest()).response;
     ASSERT_EQ(registration.code(), mujoco_sim::v2::OK);
 
     if (stopped) {
       core.MarkStopped("shutdown");
     } else {
-      core.EnterFatalError("transport failed");
+      core.MarkFailed("transport failed");
     }
 
     mujoco_sim::v2::ActivateAdapterRequest activate;
@@ -524,9 +549,9 @@ TEST(SimulationCoreTest, ControllerCannotActivateWhenServerIsStoppedOrPaused) {
     activate.set_role(mujoco_sim::v2::CONTROLLER);
     activate.set_session_id(registration.session_id());
     activate.set_epoch(registration.epoch());
-    EXPECT_EQ(core.ActivateAdapter(activate).code(),
+    EXPECT_EQ(core.ActivateAdapter(activate).response.code(),
               mujoco_sim::v2::FAILED_PRECONDITION);
-    EXPECT_EQ(core.controller_count(mujoco_sim::v2::PROVISIONAL), 1U);
+    EXPECT_EQ(core.state().controller_count(mujoco_sim::v2::PROVISIONAL), 1U);
   }
 }
 
@@ -537,14 +562,14 @@ TEST(SimulationCoreTest, ObserverKeepaliveTimeoutAndReplacementAreIsolated) {
   const auto future = std::chrono::steady_clock::now() +
                       std::chrono::milliseconds(100);
   const auto deadlines = core.CheckDeadlines(future);
-  ASSERT_EQ(deadlines.transitions.size(), 1U);
-  EXPECT_EQ(deadlines.transitions[0].new_state,
+  ASSERT_EQ(deadlines.adapter_changes.size(), 1U);
+  EXPECT_EQ(deadlines.adapter_changes[0].new_state,
             mujoco_sim::v2::TIMED_OUT);
-  EXPECT_EQ(core.observer_count(mujoco_sim::v2::TIMED_OUT), 1U);
-  EXPECT_TRUE(core.OpenIssuedTicks().empty());
+  EXPECT_EQ(core.state().observer_count(mujoco_sim::v2::TIMED_OUT), 1U);
+  EXPECT_TRUE(core.OpenIssuedTicks().response.empty());
   EXPECT_TRUE(core.CompleteEmptyBarrier().step_completed.has_value());
 
-  const auto replacement = core.RegisterAdapter(ObserverRequest());
+  const auto replacement = core.RegisterAdapter(ObserverRequest()).response;
   ASSERT_EQ(replacement.code(), mujoco_sim::v2::OK);
   EXPECT_NE(replacement.session_id(), registration.session_id());
   EXPECT_NE(replacement.message().find("replaced"), std::string::npos);
@@ -552,13 +577,14 @@ TEST(SimulationCoreTest, ObserverKeepaliveTimeoutAndReplacementAreIsolated) {
 
 TEST(SimulationCoreTest, StepsWithAnEmptyBarrier) {
   auto core = LoadedCore();
-  const double before = core.simulation_time();
-  EXPECT_TRUE(core.OpenIssuedTicks().empty());
-  EXPECT_TRUE(core.tick_open());
+  const double before = core.state().simulation_time_s;
+  EXPECT_TRUE(core.OpenIssuedTicks().response.empty());
+  EXPECT_TRUE(core.state().tick_open);
   EXPECT_TRUE(core.CompleteEmptyBarrier().step_completed.has_value());
-  EXPECT_EQ(core.current_tick_id(), 1U);
-  EXPECT_DOUBLE_EQ(core.simulation_time(), before + core.timestep());
-  EXPECT_EQ(core.server_state(), mujoco_sim::v2::RUNNING);
+  EXPECT_EQ(core.state().current_tick_id, 1U);
+  EXPECT_DOUBLE_EQ(core.state().simulation_time_s,
+                   before + core.state().timestep_s);
+  EXPECT_EQ(core.state().server_state, mujoco_sim::v2::RUNNING);
 }
 
 TEST(SimulationCoreTest, ReportsEveryStepCompletionSourceWithObserverFrames) {
@@ -572,7 +598,7 @@ TEST(SimulationCoreTest, ReportsEveryStepCompletionSourceWithObserverFrames) {
   {
     auto core = LoadedCore();
     add_observer(&core, "empty_observer");
-    core.OpenIssuedTicks();
+    core.OpenIssuedTicks().response;
     const auto result = core.CompleteEmptyBarrier();
     ASSERT_TRUE(result.step_completed.has_value());
     EXPECT_EQ(result.step_completed->source,
@@ -583,18 +609,18 @@ TEST(SimulationCoreTest, ReportsEveryStepCompletionSourceWithObserverFrames) {
     auto core = LoadedCore();
     add_observer(&core, "commit_observer");
     const auto registration = RegisterAndActivate(&core);
-    core.OpenIssuedTicks();
+    core.OpenIssuedTicks().response;
     const auto result = core.SubmitCommit(CommitFor(registration, 0, 0.1));
-    ASSERT_TRUE(result.step_completed.has_value());
-    EXPECT_EQ(result.step_completed->source,
+    ASSERT_TRUE(result.effects.step_completed.has_value());
+    EXPECT_EQ(result.effects.step_completed->source,
               mujoco_sim::core::StepCompletionSource::kCommit);
-    EXPECT_EQ(result.step_completed->observer_frames.size(), 1U);
+    EXPECT_EQ(result.effects.step_completed->observer_frames.size(), 1U);
   }
   {
     auto core = LoadedCore();
     add_observer(&core, "deadline_observer");
     RegisterAndActivate(&core);
-    core.OpenIssuedTicks();
+    core.OpenIssuedTicks().response;
     const auto result = core.CheckDeadlines(
         std::chrono::steady_clock::now() + std::chrono::seconds(2));
     ASSERT_TRUE(result.step_completed.has_value());
@@ -606,29 +632,29 @@ TEST(SimulationCoreTest, ReportsEveryStepCompletionSourceWithObserverFrames) {
     auto core = LoadedCore();
     add_observer(&core, "unregister_observer");
     const auto registration = RegisterAndActivate(&core);
-    core.OpenIssuedTicks();
+    core.OpenIssuedTicks().response;
     mujoco_sim::v2::UnregisterAdapterRequest request;
     request.set_adapter_id(registration.adapter_id());
     request.set_role(mujoco_sim::v2::CONTROLLER);
     request.set_session_id(registration.session_id());
     request.set_epoch(registration.epoch());
     const auto result = core.UnregisterAdapter(request);
-    ASSERT_TRUE(result.step_completed.has_value());
-    EXPECT_EQ(result.step_completed->source,
+    ASSERT_TRUE(result.effects.step_completed.has_value());
+    EXPECT_EQ(result.effects.step_completed->source,
               mujoco_sim::core::StepCompletionSource::kUnregister);
-    EXPECT_EQ(result.step_completed->observer_frames.size(), 1U);
+    EXPECT_EQ(result.effects.step_completed->observer_frames.size(), 1U);
   }
   {
     auto core = LoadedCore();
     add_observer(&core, "error_observer");
     const auto registration = RegisterAndActivate(&core);
-    core.OpenIssuedTicks();
+    core.OpenIssuedTicks().response;
     const auto result = core.SubmitCommit(CommitFor(
         registration, 0, std::numeric_limits<double>::quiet_NaN()));
-    ASSERT_TRUE(result.step_completed.has_value());
-    EXPECT_EQ(result.step_completed->source,
+    ASSERT_TRUE(result.effects.step_completed.has_value());
+    EXPECT_EQ(result.effects.step_completed->source,
               mujoco_sim::core::StepCompletionSource::kLocalError);
-    EXPECT_EQ(result.step_completed->observer_frames.size(), 1U);
+    EXPECT_EQ(result.effects.step_completed->observer_frames.size(), 1U);
   }
 }
 
@@ -637,15 +663,15 @@ TEST(SimulationCoreTest, InvalidatesTickHandlesAtEveryLifecycleBoundary) {
   {
     auto core = LoadedCore();
     RegisterAndActivate(&core);
-    const auto handle = core.OpenIssuedTicks().front();
-    ASSERT_TRUE(core.LoadModel(MUJOCO_SIM_CORE_TEST_MODEL, &error)) << error;
+    const auto handle = core.OpenIssuedTicks().response.front();
+    ASSERT_TRUE(LoadModel(&core, MUJOCO_SIM_CORE_TEST_MODEL, &error)) << error;
     EXPECT_FALSE(handle->current.load());
     EXPECT_FALSE(core.IsIssuedTickCurrent(handle->identity));
   }
   {
     auto core = LoadedCore();
     const auto registration = RegisterAndActivate(&core);
-    const auto handle = core.OpenIssuedTicks().front();
+    const auto handle = core.OpenIssuedTicks().response.front();
     mujoco_sim::v2::UnregisterAdapterRequest request;
     request.set_adapter_id(registration.adapter_id());
     request.set_role(mujoco_sim::v2::CONTROLLER);
@@ -659,12 +685,12 @@ TEST(SimulationCoreTest, InvalidatesTickHandlesAtEveryLifecycleBoundary) {
   {
     auto core = LoadedCore();
     const auto old_registration = RegisterAndActivate(&core);
-    core.OpenIssuedTicks();
+    core.OpenIssuedTicks().response;
     ASSERT_TRUE(core.CheckDeadlines(std::chrono::steady_clock::now() +
                                     std::chrono::seconds(2))
                     .step_completed.has_value());
-    const auto recovery_handle = core.OpenIssuedTicks().front();
-    const auto replacement = core.RegisterAdapter(BasicRegisterRequest());
+    const auto recovery_handle = core.OpenIssuedTicks().response.front();
+    const auto replacement = core.RegisterAdapter(BasicRegisterRequest()).response;
     ASSERT_EQ(replacement.code(), mujoco_sim::v2::OK);
     EXPECT_NE(replacement.session_id(), old_registration.session_id());
     EXPECT_FALSE(recovery_handle->current.load());
@@ -673,7 +699,7 @@ TEST(SimulationCoreTest, InvalidatesTickHandlesAtEveryLifecycleBoundary) {
   {
     auto core = LoadedCore();
     RegisterAndActivate(&core);
-    const auto handle = core.OpenIssuedTicks().front();
+    const auto handle = core.OpenIssuedTicks().response.front();
     core.MarkStopped();
     EXPECT_FALSE(handle->current.load());
     EXPECT_FALSE(core.IsIssuedTickCurrent(handle->identity));
@@ -685,7 +711,7 @@ TEST(SimulationCoreTest, LoadsModelFromInitialKeyframeAndClearsControl) {
   mujoco_sim::core::ModelLoadOptions options;
   options.initial_keyframe = "ready";
   std::string error;
-  ASSERT_TRUE(core.LoadModel(MUJOCO_SIM_CORE_TEST_MODEL, options, &error))
+  ASSERT_TRUE(LoadModel(&core, MUJOCO_SIM_CORE_TEST_MODEL, options, &error))
       << error;
 
   auto snapshot = core.CreateSnapshot(&error);
@@ -695,18 +721,17 @@ TEST(SimulationCoreTest, LoadsModelFromInitialKeyframeAndClearsControl) {
   EXPECT_DOUBLE_EQ(snapshot->data()->qvel[0], -0.25);
   EXPECT_DOUBLE_EQ(snapshot->data()->ctrl[0], 0.0);
   EXPECT_DOUBLE_EQ(snapshot->data()->sensordata[0], 0.5);
-  EXPECT_DOUBLE_EQ(core.simulation_time(), 1.25);
+  EXPECT_DOUBLE_EQ(core.state().simulation_time_s, 1.25);
 }
 
 TEST(SimulationCoreTest, EmptyModelLoadOptionsPreserveDefaultResetBehavior) {
   mujoco_sim::core::SimulationCore source_core;
   mujoco_sim::core::SimulationCore options_core;
   std::string error;
-  ASSERT_TRUE(source_core.LoadModel(MUJOCO_SIM_CORE_TEST_MODEL, &error))
+  ASSERT_TRUE(LoadModel(&source_core, MUJOCO_SIM_CORE_TEST_MODEL, &error))
       << error;
-  ASSERT_TRUE(options_core.LoadModel(MUJOCO_SIM_CORE_TEST_MODEL,
-                                    mujoco_sim::core::ModelLoadOptions{},
-                                    &error))
+  ASSERT_TRUE(LoadModel(&options_core, MUJOCO_SIM_CORE_TEST_MODEL,
+                        mujoco_sim::core::ModelLoadOptions{}, &error))
       << error;
 
   auto source_snapshot = source_core.CreateSnapshot(&error);
@@ -733,30 +758,30 @@ TEST(SimulationCoreTest, MissingInitialKeyframeLeavesLoadedModelUnchanged) {
   auto snapshot = core.CreateSnapshot(&error);
   ASSERT_NE(snapshot, nullptr) << error;
   const auto registration = RegisterAndActivate(&core);
-  ASSERT_EQ(core.OpenIssuedTicks().size(), 1);
-  const auto epoch = core.epoch();
-  const auto tick_id = core.current_tick_id();
-  const auto simulation_time = core.simulation_time();
+  ASSERT_EQ(core.OpenIssuedTicks().response.size(), 1);
+  const auto before = core.state();
 
   mujoco_sim::core::ModelLoadOptions options;
   options.initial_keyframe = "missing_pose";
-  EXPECT_FALSE(core.LoadModel(MUJOCO_SIM_CORE_DUAL_TEST_MODEL, options, &error));
+  EXPECT_FALSE(LoadModel(&core, MUJOCO_SIM_CORE_DUAL_TEST_MODEL, options, &error));
   EXPECT_EQ(error,
             "initial keyframe 'missing_pose' was not found in MuJoCo model");
   EXPECT_TRUE(core.IsModelLoaded());
-  EXPECT_EQ(core.epoch(), epoch);
-  EXPECT_EQ(core.current_tick_id(), tick_id);
-  EXPECT_DOUBLE_EQ(core.simulation_time(), simulation_time);
-  EXPECT_EQ(core.server_state(), mujoco_sim::v2::RUNNING);
-  EXPECT_TRUE(core.tick_open());
-  EXPECT_EQ(core.active_controller_count(), 1);
-  ASSERT_EQ(core.commands().size(), 1);
-  EXPECT_EQ(core.commands()[0].name(), "hinge_motor");
-  EXPECT_TRUE(core.UpdateSnapshot(snapshot.get(), &error)) << error;
+  const auto after = core.state();
+  EXPECT_EQ(after.epoch, before.epoch);
+  EXPECT_EQ(after.current_tick_id, before.current_tick_id);
+  EXPECT_DOUBLE_EQ(after.simulation_time_s, before.simulation_time_s);
+  EXPECT_EQ(after.server_state, mujoco_sim::v2::RUNNING);
+  EXPECT_TRUE(after.tick_open);
+  EXPECT_EQ(after.active_controller_count, 1);
+  ASSERT_EQ(core.resources().commands.size(), 1);
+  EXPECT_EQ(core.resources().commands[0].name(), "hinge_motor");
+  EXPECT_TRUE(core.UpdateSnapshot(*snapshot, &error)) << error;
 
-  const auto result = core.SubmitCommit(CommitFor(registration, tick_id, 0.2));
-  EXPECT_EQ(result.code, mujoco_sim::v2::OK);
-  EXPECT_TRUE(result.step_completed.has_value());
+  const auto result =
+      core.SubmitCommit(CommitFor(registration, before.current_tick_id, 0.2));
+  EXPECT_EQ(result.response.code, mujoco_sim::v2::OK);
+  EXPECT_TRUE(result.effects.step_completed.has_value());
 }
 
 TEST(SimulationCoreTest, ProvidesAvailableResources) {
@@ -784,7 +809,7 @@ TEST(SimulationCoreTest, CreatesIsolatedVisualizationSnapshot) {
   ASSERT_NE(independent, nullptr) << error;
   EXPECT_NE(independent->data()->qpos[0], snapshot->data()->qpos[0]);
 
-  ASSERT_TRUE(core.UpdateSnapshot(snapshot.get(), &error)) << error;
+  ASSERT_TRUE(core.UpdateSnapshot(*snapshot, &error)) << error;
   EXPECT_DOUBLE_EQ(snapshot->data()->qpos[0], independent->data()->qpos[0]);
 }
 
@@ -814,12 +839,12 @@ TEST(SimulationCoreTest, ClonedSnapshotsShareConstModelAndIsolateData) {
   EXPECT_DOUBLE_EQ(source->data()->qpos[0], 0.75);
   EXPECT_NE(clone->data()->qpos[0], core_state->data()->qpos[0]);
 
-  ASSERT_TRUE(core.UpdateSnapshot(clone.get(), &error)) << error;
+  ASSERT_TRUE(core.UpdateSnapshot(*clone, &error)) << error;
   EXPECT_DOUBLE_EQ(clone->data()->qpos[0], core_state->data()->qpos[0]);
   EXPECT_DOUBLE_EQ(clone->data()->time, core_state->data()->time);
   EXPECT_NE(clone->data()->qpos[0], source->data()->qpos[0]);
 
-  ASSERT_TRUE(core.LoadModel(MUJOCO_SIM_CORE_TEST_MODEL, &error)) << error;
+  ASSERT_TRUE(LoadModel(&core, MUJOCO_SIM_CORE_TEST_MODEL, &error)) << error;
   EXPECT_EQ(core.CloneSnapshot(*source, &error), nullptr);
   EXPECT_NE(error.find("stale"), std::string::npos);
 }
@@ -831,10 +856,10 @@ TEST(SimulationCoreTest, RefreshesVisualizationSnapshotAfterStep) {
   ASSERT_NE(snapshot, nullptr) << error;
 
   const auto registration = RegisterAndActivate(&core);
-  ASSERT_EQ(core.OpenIssuedTicks().size(), 1);
-  ASSERT_TRUE(core.SubmitCommit(CommitFor(registration, 0, 0.2)).step_completed.has_value());
-  ASSERT_TRUE(core.UpdateSnapshot(snapshot.get(), &error)) << error;
-  EXPECT_DOUBLE_EQ(snapshot->data()->time, core.simulation_time());
+  ASSERT_EQ(core.OpenIssuedTicks().response.size(), 1);
+  ASSERT_TRUE(core.SubmitCommit(CommitFor(registration, 0, 0.2)).effects.step_completed.has_value());
+  ASSERT_TRUE(core.UpdateSnapshot(*snapshot, &error)) << error;
+  EXPECT_DOUBLE_EQ(snapshot->data()->time, core.state().simulation_time_s);
 }
 
 TEST(SimulationCoreTest, RejectsSnapshotFromAnotherCoreOrModelGeneration) {
@@ -844,32 +869,30 @@ TEST(SimulationCoreTest, RejectsSnapshotFromAnotherCoreOrModelGeneration) {
   auto snapshot = first.CreateSnapshot(&error);
   ASSERT_NE(snapshot, nullptr) << error;
 
-  EXPECT_FALSE(second.UpdateSnapshot(snapshot.get(), &error));
+  EXPECT_FALSE(second.UpdateSnapshot(*snapshot, &error));
   EXPECT_NE(error.find("does not belong"), std::string::npos);
 
-  ASSERT_TRUE(first.LoadModel(MUJOCO_SIM_CORE_DUAL_TEST_MODEL, &error))
+  ASSERT_TRUE(LoadModel(&first, MUJOCO_SIM_CORE_DUAL_TEST_MODEL, &error))
       << error;
-  EXPECT_FALSE(first.UpdateSnapshot(snapshot.get(), &error));
+  EXPECT_FALSE(first.UpdateSnapshot(*snapshot, &error));
   EXPECT_NE(error.find("does not belong"), std::string::npos);
 }
 
-TEST(SimulationCoreTest, ReusedMovedFromCoresKeepSnapshotOwnershipDistinct) {
+TEST(SimulationCoreTest, MoveTransfersSnapshotOwnershipToDestination) {
   auto first = LoadedCore();
   auto second = LoadedCore();
+  std::string error;
+  auto snapshot = first.CreateSnapshot(&error);
+  ASSERT_NE(snapshot, nullptr) << error;
+
   auto first_destination = std::move(first);
   auto second_destination = std::move(second);
   EXPECT_TRUE(first_destination.IsModelLoaded());
   EXPECT_TRUE(second_destination.IsModelLoaded());
-
-  std::string error;
-  ASSERT_TRUE(first.LoadModel(MUJOCO_SIM_CORE_TEST_MODEL, &error)) << error;
-  ASSERT_TRUE(second.LoadModel(MUJOCO_SIM_CORE_TEST_MODEL, &error)) << error;
-  auto snapshot = first.CreateSnapshot(&error);
-  ASSERT_NE(snapshot, nullptr) << error;
-
-  EXPECT_FALSE(second.UpdateSnapshot(snapshot.get(), &error));
+  EXPECT_TRUE(first_destination.UpdateSnapshot(*snapshot, &error)) << error;
+  EXPECT_FALSE(second_destination.UpdateSnapshot(*snapshot, &error));
   EXPECT_NE(error.find("does not belong"), std::string::npos);
-  EXPECT_EQ(second.CloneSnapshot(*snapshot, &error), nullptr);
+  EXPECT_EQ(second_destination.CloneSnapshot(*snapshot, &error), nullptr);
   EXPECT_NE(error.find("invalid or stale"), std::string::npos);
 }
 
@@ -877,20 +900,20 @@ TEST(SimulationCoreTest, RejectsUnknownAndConflictingResources) {
   auto core = LoadedCore();
   auto bad = BasicRegisterRequest("bad");
   bad.set_observation_names(0, "missing_sensor");
-  EXPECT_EQ(core.RegisterAdapter(bad).code(), mujoco_sim::v2::NOT_FOUND);
+  EXPECT_EQ(core.RegisterAdapter(bad).response.code(), mujoco_sim::v2::NOT_FOUND);
 
-  auto first = core.RegisterAdapter(BasicRegisterRequest("first"));
+  auto first = core.RegisterAdapter(BasicRegisterRequest("first")).response;
   EXPECT_EQ(first.code(), mujoco_sim::v2::OK);
-  auto conflict = core.RegisterAdapter(BasicRegisterRequest("second"));
+  auto conflict = core.RegisterAdapter(BasicRegisterRequest("second")).response;
   EXPECT_EQ(conflict.code(), mujoco_sim::v2::RESOURCE_CONFLICT);
 }
 
 TEST(SimulationCoreTest, ActivatesAndPublishesTickWithObservation) {
   auto core = LoadedCore();
   const auto registration = RegisterAndActivate(&core);
-  const auto ticks = core.OpenIssuedTicks();
+  const auto ticks = core.OpenIssuedTicks().response;
   ASSERT_EQ(ticks.size(), 1);
-  EXPECT_TRUE(core.tick_open());
+  EXPECT_TRUE(core.state().tick_open);
   EXPECT_EQ(ticks[0]->message.adapter_id(), registration.adapter_id());
   EXPECT_EQ(ticks[0]->message.header().tick_id(), 0);
   EXPECT_GE(ticks[0]->message.observations_size(), 1);
@@ -902,7 +925,8 @@ TEST(SimulationCoreTest, ControllerDeliveryStatusDistinguishesUnsentTickZero) {
   auto status = AdapterStatusFor(core, registration.adapter_id());
   EXPECT_FALSE(status.has_last_delivery_tick_id());
 
-  ASSERT_EQ(core.OpenIssuedTicks().size(), 1U);
+  const auto issued = core.OpenIssuedTicks();
+  ASSERT_EQ(issued.response.size(), 1U);
   status = AdapterStatusFor(core, registration.adapter_id());
   ASSERT_TRUE(status.has_last_delivery_tick_id());
   EXPECT_EQ(status.last_delivery_tick_id(), 0U);
@@ -911,26 +935,26 @@ TEST(SimulationCoreTest, ControllerDeliveryStatusDistinguishesUnsentTickZero) {
 TEST(SimulationCoreTest, StepsWhenBarrierCompletesAndHandlesDuplicateCommits) {
   auto core = LoadedCore();
   const auto registration = RegisterAndActivate(&core);
-  ASSERT_EQ(core.OpenIssuedTicks().size(), 1);
+  ASSERT_EQ(core.OpenIssuedTicks().response.size(), 1);
 
   const auto commit = CommitFor(registration, 0, 0.2);
   const auto duplicate_in_open_tick = core.SubmitCommit(commit);
-  EXPECT_EQ(duplicate_in_open_tick.code, mujoco_sim::v2::OK);
-  EXPECT_TRUE(duplicate_in_open_tick.step_completed.has_value());
+  EXPECT_EQ(duplicate_in_open_tick.response.code, mujoco_sim::v2::OK);
+  EXPECT_TRUE(duplicate_in_open_tick.effects.step_completed.has_value());
   const auto stale_duplicate = core.SubmitCommit(commit);
-  EXPECT_EQ(stale_duplicate.code, mujoco_sim::v2::OK);
-  EXPECT_TRUE(stale_duplicate.duplicate);
-  EXPECT_NE(core.server_state(), mujoco_sim::v2::ERROR_PAUSED);
-  EXPECT_EQ(core.current_tick_id(), 1);
+  EXPECT_EQ(stale_duplicate.response.code, mujoco_sim::v2::OK);
+  EXPECT_TRUE(stale_duplicate.response.duplicate);
+  EXPECT_NE(core.state().server_state, mujoco_sim::v2::ERROR_PAUSED);
+  EXPECT_EQ(core.state().current_tick_id, 1);
 
-  ASSERT_EQ(core.OpenIssuedTicks().size(), 1);
+  ASSERT_EQ(core.OpenIssuedTicks().response.size(), 1);
   const auto duplicate_current_tick = core.SubmitCommit(CommitFor(registration, 1, 0.2));
-  EXPECT_EQ(duplicate_current_tick.code, mujoco_sim::v2::OK);
-  EXPECT_TRUE(duplicate_current_tick.step_completed.has_value());
+  EXPECT_EQ(duplicate_current_tick.response.code, mujoco_sim::v2::OK);
+  EXPECT_TRUE(duplicate_current_tick.effects.step_completed.has_value());
   const auto result = core.SubmitCommit(CommitFor(registration, 1, 0.2));
-  EXPECT_EQ(result.code, mujoco_sim::v2::OK);
-  EXPECT_TRUE(result.duplicate);
-  EXPECT_EQ(core.current_tick_id(), 2);
+  EXPECT_EQ(result.response.code, mujoco_sim::v2::OK);
+  EXPECT_TRUE(result.response.duplicate);
+  EXPECT_EQ(core.state().current_tick_id, 2);
 }
 
 TEST(SimulationCoreTest, DuplicatePayloadMismatchOnlyErrorsItsController) {
@@ -939,56 +963,61 @@ TEST(SimulationCoreTest, DuplicatePayloadMismatchOnlyErrorsItsController) {
       RegisterAndActivate(&core, BasicRegisterRequest("first", "hinge_motor"));
   const auto second =
       RegisterAndActivate(&core, BasicRegisterRequest("second", "second_motor"));
-  ASSERT_EQ(core.active_controller_count(), 2);
-  ASSERT_EQ(core.OpenIssuedTicks().size(), 2);
+  ASSERT_EQ(core.state().active_controller_count, 2);
+  ASSERT_EQ(core.OpenIssuedTicks().response.size(), 2);
 
   const auto first_commit = CommitFor(first, 0, 0.2);
   const auto accepted = core.SubmitCommit(first_commit);
-  EXPECT_EQ(accepted.code, mujoco_sim::v2::OK);
-  EXPECT_FALSE(accepted.step_completed.has_value());
+  EXPECT_EQ(accepted.response.code, mujoco_sim::v2::OK);
+  EXPECT_FALSE(accepted.effects.step_completed.has_value());
 
   const auto same_duplicate = core.SubmitCommit(first_commit);
-  EXPECT_EQ(same_duplicate.code, mujoco_sim::v2::OK);
-  EXPECT_TRUE(same_duplicate.duplicate);
-  EXPECT_NE(core.server_state(), mujoco_sim::v2::ERROR_PAUSED);
+  EXPECT_EQ(same_duplicate.response.code, mujoco_sim::v2::OK);
+  EXPECT_TRUE(same_duplicate.response.duplicate);
+  EXPECT_NE(core.state().server_state, mujoco_sim::v2::ERROR_PAUSED);
 
   const auto different_duplicate = core.SubmitCommit(CommitFor(first, 0, 0.3));
-  EXPECT_EQ(different_duplicate.code, mujoco_sim::v2::INVALID_COMMAND);
-  EXPECT_TRUE(different_duplicate.controller_state_changed);
-  EXPECT_EQ(different_duplicate.controller_state, mujoco_sim::v2::ERROR);
-  EXPECT_EQ(core.server_state(), mujoco_sim::v2::RUNNING);
+  EXPECT_EQ(different_duplicate.response.code, mujoco_sim::v2::INVALID_COMMAND);
+  EXPECT_TRUE(HasChange(different_duplicate.effects,
+                        mujoco_sim::core::AdapterChangeKind::kLocalError));
+  EXPECT_EQ(different_duplicate.effects.adapter_changes.front().new_state,
+            mujoco_sim::v2::ERROR);
+  EXPECT_EQ(core.state().server_state, mujoco_sim::v2::RUNNING);
   EXPECT_EQ(AdapterStatusFor(core, "first").state(),
             mujoco_sim::v2::ERROR);
   EXPECT_EQ(AdapterStatusFor(core, "second").state(),
             mujoco_sim::v2::ACTIVE);
-  EXPECT_TRUE(core.SubmitCommit(CommitFor(second, 0, 0.1)).step_completed.has_value());
+  EXPECT_TRUE(core.SubmitCommit(CommitFor(second, 0, 0.1)).effects.step_completed.has_value());
 }
 
 TEST(SimulationCoreTest, StaleDuplicatePayloadMismatchErrorsItsController) {
   auto core = LoadedCore();
   const auto registration = RegisterAndActivate(&core);
-  ASSERT_EQ(core.OpenIssuedTicks().size(), 1U);
-  ASSERT_TRUE(core.SubmitCommit(CommitFor(registration, 0, 0.2)).step_completed.has_value());
+  const auto issued = core.OpenIssuedTicks();
+  ASSERT_EQ(issued.response.size(), 1U);
+  ASSERT_TRUE(core.SubmitCommit(CommitFor(registration, 0, 0.2)).effects.step_completed.has_value());
 
   const auto mismatch = core.SubmitCommit(CommitFor(registration, 0, 0.3));
-  EXPECT_EQ(mismatch.code, mujoco_sim::v2::INVALID_COMMAND);
-  EXPECT_TRUE(mismatch.controller_state_changed);
-  EXPECT_EQ(mismatch.controller_state, mujoco_sim::v2::ERROR);
-  EXPECT_EQ(core.server_state(), mujoco_sim::v2::RUNNING);
+  EXPECT_EQ(mismatch.response.code, mujoco_sim::v2::INVALID_COMMAND);
+  EXPECT_TRUE(HasChange(mismatch.effects,
+                        mujoco_sim::core::AdapterChangeKind::kLocalError));
+  EXPECT_EQ(mismatch.effects.adapter_changes.front().new_state,
+            mujoco_sim::v2::ERROR);
+  EXPECT_EQ(core.state().server_state, mujoco_sim::v2::RUNNING);
 }
 
 TEST(SimulationCoreTest, UnverifiableOlderCommitIsRejected) {
   auto core = LoadedCore();
   const auto registration = RegisterAndActivate(&core);
-  ASSERT_EQ(core.OpenIssuedTicks().size(), 1U);
+  ASSERT_EQ(core.OpenIssuedTicks().response.size(), 1U);
   const auto first_commit = CommitFor(registration, 0, 0.2);
-  ASSERT_TRUE(core.SubmitCommit(first_commit).step_completed.has_value());
-  ASSERT_EQ(core.OpenIssuedTicks().size(), 1U);
-  ASSERT_TRUE(core.SubmitCommit(CommitFor(registration, 1, 0.1)).step_completed.has_value());
+  ASSERT_TRUE(core.SubmitCommit(first_commit).effects.step_completed.has_value());
+  ASSERT_EQ(core.OpenIssuedTicks().response.size(), 1U);
+  ASSERT_TRUE(core.SubmitCommit(CommitFor(registration, 1, 0.1)).effects.step_completed.has_value());
 
   const auto stale = core.SubmitCommit(first_commit);
-  EXPECT_EQ(stale.code, mujoco_sim::v2::INVALID_TICK);
-  EXPECT_FALSE(stale.controller_state_changed);
+  EXPECT_EQ(stale.response.code, mujoco_sim::v2::INVALID_TICK);
+  EXPECT_TRUE(stale.effects.adapter_changes.empty());
   EXPECT_EQ(AdapterStatusFor(core, registration.adapter_id()).state(),
             mujoco_sim::v2::ACTIVE);
 }
@@ -999,16 +1028,16 @@ TEST(SimulationCoreTest, InvalidCommandOnlyErrorsItsController) {
       RegisterAndActivate(&core, BasicRegisterRequest("first", "hinge_motor"));
   const auto second = RegisterAndActivate(
       &core, BasicRegisterRequest("second", "second_motor"));
-  ASSERT_EQ(core.OpenIssuedTicks().size(), 2);
+  ASSERT_EQ(core.OpenIssuedTicks().response.size(), 2);
 
   auto commit =
       CommitFor(first, 0, std::numeric_limits<double>::quiet_NaN());
   const auto result = core.SubmitCommit(commit);
-  EXPECT_EQ(result.code, mujoco_sim::v2::INVALID_COMMAND);
-  EXPECT_EQ(core.server_state(), mujoco_sim::v2::RUNNING);
+  EXPECT_EQ(result.response.code, mujoco_sim::v2::INVALID_COMMAND);
+  EXPECT_EQ(core.state().server_state, mujoco_sim::v2::RUNNING);
   EXPECT_EQ(AdapterStatusFor(core, "first").state(),
             mujoco_sim::v2::ERROR);
-  EXPECT_TRUE(core.SubmitCommit(CommitFor(second, 0, 0.2)).step_completed.has_value());
+  EXPECT_TRUE(core.SubmitCommit(CommitFor(second, 0, 0.2)).effects.step_completed.has_value());
 
   std::string error;
   auto snapshot = core.CreateSnapshot(&error);
@@ -1019,44 +1048,45 @@ TEST(SimulationCoreTest, InvalidCommandOnlyErrorsItsController) {
 TEST(SimulationCoreTest, IdentityMismatchesDoNotChangeControllerState) {
   auto core = LoadedCore();
   const auto registration = RegisterAndActivate(&core);
-  ASSERT_EQ(core.OpenIssuedTicks().size(), 1);
+  ASSERT_EQ(core.OpenIssuedTicks().response.size(), 1);
 
   auto wrong_session = CommitFor(registration, 0, 0.0);
   wrong_session.mutable_header()->set_session_id(registration.session_id() + 1);
-  EXPECT_EQ(core.SubmitCommit(wrong_session).code,
+  EXPECT_EQ(core.SubmitCommit(wrong_session).response.code,
             mujoco_sim::v2::INVALID_SESSION);
   auto wrong_epoch = CommitFor(registration, 0, 0.0);
   wrong_epoch.mutable_header()->set_epoch(registration.epoch() + 1);
-  EXPECT_EQ(core.SubmitCommit(wrong_epoch).code, mujoco_sim::v2::INVALID_EPOCH);
-  EXPECT_EQ(core.SubmitCommit(CommitFor(registration, 1, 0.0)).code,
+  EXPECT_EQ(core.SubmitCommit(wrong_epoch).response.code, mujoco_sim::v2::INVALID_EPOCH);
+  EXPECT_EQ(core.SubmitCommit(CommitFor(registration, 1, 0.0)).response.code,
             mujoco_sim::v2::INVALID_TICK);
-  EXPECT_EQ(core.server_state(), mujoco_sim::v2::RUNNING);
+  EXPECT_EQ(core.state().server_state, mujoco_sim::v2::RUNNING);
   EXPECT_EQ(AdapterStatusFor(core, "arm").state(),
             mujoco_sim::v2::ACTIVE);
-  EXPECT_TRUE(core.SubmitCommit(CommitFor(registration, 0, 0.1)).step_completed.has_value());
+  EXPECT_TRUE(core.SubmitCommit(CommitFor(registration, 0, 0.1)).effects.step_completed.has_value());
 }
 
 TEST(SimulationCoreTest, RegistersAndActivatesWhileRunning) {
   auto core = LoadedCoreFrom(MUJOCO_SIM_CORE_DUAL_TEST_MODEL);
-  EXPECT_TRUE(core.OpenIssuedTicks().empty());
+  EXPECT_TRUE(core.OpenIssuedTicks().response.empty());
   EXPECT_TRUE(core.CompleteEmptyBarrier().step_completed.has_value());
-  EXPECT_EQ(core.current_tick_id(), 1U);
+  EXPECT_EQ(core.state().current_tick_id, 1U);
 
   const auto first = RegisterAndActivate(
       &core, BasicRegisterRequest("first", "hinge_motor"));
-  ASSERT_EQ(core.OpenIssuedTicks().size(), 1);
+  ASSERT_EQ(core.OpenIssuedTicks().response.size(), 1);
   const auto second_registration =
-      core.RegisterAdapter(BasicRegisterRequest("second", "second_motor"));
+      core.RegisterAdapter(BasicRegisterRequest("second", "second_motor"))
+          .response;
   ASSERT_EQ(second_registration.code(), mujoco_sim::v2::OK);
   mujoco_sim::v2::ActivateAdapterRequest activate;
   activate.set_adapter_id("second");
   activate.set_role(mujoco_sim::v2::CONTROLLER);
   activate.set_session_id(second_registration.session_id());
   activate.set_epoch(second_registration.epoch());
-  EXPECT_EQ(core.ActivateAdapter(activate).code(), mujoco_sim::v2::OK);
-  EXPECT_EQ(core.OpenIssuedTicks().size(), 1);
-  EXPECT_TRUE(core.SubmitCommit(CommitFor(first, 1, 0.1)).step_completed.has_value());
-  EXPECT_EQ(core.OpenIssuedTicks().size(), 2);
+  EXPECT_EQ(core.ActivateAdapter(activate).response.code(), mujoco_sim::v2::OK);
+  EXPECT_EQ(core.OpenIssuedTicks().response.size(), 1);
+  EXPECT_TRUE(core.SubmitCommit(CommitFor(first, 1, 0.1)).effects.step_completed.has_value());
+  EXPECT_EQ(core.OpenIssuedTicks().response.size(), 2);
 }
 
 TEST(SimulationCoreTest, UnregistersRequiredControllerDuringOpenTick) {
@@ -1065,8 +1095,8 @@ TEST(SimulationCoreTest, UnregistersRequiredControllerDuringOpenTick) {
       RegisterAndActivate(&core, BasicRegisterRequest("first", "hinge_motor"));
   const auto second = RegisterAndActivate(
       &core, BasicRegisterRequest("second", "second_motor"));
-  ASSERT_EQ(core.OpenIssuedTicks().size(), 2);
-  EXPECT_FALSE(core.SubmitCommit(CommitFor(first, 0, 0.2)).step_completed.has_value());
+  ASSERT_EQ(core.OpenIssuedTicks().response.size(), 2);
+  EXPECT_FALSE(core.SubmitCommit(CommitFor(first, 0, 0.2)).effects.step_completed.has_value());
 
   mujoco_sim::v2::UnregisterAdapterRequest request;
   request.set_adapter_id("second");
@@ -1074,7 +1104,7 @@ TEST(SimulationCoreTest, UnregistersRequiredControllerDuringOpenTick) {
   request.set_session_id(second.session_id());
   request.set_epoch(second.epoch());
   EXPECT_EQ(core.UnregisterAdapter(request).response.code(), mujoco_sim::v2::OK);
-  EXPECT_EQ(core.current_tick_id(), 1U);
+  EXPECT_EQ(core.state().current_tick_id, 1U);
   EXPECT_EQ(core.MakeStatus().adapters_size(), 1);
 }
 
@@ -1084,12 +1114,12 @@ TEST(SimulationCoreTest, DefersUnregisterControlWriteUntilBarrierCompletes) {
       RegisterAndActivate(&core, BasicRegisterRequest("first", "hinge_motor"));
   const auto second = RegisterAndActivate(
       &core, BasicRegisterRequest("second", "second_motor"));
-  ASSERT_EQ(core.OpenIssuedTicks().size(), 2U);
+  ASSERT_EQ(core.OpenIssuedTicks().response.size(), 2U);
   ASSERT_FALSE(
-      core.SubmitCommit(CommitFor(first, 0, 0.2)).step_completed.has_value());
+      core.SubmitCommit(CommitFor(first, 0, 0.2)).effects.step_completed.has_value());
   ASSERT_TRUE(
-      core.SubmitCommit(CommitFor(second, 0, 0.3)).step_completed.has_value());
-  ASSERT_EQ(core.OpenIssuedTicks().size(), 2U);
+      core.SubmitCommit(CommitFor(second, 0, 0.3)).effects.step_completed.has_value());
+  ASSERT_EQ(core.OpenIssuedTicks().response.size(), 2U);
 
   mujoco_sim::v2::UnregisterAdapterRequest request;
   request.set_adapter_id("first");
@@ -1098,7 +1128,7 @@ TEST(SimulationCoreTest, DefersUnregisterControlWriteUntilBarrierCompletes) {
   request.set_epoch(first.epoch());
   const auto unregistered = core.UnregisterAdapter(request);
   ASSERT_EQ(unregistered.response.code(), mujoco_sim::v2::OK);
-  EXPECT_FALSE(unregistered.step_completed.has_value());
+  EXPECT_FALSE(unregistered.effects.step_completed.has_value());
 
   std::string error;
   auto before_completion = core.CreateSnapshot(&error);
@@ -1106,7 +1136,7 @@ TEST(SimulationCoreTest, DefersUnregisterControlWriteUntilBarrierCompletes) {
   EXPECT_DOUBLE_EQ(before_completion->data()->ctrl[0], 0.2);
 
   ASSERT_TRUE(
-      core.SubmitCommit(CommitFor(second, 1, 0.1)).step_completed.has_value());
+      core.SubmitCommit(CommitFor(second, 1, 0.1)).effects.step_completed.has_value());
   auto after_completion = core.CreateSnapshot(&error);
   ASSERT_NE(after_completion, nullptr) << error;
   EXPECT_DOUBLE_EQ(after_completion->data()->ctrl[0], 0.0);
@@ -1117,16 +1147,16 @@ TEST(SimulationCoreTest, ExpiresProvisionalControllerAndReleasesActuator) {
   options.activation_timeout_ms = 10;
   mujoco_sim::core::SimulationCore core(options);
   std::string error;
-  ASSERT_TRUE(core.LoadModel(MUJOCO_SIM_CORE_TEST_MODEL, &error)) << error;
-  EXPECT_EQ(core.RegisterAdapter(BasicRegisterRequest("first")).code(),
+  ASSERT_TRUE(LoadModel(&core, MUJOCO_SIM_CORE_TEST_MODEL, &error)) << error;
+  EXPECT_EQ(core.RegisterAdapter(BasicRegisterRequest("first")).response.code(),
             mujoco_sim::v2::OK);
   const auto deadlines = core.CheckDeadlines(
       std::chrono::steady_clock::now() + std::chrono::milliseconds(100));
-  ASSERT_EQ(deadlines.transitions.size(), 1U);
-  EXPECT_EQ(deadlines.transitions[0].old_state, mujoco_sim::v2::PROVISIONAL);
-  EXPECT_EQ(deadlines.transitions[0].new_state,
+  ASSERT_EQ(deadlines.adapter_changes.size(), 1U);
+  EXPECT_EQ(deadlines.adapter_changes[0].old_state, mujoco_sim::v2::PROVISIONAL);
+  EXPECT_EQ(deadlines.adapter_changes[0].new_state,
             mujoco_sim::v2::UNREGISTERED);
-  EXPECT_EQ(core.RegisterAdapter(BasicRegisterRequest("second")).code(),
+  EXPECT_EQ(core.RegisterAdapter(BasicRegisterRequest("second")).response.code(),
             mujoco_sim::v2::OK);
 }
 
@@ -1136,19 +1166,19 @@ TEST(SimulationCoreTest, TimesOutOneControllerAndContinuesBarrier) {
       RegisterAndActivate(&core, BasicRegisterRequest("first", "hinge_motor"));
   const auto second = RegisterAndActivate(
       &core, BasicRegisterRequest("second", "second_motor"));
-  ASSERT_EQ(core.OpenIssuedTicks().size(), 2);
-  EXPECT_FALSE(core.SubmitCommit(CommitFor(first, 0, 0.2)).step_completed.has_value());
-  EXPECT_TRUE(core.SubmitCommit(CommitFor(second, 0, 0.3)).step_completed.has_value());
-  ASSERT_EQ(core.OpenIssuedTicks().size(), 2);
-  EXPECT_FALSE(core.SubmitCommit(CommitFor(first, 1, 0.2)).step_completed.has_value());
+  ASSERT_EQ(core.OpenIssuedTicks().response.size(), 2);
+  EXPECT_FALSE(core.SubmitCommit(CommitFor(first, 0, 0.2)).effects.step_completed.has_value());
+  EXPECT_TRUE(core.SubmitCommit(CommitFor(second, 0, 0.3)).effects.step_completed.has_value());
+  ASSERT_EQ(core.OpenIssuedTicks().response.size(), 2);
+  EXPECT_FALSE(core.SubmitCommit(CommitFor(first, 1, 0.2)).effects.step_completed.has_value());
 
   const auto deadlines = core.CheckDeadlines(
       std::chrono::steady_clock::now() + std::chrono::milliseconds(100));
-  ASSERT_EQ(deadlines.transitions.size(), 1U);
-  EXPECT_EQ(deadlines.transitions[0].adapter_id, "second");
-  EXPECT_EQ(deadlines.transitions[0].new_state, mujoco_sim::v2::TIMED_OUT);
+  ASSERT_EQ(deadlines.adapter_changes.size(), 1U);
+  EXPECT_EQ(deadlines.adapter_changes[0].adapter_id, "second");
+  EXPECT_EQ(deadlines.adapter_changes[0].new_state, mujoco_sim::v2::TIMED_OUT);
   EXPECT_TRUE(deadlines.step_completed.has_value());
-  EXPECT_EQ(core.server_state(), mujoco_sim::v2::RUNNING);
+  EXPECT_EQ(core.state().server_state, mujoco_sim::v2::RUNNING);
   const auto timed_out = AdapterStatusFor(core, "second");
   EXPECT_EQ(timed_out.state(), mujoco_sim::v2::TIMED_OUT);
   EXPECT_EQ(timed_out.timeout_count(), 1U);
@@ -1157,7 +1187,7 @@ TEST(SimulationCoreTest, TimesOutOneControllerAndContinuesBarrier) {
   auto snapshot = core.CreateSnapshot(&error);
   ASSERT_NE(snapshot, nullptr) << error;
   EXPECT_DOUBLE_EQ(snapshot->data()->ctrl[1], 0.0);
-  EXPECT_EQ(core.OpenIssuedTicks().size(), 2);
+  EXPECT_EQ(core.OpenIssuedTicks().response.size(), 2);
 }
 
 TEST(SimulationCoreTest, KeepsIssuedTickPayloadImmutableAfterTimeout) {
@@ -1168,7 +1198,7 @@ TEST(SimulationCoreTest, KeepsIssuedTickPayloadImmutableAfterTimeout) {
   auto second_request = BasicRegisterRequest("second", "second_motor");
   second_request.set_timeout_ms(100);
   const auto second = RegisterAndActivate(&core, second_request);
-  const auto issued = core.OpenIssuedTicks();
+  const auto issued = core.OpenIssuedTicks().response;
   ASSERT_EQ(issued.size(), 2);
   const auto first_tick = std::find_if(
       issued.begin(), issued.end(),
@@ -1182,9 +1212,9 @@ TEST(SimulationCoreTest, KeepsIssuedTickPayloadImmutableAfterTimeout) {
 
   const auto deadlines = core.CheckDeadlines(
       std::chrono::steady_clock::now() + std::chrono::milliseconds(20));
-  ASSERT_EQ(deadlines.transitions.size(), 1U);
+  ASSERT_EQ(deadlines.adapter_changes.size(), 1U);
   EXPECT_FALSE(deadlines.step_completed.has_value());
-  const auto retransmitted = core.OpenIssuedTicks();
+  const auto retransmitted = core.OpenIssuedTicks().response;
   const auto repeated_first = std::find_if(
       retransmitted.begin(), retransmitted.end(),
       [](const auto& tick) { return tick->message.adapter_id() == "first"; });
@@ -1193,7 +1223,7 @@ TEST(SimulationCoreTest, KeepsIssuedTickPayloadImmutableAfterTimeout) {
   EXPECT_EQ((*first_tick)->serialized_bytes,
             (*repeated_first)->serialized_bytes);
   EXPECT_EQ((*repeated_first)->serialization_count, 1U);
-  EXPECT_TRUE(core.SubmitCommit(CommitFor(second, 0, 0.1)).step_completed.has_value());
+  EXPECT_TRUE(core.SubmitCommit(CommitFor(second, 0, 0.1)).effects.step_completed.has_value());
   EXPECT_FALSE((*first_tick)->current.load());
   (void)first;
 }
@@ -1204,30 +1234,31 @@ TEST(SimulationCoreTest, RecoversTimedOutControllerOnNextTick) {
       RegisterAndActivate(&core, BasicRegisterRequest("first", "hinge_motor"));
   const auto second = RegisterAndActivate(
       &core, BasicRegisterRequest("second", "second_motor"));
-  ASSERT_EQ(core.OpenIssuedTicks().size(), 2);
-  EXPECT_FALSE(core.SubmitCommit(CommitFor(first, 0, 0.1)).step_completed.has_value());
+  ASSERT_EQ(core.OpenIssuedTicks().response.size(), 2);
+  EXPECT_FALSE(core.SubmitCommit(CommitFor(first, 0, 0.1)).effects.step_completed.has_value());
   EXPECT_TRUE(core.CheckDeadlines(
                       std::chrono::steady_clock::now() +
                       std::chrono::milliseconds(100))
                   .step_completed.has_value());
 
-  ASSERT_EQ(core.OpenIssuedTicks().size(), 2);
+  ASSERT_EQ(core.OpenIssuedTicks().response.size(), 2);
   const auto recovery = core.SubmitCommit(CommitFor(second, 1, 0.3));
-  EXPECT_EQ(recovery.code, mujoco_sim::v2::OK);
-  EXPECT_TRUE(recovery.recovery_pending);
-  EXPECT_FALSE(recovery.step_completed.has_value());
+  EXPECT_EQ(recovery.response.code, mujoco_sim::v2::OK);
+  EXPECT_TRUE(HasChange(recovery.effects,
+                        mujoco_sim::core::AdapterChangeKind::kRecoveryPending));
+  EXPECT_FALSE(recovery.effects.step_completed.has_value());
   const auto duplicate = core.SubmitCommit(CommitFor(second, 1, 0.3));
-  EXPECT_EQ(duplicate.code, mujoco_sim::v2::OK);
-  EXPECT_TRUE(duplicate.duplicate);
-  EXPECT_TRUE(core.SubmitCommit(CommitFor(first, 1, 0.1)).step_completed.has_value());
-  ASSERT_EQ(core.OpenIssuedTicks().size(), 2);
+  EXPECT_EQ(duplicate.response.code, mujoco_sim::v2::OK);
+  EXPECT_TRUE(duplicate.response.duplicate);
+  EXPECT_TRUE(core.SubmitCommit(CommitFor(first, 1, 0.1)).effects.step_completed.has_value());
+  ASSERT_EQ(core.OpenIssuedTicks().response.size(), 2);
   EXPECT_EQ(AdapterStatusFor(core, "second").state(),
             mujoco_sim::v2::ACTIVE);
   EXPECT_TRUE(AdapterStatusFor(core, "second").required_for_barrier());
   const auto delayed_duplicate =
       core.SubmitCommit(CommitFor(second, 1, 0.3));
-  EXPECT_EQ(delayed_duplicate.code, mujoco_sim::v2::OK);
-  EXPECT_TRUE(delayed_duplicate.duplicate);
+  EXPECT_EQ(delayed_duplicate.response.code, mujoco_sim::v2::OK);
+  EXPECT_TRUE(delayed_duplicate.response.duplicate);
   EXPECT_EQ(AdapterStatusFor(core, "second").state(),
             mujoco_sim::v2::ACTIVE);
 }
@@ -1235,9 +1266,9 @@ TEST(SimulationCoreTest, RecoversTimedOutControllerOnNextTick) {
 TEST(SimulationCoreTest, KeepsHeartbeatTickMonotonic) {
   auto core = LoadedCore();
   const auto registration = RegisterAndActivate(&core);
-  ASSERT_EQ(core.OpenIssuedTicks().size(), 1U);
-  EXPECT_TRUE(core.SubmitCommit(CommitFor(registration, 0, 0.1)).step_completed.has_value());
-  ASSERT_EQ(core.OpenIssuedTicks().size(), 1U);
+  ASSERT_EQ(core.OpenIssuedTicks().response.size(), 1U);
+  EXPECT_TRUE(core.SubmitCommit(CommitFor(registration, 0, 0.1)).effects.step_completed.has_value());
+  ASSERT_EQ(core.OpenIssuedTicks().response.size(), 1U);
 
   mujoco_sim::v2::AdapterHeartbeat heartbeat;
   heartbeat.set_adapter_id(registration.adapter_id());
@@ -1260,17 +1291,17 @@ TEST(SimulationCoreTest, KeepsHeartbeatTickMonotonic) {
 TEST(SimulationCoreTest, ReplacesTimedOutControllerWithNewSession) {
   auto core = LoadedCore();
   const auto old_registration = RegisterAndActivate(&core);
-  ASSERT_EQ(core.OpenIssuedTicks().size(), 1);
+  ASSERT_EQ(core.OpenIssuedTicks().response.size(), 1);
   EXPECT_TRUE(core.CheckDeadlines(
                       std::chrono::steady_clock::now() +
                       std::chrono::milliseconds(100))
                   .step_completed.has_value());
 
-  const auto replacement = core.RegisterAdapter(BasicRegisterRequest());
+  const auto replacement = core.RegisterAdapter(BasicRegisterRequest()).response;
   ASSERT_EQ(replacement.code(), mujoco_sim::v2::OK);
   EXPECT_NE(replacement.session_id(), old_registration.session_id());
   EXPECT_NE(replacement.message().find("replaced"), std::string::npos);
-  EXPECT_EQ(core.SubmitCommit(CommitFor(old_registration, 0, 0.1)).code,
+  EXPECT_EQ(core.SubmitCommit(CommitFor(old_registration, 0, 0.1)).response.code,
             mujoco_sim::v2::INVALID_SESSION);
   EXPECT_EQ(AdapterStatusFor(core, "arm").state(),
             mujoco_sim::v2::PROVISIONAL);
@@ -1281,29 +1312,104 @@ TEST(SimulationCoreTest, CanDisableTimedOutControllerReplacement) {
   options.allow_timed_out_adapter_replacement = false;
   mujoco_sim::core::SimulationCore core(options);
   std::string error;
-  ASSERT_TRUE(core.LoadModel(MUJOCO_SIM_CORE_TEST_MODEL, &error)) << error;
+  ASSERT_TRUE(LoadModel(&core, MUJOCO_SIM_CORE_TEST_MODEL, &error)) << error;
   RegisterAndActivate(&core);
-  ASSERT_EQ(core.OpenIssuedTicks().size(), 1);
+  ASSERT_EQ(core.OpenIssuedTicks().response.size(), 1);
   EXPECT_TRUE(core.CheckDeadlines(
                       std::chrono::steady_clock::now() +
                       std::chrono::milliseconds(100))
                   .step_completed.has_value());
-  EXPECT_EQ(core.RegisterAdapter(BasicRegisterRequest()).code(),
+  EXPECT_EQ(core.RegisterAdapter(BasicRegisterRequest()).response.code(),
             mujoco_sim::v2::ALREADY_EXISTS);
 }
 
 TEST(SimulationCoreTest, FatalErrorUpdatesControllerStateTimestamp) {
   auto core = LoadedCore();
   const auto registration = RegisterAndActivate(&core);
-  ASSERT_EQ(core.OpenIssuedTicks().size(), 1U);
-  EXPECT_TRUE(core.SubmitCommit(CommitFor(registration, 0, 0.0)).step_completed.has_value());
-  ASSERT_EQ(core.current_tick_id(), 1U);
+  ASSERT_EQ(core.OpenIssuedTicks().response.size(), 1U);
+  EXPECT_TRUE(core.SubmitCommit(CommitFor(registration, 0, 0.0)).effects.step_completed.has_value());
+  ASSERT_EQ(core.state().current_tick_id, 1U);
 
-  core.EnterFatalError("fatal transport error");
+  const auto effects = core.MarkFailed("fatal transport error");
+  ASSERT_EQ(effects.adapter_changes.size(), 1U);
+  EXPECT_EQ(effects.adapter_changes.front().kind,
+            mujoco_sim::core::AdapterChangeKind::kServerFailed);
+  EXPECT_EQ(effects.adapter_changes.front().old_state,
+            mujoco_sim::v2::ACTIVE);
+  EXPECT_EQ(effects.adapter_changes.front().new_state,
+            mujoco_sim::v2::ERROR);
   const auto status = AdapterStatusFor(core, "arm");
   EXPECT_EQ(status.state(), mujoco_sim::v2::ERROR);
   EXPECT_EQ(status.state_since_tick_id(), 1U);
   EXPECT_EQ(status.message(), "fatal transport error");
+}
+
+TEST(SimulationCoreTest, EngineEffectsDescribeLifecycleTransitions) {
+  auto core = LoadedCore();
+
+  const auto registered = core.RegisterAdapter(BasicRegisterRequest());
+  ASSERT_EQ(registered.response.code(), mujoco_sim::v2::OK);
+  EXPECT_TRUE(HasChange(
+      registered.effects, mujoco_sim::core::AdapterChangeKind::kRegistered));
+
+  mujoco_sim::v2::ActivateAdapterRequest activate;
+  activate.set_adapter_id(registered.response.adapter_id());
+  activate.set_role(mujoco_sim::v2::CONTROLLER);
+  activate.set_session_id(registered.response.session_id());
+  activate.set_epoch(registered.response.epoch());
+  const auto activated = core.ActivateAdapter(activate);
+  ASSERT_EQ(activated.response.code(), mujoco_sim::v2::OK);
+  EXPECT_TRUE(HasChange(
+      activated.effects, mujoco_sim::core::AdapterChangeKind::kActivated));
+
+  const auto issued = core.OpenIssuedTicks();
+  ASSERT_EQ(issued.response.size(), 1U);
+  const auto timed_out = core.CheckDeadlines(
+      std::chrono::steady_clock::now() + std::chrono::seconds(1));
+  EXPECT_TRUE(HasChange(
+      timed_out, mujoco_sim::core::AdapterChangeKind::kTimedOut));
+
+  const auto recovery = core.SubmitCommit(
+      CommitFor(registered.response, issued.response.front()->identity.tick_id,
+                0.25));
+  ASSERT_EQ(recovery.response.code, mujoco_sim::v2::OK);
+  EXPECT_TRUE(HasChange(
+      recovery.effects,
+      mujoco_sim::core::AdapterChangeKind::kRecoveryPending));
+  const auto reopened = core.OpenIssuedTicks();
+  EXPECT_TRUE(HasChange(
+      reopened.effects, mujoco_sim::core::AdapterChangeKind::kRecovered));
+
+  mujoco_sim::v2::UnregisterAdapterRequest unregister;
+  unregister.set_adapter_id(registered.response.adapter_id());
+  unregister.set_role(mujoco_sim::v2::CONTROLLER);
+  unregister.set_session_id(registered.response.session_id());
+  unregister.set_epoch(registered.response.epoch());
+  const auto unregistered = core.UnregisterAdapter(unregister);
+  ASSERT_EQ(unregistered.response.code(), mujoco_sim::v2::OK);
+  EXPECT_TRUE(HasChange(
+      unregistered.effects,
+      mujoco_sim::core::AdapterChangeKind::kUnregistered));
+
+  const auto provisional = core.RegisterAdapter(BasicRegisterRequest("late"));
+  ASSERT_EQ(provisional.response.code(), mujoco_sim::v2::OK);
+  const auto expired = core.CheckDeadlines(
+      std::chrono::steady_clock::now() + std::chrono::seconds(10));
+  EXPECT_TRUE(HasChange(
+      expired, mujoco_sim::core::AdapterChangeKind::kActivationExpired));
+
+  const auto observer = RegisterAndActivateObserver(&core, ObserverRequest());
+  const auto observer_timeout = core.CheckDeadlines(
+      std::chrono::steady_clock::now() + std::chrono::seconds(1));
+  ASSERT_TRUE(HasChange(
+      observer_timeout, mujoco_sim::core::AdapterChangeKind::kTimedOut));
+  const auto replacement = core.RegisterAdapter(ObserverRequest());
+  ASSERT_EQ(replacement.response.code(), mujoco_sim::v2::OK);
+  EXPECT_TRUE(HasChange(
+      replacement.effects, mujoco_sim::core::AdapterChangeKind::kReplaced));
+  ASSERT_EQ(replacement.effects.adapter_changes.size(), 1U);
+  EXPECT_EQ(replacement.effects.adapter_changes.front().previous_session_id,
+            observer.session_id());
 }
 
 }  // namespace

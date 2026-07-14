@@ -10,6 +10,10 @@ option(MUJOCO_SIM_USE_BUNDLED_MUJOCO
   "Use the MuJoCo distribution bundled in this repository" ON)
 option(MUJOCO_SIM_BUILD_PERFORMANCE_BENCHMARK
   "Build the phase-one deterministic performance benchmark" OFF)
+option(MUJOCO_SIM_ENABLE_QUALITY_GATES
+  "Enable pinned complexity regression checks in CTest" OFF)
+option(MUJOCO_SIM_BUILD_DOCS
+  "Build warning-clean public API documentation with Doxygen" OFF)
 
 if(MUJOCO_SIM_USE_BUNDLED_MUJOCO)
   set(MUJOCO_ROOT
@@ -31,7 +35,23 @@ else()
 endif()
 
 add_library(${PROJECT_NAME}
+  src/internal/adapter_lifecycle.cpp
+  src/internal/adapter_registration.cpp
+  src/internal/adapter_registry.cpp
+  src/internal/barrier_coordinator.cpp
+  src/internal/controller_state_machine.cpp
+  src/internal/commit_engine.cpp
+  src/internal/engine_effects.cpp
+  src/internal/lockstep_engine.cpp
+  src/internal/model_runtime.cpp
+  src/internal/observation_scheduler.cpp
+  src/internal/resource_catalog.cpp
+  src/internal/simulation_engine_model.cpp
+  src/internal/snapshot_manager.cpp
+  src/internal/status_projection.cpp
+  src/internal/tick_store.cpp
   src/simulation_core.cpp
+  src/simulation_core_facade.cpp
 )
 add_library(mujoco_sim::core ALIAS ${PROJECT_NAME})
 
@@ -91,7 +111,11 @@ install(FILES
 include(CTest)
 if(BUILD_TESTING)
   find_package(GTest REQUIRED)
-  add_executable(core_test test/simulation_core_test.cpp)
+  add_executable(core_test
+    test/controller_state_machine_test.cpp
+    test/simulation_core_test.cpp
+  )
+  target_include_directories(core_test PRIVATE src)
   target_link_libraries(core_test PRIVATE
     ${PROJECT_NAME}
     GTest::gtest_main
@@ -105,6 +129,38 @@ if(BUILD_TESTING)
     set_target_properties(core_test PROPERTIES BUILD_RPATH "${MUJOCO_ROOT}/lib")
   endif()
   add_test(NAME core_test COMMAND core_test)
+endif()
+
+if(MUJOCO_SIM_ENABLE_QUALITY_GATES)
+  find_package(Python3 REQUIRED COMPONENTS Interpreter)
+  find_program(LIZARD_EXECUTABLE NAMES lizard REQUIRED)
+  get_filename_component(MUJOCO_SIM_REPOSITORY_ROOT
+    "${CMAKE_CURRENT_SOURCE_DIR}/../.." ABSOLUTE)
+  add_test(NAME core_complexity
+    COMMAND "${Python3_EXECUTABLE}"
+      "${MUJOCO_SIM_REPOSITORY_ROOT}/tools/quality/check_simulation_core_complexity.py"
+      --lizard "${LIZARD_EXECUTABLE}"
+      --baseline
+        "${MUJOCO_SIM_REPOSITORY_ROOT}/tools/quality/simulation_core_complexity_baseline.csv"
+      --root "${MUJOCO_SIM_REPOSITORY_ROOT}"
+  )
+  add_test(NAME core_complexity_checker_test
+    COMMAND "${Python3_EXECUTABLE}"
+      "${MUJOCO_SIM_REPOSITORY_ROOT}/tools/quality/test_check_simulation_core_complexity.py"
+  )
+endif()
+
+if(MUJOCO_SIM_BUILD_DOCS)
+  find_package(Doxygen REQUIRED)
+  set(DOXYGEN_EXTRACT_ALL NO)
+  set(DOXYGEN_EXTRACT_PRIVATE NO)
+  set(DOXYGEN_WARN_IF_UNDOCUMENTED YES)
+  set(DOXYGEN_WARN_AS_ERROR FAIL_ON_WARNINGS)
+  set(DOXYGEN_QUIET YES)
+  doxygen_add_docs(mujoco_sim_core_docs
+    "${CMAKE_CURRENT_SOURCE_DIR}/include/mujoco_sim/core"
+    COMMENT "Generate warning-clean SimulationCore API documentation"
+  )
 endif()
 
 if(MUJOCO_SIM_BUILD_PERFORMANCE_BENCHMARK)

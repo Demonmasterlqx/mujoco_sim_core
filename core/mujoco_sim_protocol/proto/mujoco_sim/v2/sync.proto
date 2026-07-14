@@ -2,6 +2,13 @@ syntax = "proto3";
 
 package mujoco_sim.v2;
 
+// Protocol V2 compatibility contract:
+// - Major versions must match exactly.
+// - Minor versions must match for session-establishing requests in V2.0.
+// - Existing field numbers and enum values are never reused.
+// - Retransmitted Tick, Commit, and frame messages retain identity fields and
+//   payload bytes; unknown fields must be tolerated by compatible readers.
+
 enum ErrorCode {
   ERROR_CODE_UNSPECIFIED = 0;
   OK = 1;
@@ -76,245 +83,432 @@ enum CommitStatus {
   COMMIT_ERROR = 2;
 }
 
+// Identity and timing envelope filled by the message producer.
 message Header {
+  // Target/source server identity; non-empty on addressed session traffic.
   string server_name = 1;
+  // Nonzero registration session; zero is reserved for server-wide messages.
   uint64 session_id = 2;
+  // Model generation, incremented after each successful model load.
   uint64 epoch = 3;
+  // Barrier Tick; monotonic within an epoch and unchanged on retransmission.
   uint64 tick_id = 4;
+  // Producer wall-clock timestamp in nanoseconds since the Unix epoch.
   uint64 timestamp_unix_nanos = 5;
+  // Producer protocol major version; V2 peers require value 2.
   uint32 protocol_major = 6;
+  // Negotiated protocol minor version; unchanged during a session.
   uint32 protocol_minor = 7;
+  // MuJoCo simulation time in seconds when meaningful for the message stage.
   optional double simulation_time_s = 8;
 }
 
+// Model-derived observation or command metadata filled by the server.
 message ResourceDescriptor {
+  // Non-empty MuJoCo resource name, unique within its ResourceType.
   string name = 1;
+  // Whether this descriptor is readable observation or writable command data.
   ResourceType type = 2;
+  // Number of scalar values in each block; always nonzero.
   uint32 dimension = 3;
+  // MuJoCo model-local object index; valid only for the current epoch.
   int32 mujoco_id = 4;
+  // MuJoCo sensor/object type numeric value.
   int32 mujoco_type = 5;
+  // MuJoCo sensor datatype numeric value; zero when not applicable.
   int32 mujoco_datatype = 6;
+  // True when ctrl_min/ctrl_max are enforced for a command.
   bool has_ctrl_range = 7;
+  // Inclusive actuator control minimum, valid when has_ctrl_range is true.
   double ctrl_min = 8;
+  // Inclusive actuator control maximum, valid when has_ctrl_range is true.
   double ctrl_max = 9;
+  // MuJoCo computation stage required by the sensor.
   int32 mujoco_stage = 10;
+  // MuJoCo interval period in simulation seconds; zero means non-interval.
   double interval_period_s = 11;
+  // MuJoCo interval phase in simulation seconds.
   double interval_phase_s = 12;
+  // Sensor delay in simulation seconds.
   double delay_s = 13;
+  // Coordinate frame name; empty when the quantity has no frame.
   string frame_id = 14;
+  // UCUM-like unit text; empty when MuJoCo transmission is ambiguous.
   string unit = 15;
+  // Referenced MuJoCo object name; empty when not applicable or unnamed.
   string object_name = 16;
+  // Referenced MuJoCo object type numeric value.
   int32 object_type = 17;
+  // History interpolation mode: zoh, linear, cubic, or empty when disabled.
   string interpolation = 18;
 }
 
+// Immutable ordered resource contract for one adapter session.
 message ResourceLayout {
+  // Observations in the exact order emitted by the server.
   repeated ResourceDescriptor observations = 1;
+  // Commands exclusively owned by the Controller session.
   repeated ResourceDescriptor commands = 2;
+  // Deterministic hash of both ordered descriptor lists.
   bytes layout_hash = 3;
 }
 
+// Client query for a server's current model resource catalog.
 message GetAvailableResourcesRequest {
+  // Target server; empty permits the endpoint's configured server.
   string server_name = 1;
+  // Client protocol major version.
   uint32 protocol_major = 2;
+  // Client protocol minor version.
   uint32 protocol_minor = 3;
 }
 
+// Server response containing resources for one model epoch.
 message GetAvailableResourcesResponse {
+  // Operation result; OK makes epoch and resource lists valid.
   ErrorCode code = 1;
+  // Diagnostic text; clients branch on code rather than this string.
   string message = 2;
+  // Model generation owning all returned descriptors.
   uint64 epoch = 3;
+  // Available readable resources for this epoch.
   repeated ResourceDescriptor observations = 4;
+  // Available exclusively claimable command resources for this epoch.
   repeated ResourceDescriptor commands = 5;
 }
 
+// Observer delivery policy selected at registration.
 message ObservationDelivery {
   oneof schedule {
+    // Deliver every N completed simulation steps; must be at least one.
     uint32 every_n_steps = 1;
+    // Deliver by simulation-time period in seconds; finite and greater than zero.
     double period_s = 2;
   }
 }
 
+// Client request to create one provisional Controller or Observer session.
 message RegisterAdapterRequest {
+  // Exact target server identity; non-empty.
   string server_name = 1;
+  // Stable client-chosen ID; non-empty and valid for use in topic names.
   string adapter_id = 2;
+  // Requested role; CONTROLLER or OBSERVER.
   AdapterRole role = 3;
+  // Client protocol major version; must match the server.
   uint32 protocol_major = 4;
+  // Client protocol minor version negotiated for the new session.
   uint32 protocol_minor = 5;
+  // Requested sensor names; duplicates are invalid.
   repeated string observation_names = 6;
+  // Requested exclusive actuator names; valid only for Controllers.
   repeated string command_names = 7;
+  // Liveness deadline in milliseconds; zero selects the server default.
   uint32 timeout_ms = 8;
+  // Observer-only delivery policy; unset means every completed step.
   ObservationDelivery delivery = 9;
 }
 
+// Server result of provisional registration.
 message RegisterAdapterResponse {
+  // Operation result; remaining identity/layout fields require OK.
   ErrorCode code = 1;
+  // Diagnostic or replacement notice.
   string message = 2;
+  // Echoed adapter ID on success.
   string adapter_id = 3;
+  // Granted role on success.
   AdapterRole role = 4;
+  // New nonzero server-assigned session ID, never reused in-process.
   uint64 session_id = 5;
+  // Model generation to use in all session traffic.
   uint64 epoch = 6;
+  // Immutable resource layout for this session.
   ResourceLayout layout = 7;
+  // PROVISIONAL on success.
   ControllerState state = 8;
 }
 
+// Client request to activate a matching provisional session.
 message ActivateAdapterRequest {
+  // Registered adapter ID.
   string adapter_id = 1;
+  // Registered role.
   AdapterRole role = 2;
+  // Exact nonzero session returned by registration.
   uint64 session_id = 3;
+  // Exact epoch returned by registration.
   uint64 epoch = 4;
 }
 
+// Server result of activation.
 message ActivateAdapterResponse {
+  // Operation result; state is meaningful when OK.
   ErrorCode code = 1;
+  // Diagnostic text.
   string message = 2;
+  // ACTIVE on success.
   ControllerState state = 3;
 }
 
+// Client request to remove one exact adapter session.
 message UnregisterAdapterRequest {
+  // Registered adapter ID.
   string adapter_id = 1;
+  // Registered role.
   AdapterRole role = 2;
+  // Exact session to remove; identity mismatch causes no mutation.
   uint64 session_id = 3;
+  // Exact model epoch; identity mismatch causes no mutation.
   uint64 epoch = 4;
 }
 
+// Server result of unregistering one session.
 message UnregisterAdapterResponse {
+  // Operation result; state is meaningful when OK.
   ErrorCode code = 1;
+  // Diagnostic text.
   string message = 2;
+  // UNREGISTERED on success.
   ControllerState state = 3;
 }
 
+// Named observation vector with layout-defined dimension and unit.
 message ObservationBlock {
+  // Resource name from the session layout.
   string name = 1;
+  // Values in descriptor order; count equals descriptor dimension.
   repeated double values = 2;
 }
 
+// Named actuator command vector supplied by a Controller.
 message ActuatorCommandBlock {
+  // Exclusively owned command resource name.
   string name = 1;
+  // Finite command values; actuator commands currently have one scalar.
   repeated double values = 2;
 }
 
+// Server-issued immutable input for one Controller and frozen Barrier Tick.
 message Tick {
+  // Server-filled identity; unchanged when this Tick is retransmitted.
   Header header = 1;
+  // Recipient Controller ID.
   string adapter_id = 2;
+  // Session layout hash used to reject stale layout assumptions.
   bytes layout_hash = 3;
+  // Pre-step observations in immutable session layout order.
   repeated ObservationBlock observations = 4;
+  // Recipient lifecycle projection at issue time.
   ControllerState controller_state = 5;
 }
 
+// Server-issued post-step observation delivery for one Observer.
 message ObservationFrame {
+  // Server-filled identity for the post-step state.
   Header header = 1;
+  // Recipient Observer ID.
   string adapter_id = 2;
+  // Per-session delivery sequence, strictly increasing from one.
   uint64 sequence = 3;
+  // Post-step observations in immutable session layout order.
   repeated ObservationBlock observations = 4;
 }
 
+// Controller response to one issued Tick, or proof for timeout recovery.
 message AdapterCommit {
+  // Controller-filled identity copied from its Tick; stable on retransmission.
   Header header = 1;
+  // Sending Controller ID.
   string adapter_id = 2;
+  // COMMIT_OK applies commands; COMMIT_ERROR reports a local failure.
   CommitStatus status = 3;
+  // Complete set of exclusively owned commands when status is COMMIT_OK.
   repeated ActuatorCommandBlock commands = 4;
+  // Controller diagnostic, valid when status is COMMIT_ERROR.
   string error_message = 5;
 }
 
+// Adapter keepalive accepted only for the exact active session identity.
 message AdapterHeartbeat {
+  // Client-filled session identity and latest acknowledged Tick.
   Header header = 1;
+  // Sending adapter ID.
   string adapter_id = 2;
+  // Sending adapter role.
   AdapterRole role = 3;
+  // Observer's last consumed sequence; nondecreasing within the session.
   uint64 last_observation_sequence = 4;
 }
 
+// Server projection of one adapter session at status publication time.
 message AdapterStatus {
+  // Adapter ID.
   string adapter_id = 1;
+  // Adapter role.
   AdapterRole role = 2;
+  // Current nonzero session ID.
   uint64 session_id = 3;
+  // Current wire-visible lifecycle state.
   ControllerState state = 4;
+  // State diagnostic; may be empty for healthy sessions.
   string message = 5;
+  // Tick at which the current state began.
   uint64 state_since_tick_id = 6;
+  // Count of liveness timeouts in this session.
   uint64 timeout_count = 7;
+  // Most recent delivered Tick/frame Tick; absent before first delivery.
   optional uint64 last_delivery_tick_id = 8;
+  // Most recent Observer frame sequence, or zero before first delivery.
   uint64 last_observation_sequence = 9;
+  // Observer frames dropped by downstream delivery.
   uint64 dropped_observation_frames = 10;
+  // Latest accepted Controller heartbeat Tick; absent before first heartbeat.
   optional uint64 last_heartbeat_tick_id = 11;
+  // Latest accepted Controller Commit Tick; absent before first Commit.
   optional uint64 last_commit_tick_id = 12;
+  // True only when the Controller belongs to the currently frozen Barrier.
   bool required_for_barrier = 13;
 }
 
+// Pinhole camera calibration in pixel units.
 message CameraIntrinsics {
+  // Horizontal focal length in pixels.
   double fx = 1;
+  // Vertical focal length in pixels.
   double fy = 2;
+  // Principal point x coordinate in pixels.
   double cx = 3;
+  // Principal point y coordinate in pixels.
   double cy = 4;
 }
 
+// Stable mapping from a segmentation pixel value to a MuJoCo object.
 message SegmentationLabel {
+  // Unsigned value encoded in SEGMENTATION32U payloads.
   uint32 value = 1;
+  // MuJoCo object type numeric value.
   int32 mujoco_object_type = 2;
+  // MuJoCo model-local object index for the current epoch.
   int32 mujoco_object_id = 3;
+  // Object name; empty for unnamed objects.
   string name = 4;
 }
 
+// Server-advertised immutable contract for one sensor stream.
 message StreamDescriptor {
+  // Non-empty stream name, unique within the server.
   string name = 1;
+  // Transport topic from which frames are published.
   string topic = 2;
+  // Pixel/point payload encoding.
   StreamFormat format = 3;
+  // Frame width in pixels or points; nonzero.
   uint32 width = 4;
+  // Frame height in rows; nonzero.
   uint32 height = 5;
+  // Byte distance between row starts; at least the packed row size.
   uint32 row_stride_bytes = 6;
+  // Coordinate frame name for the stream payload.
   string frame_id = 7;
+  // Axis convention used by the payload.
   FrameConvention frame_convention = 8;
+  // MuJoCo camera or source object name.
   string source_name = 9;
+  // Configured capture frequency in hertz; finite and positive.
   double rate_hz = 10;
+  // Upper bound on serialized payload bytes.
   uint64 maximum_payload_bytes = 11;
+  // Camera calibration, present for projective image streams.
   optional CameraIntrinsics camera_intrinsics = 12;
+  // Segmentation value map, populated for SEGMENTATION32U streams.
   repeated SegmentationLabel segmentation_labels = 13;
 }
 
+// Client query for configured sensor streams.
 message GetSensorStreamsRequest {
+  // Target server identity.
   string server_name = 1;
+  // Client protocol major version.
   uint32 protocol_major = 2;
+  // Client protocol minor version.
   uint32 protocol_minor = 3;
 }
 
+// Server response listing streams for one model epoch.
 message GetSensorStreamsResponse {
+  // Operation result; epoch and streams require OK.
   ErrorCode code = 1;
+  // Diagnostic text.
   string message = 2;
+  // Model generation owning all stream descriptors.
   uint64 epoch = 3;
+  // Configured stream contracts.
   repeated StreamDescriptor streams = 4;
 }
 
+// Metadata preceding one stream payload.
 message StreamFrameHeader {
+  // Server identity and capture Tick; unchanged on retransmission.
   Header header = 1;
+  // Stream name matching its descriptor.
   string stream_name = 2;
+  // Per-stream sequence, strictly increasing for published frames.
   uint64 stream_sequence = 3;
+  // Capture request identity shared by outputs from the same capture.
   uint64 capture_id = 4;
+  // Payload encoding.
   StreamFormat format = 5;
+  // Payload width in pixels or points.
   uint32 width = 6;
+  // Payload height in rows.
   uint32 height = 7;
+  // Byte distance between row starts.
   uint32 row_stride_bytes = 8;
+  // Coordinate frame name.
   string frame_id = 9;
+  // Axis convention used by the payload.
   FrameConvention frame_convention = 10;
+  // Exact payload byte count following this header.
   uint64 payload_size = 11;
+  // Frames dropped since the previous published sequence.
   uint64 dropped_since_previous = 12;
 }
 
+// Server projection of one stream runtime.
 message StreamStatus {
+  // Stream name.
   string name = 1;
+  // Current runtime state.
   StreamState state = 2;
+  // Runtime diagnostic; empty while healthy.
   string message = 3;
+  // Current transport subscriber count.
   uint64 subscriber_count = 4;
+  // Capture attempts since runtime start.
   uint64 captures = 5;
+  // Successfully published frames.
   uint64 published = 6;
+  // Frames dropped before publication.
   uint64 dropped = 7;
+  // Transport publication failures.
   uint64 publish_errors = 8;
+  // Cumulative publisher blocking time in milliseconds.
   double blocked_time_ms = 9;
+  // Most recent capture Tick, absent before first capture.
   optional uint64 last_capture_tick_id = 10;
 }
 
+// Periodic server-wide lifecycle and health projection.
 message ServerStatus {
+  // Server-filled envelope; session_id is zero.
   Header header = 1;
+  // Current server lifecycle state.
   ServerState state = 2;
+  // Server diagnostic; empty while healthy.
   string message = 3;
+  // Current adapter sessions in stable projection order.
   repeated AdapterStatus adapters = 4;
+  // Current sensor stream runtimes.
   repeated StreamStatus streams = 5;
 }

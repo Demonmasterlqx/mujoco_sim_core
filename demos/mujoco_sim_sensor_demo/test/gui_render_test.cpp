@@ -40,9 +40,9 @@ TEST(SensorDemoGuiRenderTest, CapturesNonBlankRoomAndVehicleFrame) {
   ScopedScreenshot screenshot;
   mujoco_sim::core::SimulationCore core;
   std::string error;
-  ASSERT_TRUE(core.LoadModel(
-      std::filesystem::path(SENSOR_DEMO_MJCF_DIR) / "scene.xml", &error))
-      << error;
+  const auto model_load = core.LoadModel(
+      (std::filesystem::path(SENSOR_DEMO_MJCF_DIR) / "scene.xml").string());
+  ASSERT_TRUE(model_load.response.loaded) << model_load.response.message;
   auto snapshot = core.CreateSnapshot(&error);
   ASSERT_NE(snapshot, nullptr) << error;
 
@@ -52,7 +52,7 @@ TEST(SensorDemoGuiRenderTest, CapturesNonBlankRoomAndVehicleFrame) {
   bool loaded = false;
   bool captured = false;
   std::thread worker([&] {
-    if (!viewer.QueueLoad(snapshot.get(), "MuJoCo Sensor Demo", &error)) {
+    if (!viewer.QueueLoad(*snapshot, "MuJoCo Sensor Demo", &error)) {
       viewer.RequestClose();
       return;
     }
@@ -62,7 +62,7 @@ TEST(SensorDemoGuiRenderTest, CapturesNonBlankRoomAndVehicleFrame) {
       std::this_thread::sleep_for(5ms);
     }
     loaded = viewer.model_loaded();
-    if (loaded && viewer.Synchronize(&core, snapshot.get(), &error)) {
+    if (loaded && viewer.Synchronize(core, *snapshot, &error)) {
       viewer.RequestScreenshot();
       const auto capture_deadline = std::chrono::steady_clock::now() + 3s;
       while (!std::filesystem::exists(screenshot.path()) &&

@@ -388,10 +388,12 @@ TEST(ModelContractTest, CoreCatalogMatchesModelAndServerStreamCatalog) {
       std::filesystem::path(SENSOR_DEMO_MJCF_DIR) / "scene.xml";
   mujoco_sim::core::SimulationCore core;
   std::string error;
-  ASSERT_TRUE(core.LoadModel(scene.string(), &error)) << error;
-  EXPECT_EQ(core.observations().size(), 12U);
-  EXPECT_EQ(core.commands().size(), 4U);
-  EXPECT_DOUBLE_EQ(core.timestep(), 0.01);
+  const auto model_load = core.LoadModel(scene.string());
+  ASSERT_TRUE(model_load.response.loaded) << model_load.response.message;
+  const auto resources = core.resources();
+  EXPECT_EQ(resources.observations.size(), 12U);
+  EXPECT_EQ(resources.commands.size(), 4U);
+  EXPECT_DOUBLE_EQ(core.state().timestep_s, 0.01);
   auto snapshot = core.CreateSnapshot(&error);
   ASSERT_NE(snapshot, nullptr) << error;
 

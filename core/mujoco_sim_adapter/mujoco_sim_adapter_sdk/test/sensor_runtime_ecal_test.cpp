@@ -78,7 +78,8 @@ TEST(SensorRuntimeEcalTest, CaptureErrorReachesStreamClient) {
   mujoco_sim::core::SimulationCore core(
       mujoco_sim::core::CoreOptions{server_name});
   std::string error;
-  ASSERT_TRUE(core.LoadModel(config.model_path, &error)) << error;
+  const auto loaded = core.LoadModel(config.model_path);
+  ASSERT_TRUE(loaded.response.loaded) << loaded.response.message;
 
   mujoco_sim::server::SensorRuntimeTestHooks hooks;
   hooks.before_capture = [](const std::string&) {

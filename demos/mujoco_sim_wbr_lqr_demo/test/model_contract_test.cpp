@@ -103,10 +103,12 @@ TEST(ModelContractTest, CoreLoadsHomeKeyframeAndBuildsCatalogs) {
   mujoco_sim::core::ModelLoadOptions options;
   options.initial_keyframe = "home";
   std::string error;
-  ASSERT_TRUE(core.LoadModel(scene.string(), options, &error)) << error;
-  EXPECT_EQ(core.observations().size(), 21U);
-  EXPECT_EQ(core.commands().size(), 6U);
-  EXPECT_DOUBLE_EQ(core.simulation_time(), 0.0);
+  const auto model_load = core.LoadModel(scene.string(), options);
+  ASSERT_TRUE(model_load.response.loaded) << model_load.response.message;
+  const auto resources = core.resources();
+  EXPECT_EQ(resources.observations.size(), 21U);
+  EXPECT_EQ(resources.commands.size(), 6U);
+  EXPECT_DOUBLE_EQ(core.state().simulation_time_s, 0.0);
 
   auto snapshot = core.CreateSnapshot(&error);
   ASSERT_NE(snapshot, nullptr) << error;

@@ -13,7 +13,8 @@ namespace {
 TEST(SimViewerTest, LoadsSynchronizesAndClosesWindow) {
   mujoco_sim::core::SimulationCore core;
   std::string error;
-  ASSERT_TRUE(core.LoadModel(MUJOCO_SIM_SERVER_TEST_MODEL, &error)) << error;
+  const auto model_load = core.LoadModel(MUJOCO_SIM_SERVER_TEST_MODEL);
+  ASSERT_TRUE(model_load.response.loaded) << model_load.response.message;
   auto snapshot = core.CreateSnapshot(&error);
   ASSERT_NE(snapshot, nullptr) << error;
 
@@ -50,7 +51,8 @@ TEST(SimViewerTest, LoadsSynchronizesAndClosesWindow) {
 TEST(SimViewerTest, ClosesWithPendingModelLoad) {
   mujoco_sim::core::SimulationCore core;
   std::string error;
-  ASSERT_TRUE(core.LoadModel(MUJOCO_SIM_SERVER_TEST_MODEL, &error)) << error;
+  const auto loaded = core.LoadModel(MUJOCO_SIM_SERVER_TEST_MODEL);
+  ASSERT_TRUE(loaded.response.loaded) << loaded.response.message;
   auto snapshot = core.CreateSnapshot(&error);
   ASSERT_NE(snapshot, nullptr) << error;
 

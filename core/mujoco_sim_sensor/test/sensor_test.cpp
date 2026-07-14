@@ -90,7 +90,8 @@ class SensorTest : public ::testing::Test {
  protected:
   void SetUp() override {
     std::string error;
-    ASSERT_TRUE(core_.LoadModel(MUJOCO_SIM_SENSOR_TEST_MODEL, &error)) << error;
+    const auto loaded = core_.LoadModel(MUJOCO_SIM_SENSOR_TEST_MODEL);
+    ASSERT_TRUE(loaded.response.loaded) << loaded.response.message;
     snapshot_ = core_.CreateSnapshot(&error);
     ASSERT_NE(snapshot_, nullptr) << error;
   }
@@ -562,8 +563,8 @@ TEST_F(SensorTest, CaptureRejectsInvalidMetadataAndForeignSnapshot) {
   EXPECT_FALSE(lidar->Capture(*snapshot_, metadata, &frame, &error));
 
   core::SimulationCore other_core;
-  ASSERT_TRUE(other_core.LoadModel(MUJOCO_SIM_SENSOR_TEST_MODEL, &error))
-      << error;
+  const auto loaded = other_core.LoadModel(MUJOCO_SIM_SENSOR_TEST_MODEL);
+  ASSERT_TRUE(loaded.response.loaded) << loaded.response.message;
   auto other_snapshot = other_core.CreateSnapshot(&error);
   ASSERT_NE(other_snapshot, nullptr) << error;
   EXPECT_FALSE(lidar->Capture(*other_snapshot, TestMetadata(), &frame, &error));

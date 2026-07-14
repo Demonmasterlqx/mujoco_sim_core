@@ -62,7 +62,7 @@ fi
 
 grep -Fq "event=tick_published" "${server_log}"
 grep -Fq "event=commit_accepted" "${server_log}"
-grep -Fq "event=barrier_completed" "${server_log}"
+grep -Fq "event=scheduler_step_completed" "${server_log}"
 grep -Fq "event=adapter_unregistered" "${server_log}"
 
 kill "${server_pid}" 2>/dev/null || true

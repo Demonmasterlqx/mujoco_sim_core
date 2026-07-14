@@ -22,10 +22,9 @@ namespace sensor = mujoco_sim::sensor;
 TEST(RenderScreenshotTest, EglHeadlessRenderProducesVerifiablePng) {
   mujoco_sim::core::SimulationCore core;
   std::string error;
-  ASSERT_TRUE(core.LoadModel(
-      (std::filesystem::path(SENSOR_DEMO_MJCF_DIR) / "scene.xml").string(),
-      &error))
-      << error;
+  const auto model_load = core.LoadModel(
+      (std::filesystem::path(SENSOR_DEMO_MJCF_DIR) / "scene.xml").string());
+  ASSERT_TRUE(model_load.response.loaded) << model_load.response.message;
   auto snapshot = core.CreateSnapshot(&error);
   ASSERT_NE(snapshot, nullptr) << error;
 

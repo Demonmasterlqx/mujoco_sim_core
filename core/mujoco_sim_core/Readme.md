@@ -120,12 +120,12 @@ API 位于 `mujoco_sim::core` 命名空间。
 | --- | --- |
 | `CoreOptions` | `server_name` 默认 `default`；Commit timeout 默认 `1000 ms`；激活 timeout 默认 `5000 ms`；默认允许替换同名 `TIMED_OUT` adapter |
 | `ModelLoadOptions` | 可选的 `initial_keyframe`；空字符串保持默认 reset 行为 |
-| `CommitResult` | 返回错误码、说明、duplicate/recovery pending，以及可选 `step_completed` |
-| `AdapterTransition`、`DeadlineResult` | 描述统一 Adapter deadline 转换，并通过可选 `step_completed` 返回完成的 step |
+| `EngineResult<T>`、`EngineEffects` | 原子返回操作响应、Adapter lifecycle change、状态变更和可选 completed step |
+| `CoreResources`、`CoreState` | 分别提供当前模型资源的借用视图和一致的标量/Adapter 计数快照 |
 | `SimulationSnapshot` | move-only 的隔离 MuJoCo model/data 副本，提供 `model()`、`data()` |
 | `SimulationCore(options)` | 构造 move-only Core；不自动加载模型 |
 | `LoadModel()`、`IsModelLoaded()` | 加载 MJCF XML，可选初始 keyframe；成功后状态为 `RUNNING` |
-| `observations()`、`commands()` | 读取当前模型建立的资源目录 |
+| `resources()` | 读取当前模型建立的 observation/command 资源目录；成功加载新模型后旧 span 失效 |
 | `GetAvailableResources()` | 校验 server/协议版本并返回资源目录 |
 | `RegisterAdapter()` | 校验并分配资源，返回 session、epoch、layout 和 provisional 状态 |
 | `RegisterAdapter()`、`ActivateAdapter()`、`UnregisterAdapter()` | Controller/Observer 的唯一生命周期 API；Observer 只获配 observation 且不加入 Barrier |
@@ -137,19 +137,19 @@ API 位于 `mujoco_sim::core` 命名空间。
 | `CompleteEmptyBarrier()` | required 集合为空时执行一次 step 并返回 completed step |
 | `AcceptHeartbeat()` | 处理 Controller 与 Observer 的统一 Adapter heartbeat |
 | `CheckDeadlines(now)` | 清理 provisional adapter，处理 Commit/keepalive timeout，并可能返回 completed step |
-| `EnterFatalError()`、`MarkStopped()` | 由宿主显式进入全局 `ERROR_PAUSED` 或 `STOPPED`；adapter 局部故障不调用它们 |
+| `MarkFailed()`、`MarkStopped()` | 由宿主显式进入全局 `ERROR_PAUSED` 或 `STOPPED`；adapter 局部故障不调用它们 |
 | `MakeStatus()` | 生成当前服务端和控制器状态消息 |
 | `CreateSnapshot()`、`CloneSnapshot()`、`UpdateSnapshot()` | 创建深拷贝 model/data、克隆共享 model 的独立 data，并从 Core 刷新 data |
-| 状态 getter | 另含 `timestep()`、`controller_count()` 和 `observer_count()` |
+| `state()` | 一次返回 epoch、Tick、仿真时间、timestep、server state、Barrier 状态及 Adapter phase 计数 |
 
-`LoadModel()` 保留原有 `(model_path, error_message)` 签名，并新增
-`(model_path, ModelLoadOptions, error_message)` 重载。所有 `LoadModel()`、
-`CreateSnapshot()` 和 `UpdateSnapshot()` 的 `error_message` 均可传 `nullptr`；需要诊断
+`LoadModel()` 原子返回 `EngineResult<ModelLoadReceipt>`；失败诊断位于
+`response.message`，成功后产生的状态变更位于 `effects`。`CreateSnapshot()`、
+`CloneSnapshot()` 和 `UpdateSnapshot()` 的 `error_message` 可传 `nullptr`；需要诊断
 信息时传入 `std::string*`。
 
 ### 初始 keyframe
 
-`initial_keyframe` 为空时，旧重载和新重载都执行原有的 `mj_resetData()` 与
+`initial_keyframe` 为空时执行 `mj_resetData()` 与
 `mj_forward()` 流程。指定名称时，Core 在临时 model/data 上用 `mjOBJ_KEY` 查找 keyframe，
 调用 `mj_resetDataKeyframe()`，将整个 `data->ctrl` 清零，再调用 `mj_forward()`：
 
@@ -157,9 +157,9 @@ API 位于 `mujoco_sim::core` 命名空间。
 mujoco_sim::core::ModelLoadOptions load_options;
 load_options.initial_keyframe = "ready";
 
-std::string error;
-if (!simulation.LoadModel(model_path, load_options, &error)) {
-  // error 包含缺失的 keyframe 名称或 MuJoCo 加载诊断。
+const auto loaded = simulation.LoadModel(model_path, load_options);
+if (!loaded.response.loaded) {
+  // loaded.response.message 包含缺失的 keyframe 名称或 MuJoCo 加载诊断。
 }
 ```
 
@@ -227,14 +227,15 @@ int main() {
   options.default_timeout_ms = 1000;
   mujoco_sim::core::SimulationCore simulation(options);
 
-  std::string error;
-  if (!simulation.LoadModel(
-          "core/mujoco_sim_core/test/testdata/simple_actuator.xml", &error)) {
-    std::cerr << "load failed: " << error << '\n';
+  const auto loaded = simulation.LoadModel(
+      "core/mujoco_sim_core/test/testdata/simple_actuator.xml");
+  if (!loaded.response.loaded) {
+    std::cerr << "load failed: " << loaded.response.message << '\n';
     return 1;
   }
-  std::cout << "observations=" << simulation.observations().size()
-            << ", commands=" << simulation.commands().size() << '\n';
+  const auto resources = simulation.resources();
+  std::cout << "observations=" << resources.observations.size()
+            << ", commands=" << resources.commands.size() << '\n';
 
   mujoco_sim::v2::RegisterAdapterRequest register_request;
   register_request.set_server_name("default");
@@ -246,8 +247,8 @@ int main() {
   register_request.add_observation_names("hinge_vel");
   register_request.add_command_names("hinge_motor");
 
-  const auto registration =
-      simulation.RegisterAdapter(register_request);
+  const auto registration_result = simulation.RegisterAdapter(register_request);
+  const auto& registration = registration_result.response;
   if (registration.code() != mujoco_sim::v2::OK) {
     std::cerr << "register failed: " << registration.message() << '\n';
     return 2;
@@ -257,13 +258,13 @@ int main() {
   activate_request.set_adapter_id(registration.adapter_id());
   activate_request.set_session_id(registration.session_id());
   activate_request.set_epoch(registration.epoch());
-  const auto activation = simulation.ActivateAdapter(activate_request);
+  const auto activation = simulation.ActivateAdapter(activate_request).response;
   if (activation.code() != mujoco_sim::v2::OK) {
     std::cerr << "activate failed: " << activation.message() << '\n';
     return 3;
   }
 
-  const auto ticks = simulation.OpenIssuedTicks();
+  const auto ticks = simulation.OpenIssuedTicks().response;
   if (ticks.size() != 1) {
     std::cerr << "expected one tick\n";
     return 4;
@@ -278,25 +279,27 @@ int main() {
   command->add_values(0.25);
 
   const auto result = simulation.SubmitCommit(commit);
-  if (result.code != mujoco_sim::v2::OK || !result.step_completed) {
-    std::cerr << "commit failed: " << result.message << '\n';
+  if (result.response.code != mujoco_sim::v2::OK ||
+      !result.effects.step_completed) {
+    std::cerr << "commit failed: " << result.response.message << '\n';
     return 5;
   }
-  std::cout << "tick=" << simulation.current_tick_id()
-            << ", simulation_time=" << simulation.simulation_time() << '\n';
+  const auto state = simulation.state();
+  std::cout << "tick=" << state.current_tick_id
+            << ", simulation_time=" << state.simulation_time_s << '\n';
 
   mujoco_sim::v2::UnregisterAdapterRequest unregister_request;
   unregister_request.set_adapter_id(registration.adapter_id());
   unregister_request.set_session_id(registration.session_id());
   unregister_request.set_epoch(registration.epoch());
   const auto unregistered =
-      simulation.UnregisterAdapter(unregister_request);
+      simulation.UnregisterAdapter(unregister_request).response;
   return unregistered.code() == mujoco_sim::v2::OK ? 0 : 6;
 }
 ```
 
 多个 controller 时，每个 `SubmitCommit()` 都可能只返回“已接收”；只有当前 Tick 固定的
-required 集合全部满足时，`CommitResult::step_completed` 才有值。调用方随后显式调用下一次
+required 集合全部满足时，`EngineEffects::step_completed` 才有值。调用方随后显式调用下一次
 `OpenIssuedTicks()`。没有 controller 时，`OpenIssuedTicks()` 仍会打开一个空 Barrier，调用
 `CompleteEmptyBarrier()` 会立即执行一步；Core 本身不在后台调度步进频率。
 

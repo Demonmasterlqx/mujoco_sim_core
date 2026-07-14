@@ -1,0 +1,4 @@
+# eCAL 6.0 is a prebuilt, uninstrumented dependency. Its service callback and
+# shared-memory workers report races inside libecal_core under GCC TSAN. Keep
+# project frames unsuppressed so Server/SDK lifecycle races still fail.
+race:libecal_core.so

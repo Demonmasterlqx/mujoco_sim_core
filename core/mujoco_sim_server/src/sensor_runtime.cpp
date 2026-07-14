@@ -188,7 +188,8 @@ struct SensorRuntime::Impl {
 
     bool Enqueue(mujoco_sim::core::SimulationCore& core,
                  std::uint64_t capture_id) {
-      const double simulation_time = core.simulation_time();
+      const auto core_state = core.state();
+      const double simulation_time = core_state.simulation_time_s;
       const double period = 1.0 / rate_hz;
       const bool has_live_subscriber = HasLiveSubscriber();
       if (simulation_time + 1e-12 < next_due_time) return true;
@@ -242,7 +243,7 @@ struct SensorRuntime::Impl {
       free.pop_back();
       lock.unlock();
       std::string error;
-      if (!core.UpdateSnapshot(snapshot.get(), &error)) {
+      if (!core.UpdateSnapshot(*snapshot, &error)) {
         lock.lock();
         free.push_back(std::move(snapshot));
         for (auto& stream : streams) {
@@ -258,8 +259,8 @@ struct SensorRuntime::Impl {
       job.snapshot = std::move(snapshot);
       job.capture_id = capture_id;
       job.header.set_server_name(server_name);
-      job.header.set_epoch(core.epoch());
-      job.header.set_tick_id(core.current_tick_id());
+      job.header.set_epoch(core_state.epoch);
+      job.header.set_tick_id(core_state.current_tick_id);
       job.header.set_timestamp_unix_nanos(NowUnixNanos());
       job.header.set_protocol_major(mujoco_sim::protocol::kProtocolMajor);
       job.header.set_protocol_minor(mujoco_sim::protocol::kProtocolMinor);
@@ -681,7 +682,7 @@ bool SensorRuntime::Initialize(mujoco_sim::core::SimulationCore& core,
   Stop();
   impl_ = std::make_unique<Impl>(hooks_);
   impl_->server_name = config.server_name;
-  impl_->epoch = core.epoch();
+  impl_->epoch = core.state().epoch;
   if (config.sensor_streams.empty()) {
     impl_->initialized = true;
     return true;

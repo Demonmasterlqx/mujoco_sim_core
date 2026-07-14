@@ -159,9 +159,8 @@ class BlockingWaitGate {
 std::unique_ptr<mujoco_sim::core::SimulationCore> LoadCore() {
   auto core = std::make_unique<mujoco_sim::core::SimulationCore>(
       mujoco_sim::core::CoreOptions{"sensor-test"});
-  std::string error;
-  EXPECT_TRUE(core->LoadModel(MUJOCO_SIM_SENSOR_RUNTIME_TEST_MODEL, &error))
-      << error;
+  const auto loaded = core->LoadModel(MUJOCO_SIM_SENSOR_RUNTIME_TEST_MODEL);
+  EXPECT_TRUE(loaded.response.loaded) << loaded.response.message;
   return core;
 }
 
