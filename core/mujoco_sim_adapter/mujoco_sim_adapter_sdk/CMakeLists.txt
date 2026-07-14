@@ -7,11 +7,21 @@ include(CMakePackageConfigHelpers)
 find_package(eCAL REQUIRED)
 find_package(mujoco_sim_protocol CONFIG REQUIRED)
 
+option(MUJOCO_SIM_ENABLE_QUALITY_GATES
+  "Enable Adapter SDK complexity checks in CTest" OFF)
+option(MUJOCO_SIM_BUILD_DOCS
+  "Build warning-clean Adapter SDK API documentation with Doxygen" OFF)
+
 add_library(${PROJECT_NAME}
   src/ecal_runtime.cpp
+  src/internal/adapter_transport.cpp
   src/observer_client.cpp
+  src/observer_client_receive.cpp
   src/sensor_stream_client.cpp
+  src/sensor_stream_client_receive.cpp
   src/sync_adapter_client.cpp
+  src/sync_adapter_client_receive.cpp
+  src/sync_adapter_client_wait_commit.cpp
 )
 add_library(mujoco_sim::adapter_sdk ALIAS ${PROJECT_NAME})
 target_compile_features(${PROJECT_NAME} PUBLIC cxx_std_20)
@@ -59,9 +69,13 @@ include(CTest)
 if(BUILD_TESTING)
   find_package(GTest REQUIRED)
   add_executable(adapter_sdk_test
+    test/internal_primitives_test.cpp
     test/observer_client_test.cpp
     test/sensor_stream_client_test.cpp
     test/sync_adapter_client_test.cpp
+  )
+  target_include_directories(adapter_sdk_test PRIVATE
+    "${CMAKE_CURRENT_SOURCE_DIR}/src"
   )
   target_link_libraries(adapter_sdk_test PRIVATE ${PROJECT_NAME} GTest::gtest_main)
   add_test(NAME adapter_sdk_test COMMAND adapter_sdk_test)
@@ -162,4 +176,34 @@ if(BUILD_TESTING)
       "${CMAKE_CURRENT_SOURCE_DIR}/test/sensor_observer_e2e_server.yaml"
   )
   set_tests_properties(sensor_observer_e2e PROPERTIES TIMEOUT 50)
+endif()
+
+if(MUJOCO_SIM_ENABLE_QUALITY_GATES)
+  find_package(Python3 REQUIRED COMPONENTS Interpreter)
+  find_program(LIZARD_EXECUTABLE NAMES lizard REQUIRED)
+  get_filename_component(MUJOCO_SIM_REPOSITORY_ROOT
+    "${CMAKE_CURRENT_SOURCE_DIR}/../../.." ABSOLUTE)
+  add_test(NAME adapter_sdk_complexity
+    COMMAND "${Python3_EXECUTABLE}"
+      "${MUJOCO_SIM_REPOSITORY_ROOT}/tools/quality/check_adapter_sdk_complexity.py"
+      --lizard "${LIZARD_EXECUTABLE}"
+      --root "${MUJOCO_SIM_REPOSITORY_ROOT}"
+  )
+  add_test(NAME adapter_sdk_complexity_checker_test
+    COMMAND "${Python3_EXECUTABLE}"
+      "${MUJOCO_SIM_REPOSITORY_ROOT}/tools/quality/test_check_adapter_sdk_complexity.py"
+  )
+endif()
+
+if(MUJOCO_SIM_BUILD_DOCS)
+  find_package(Doxygen REQUIRED)
+  set(DOXYGEN_EXTRACT_ALL NO)
+  set(DOXYGEN_EXTRACT_PRIVATE NO)
+  set(DOXYGEN_WARN_IF_UNDOCUMENTED YES)
+  set(DOXYGEN_WARN_AS_ERROR FAIL_ON_WARNINGS)
+  set(DOXYGEN_QUIET YES)
+  doxygen_add_docs(mujoco_sim_adapter_sdk_docs
+    "${CMAKE_CURRENT_SOURCE_DIR}/include/mujoco_sim/adapter_sdk"
+    COMMENT "Generate warning-clean Adapter SDK API documentation"
+  )
 endif()

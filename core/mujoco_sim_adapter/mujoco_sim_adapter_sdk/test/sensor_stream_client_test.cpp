@@ -16,47 +16,48 @@
 #include <mujoco_sim/protocol/stream_frame.hpp>
 #include <mujoco_sim/protocol/topics.hpp>
 
+#include "../src/internal/sensor_stream_client_impl.hpp"
+
 namespace mujoco_sim::adapter_sdk {
 
 class SensorStreamClientTestPeer {
  public:
   static bool ValidateOptions(SensorStreamClient* client,
                               std::string* error) {
-    return client->ValidateOptions(error);
+    return client->impl_->ValidateOptions(error);
   }
 
   static bool ValidateDescriptor(
       SensorStreamClient* client,
       const mujoco_sim::v2::StreamDescriptor& descriptor,
       std::string* error) {
-    return client->ValidateDescriptor(descriptor, error);
+    return client->impl_->ValidateDescriptor(descriptor, error);
   }
 
   static void Configure(
       SensorStreamClient* client,
       const std::vector<mujoco_sim::v2::StreamDescriptor>& descriptors) {
-    client->stop_requested_ = false;
+    client->impl_->stop_requested_ = false;
     {
-      std::lock_guard lock(client->mutex_);
-      client->discovery_.Clear();
-      client->discovery_.set_code(mujoco_sim::v2::OK);
-      client->discovery_.set_epoch(9);
-      client->streams_.clear();
-      client->last_status_tick_id_.reset();
+      std::lock_guard lock(client->impl_->mutex_);
+      client->impl_->discovery_.Clear();
+      client->impl_->discovery_.set_code(mujoco_sim::v2::OK);
+      client->impl_->discovery_.set_epoch(9);
+      client->impl_->streams_.clear();
+      client->impl_->last_status_tick_id_.reset();
       for (const auto& descriptor : descriptors) {
-        *client->discovery_.add_streams() = descriptor;
-        auto state = std::make_shared<SensorStreamClient::StreamState>();
+        *client->impl_->discovery_.add_streams() = descriptor;
+        auto state = std::make_shared<SensorStreamClient::Impl::StreamState>();
         state->descriptor = descriptor;
-        client->streams_.emplace(descriptor.name(), std::move(state));
+        client->impl_->streams_.emplace(descriptor.name(), std::move(state));
       }
-      client->started_ = true;
-      client->accepting_samples_ = true;
-      client->monitor_ecal_ = false;
+      client->impl_->phase_ = SensorStreamClient::Impl::Phase::kActive;
+      client->impl_->monitor_ecal_ = false;
     }
     {
-      std::lock_guard lock(client->callback_state_->mutex);
-      client->callback_state_->client = client;
-      client->callback_state_->enabled = true;
+      std::lock_guard lock(client->impl_->callback_state_->mutex);
+      client->impl_->callback_state_->client = client->impl_.get();
+      client->impl_->callback_state_->enabled = true;
     }
   }
 
@@ -66,36 +67,36 @@ class SensorStreamClientTestPeer {
       std::span<const std::byte> payload) {
     mujoco_sim::protocol::ParsedStreamFrame frame{header, payload};
     std::string error;
-    if (client->IsExpectedFrame(stream_name, frame, &error)) {
-      client->HandleStreamFrame(stream_name, frame);
+    if (client->impl_->IsExpectedFrame(stream_name, frame, &error)) {
+      client->impl_->HandleStreamFrame(stream_name, frame);
     } else {
-      client->RecordDiagnostic(stream_name, error);
+      client->impl_->RecordDiagnostic(stream_name, error);
     }
   }
 
   static void HandleBytes(SensorStreamClient* client,
                           const std::string& stream_name,
                           const std::string& bytes) {
-    client->HandleStreamBytes(stream_name, bytes.data(), bytes.size());
+    client->impl_->HandleStreamBytes(stream_name, bytes.data(), bytes.size());
   }
 
   static void HandleStatus(
       SensorStreamClient* client,
       const mujoco_sim::v2::ServerStatus& status) {
     const std::string bytes = status.SerializeAsString();
-    client->HandleStatusBytes(bytes.data(), bytes.size());
+    client->impl_->HandleStatusBytes(bytes.data(), bytes.size());
   }
 
   static void HandleStatusBytes(SensorStreamClient* client,
                                 const std::string& bytes) {
-    client->HandleStatusBytes(bytes.data(), bytes.size());
+    client->impl_->HandleStatusBytes(bytes.data(), bytes.size());
   }
 
   static std::function<bool()> MakePendingCallback(
       SensorStreamClient* client) {
-    const auto state = client->callback_state_;
+    const auto state = client->impl_->callback_state_;
     return [state] {
-      SensorStreamClient::CallbackLease callback(state);
+      SensorStreamClient::Impl::CallbackLease callback(state);
       return callback.client() != nullptr;
     };
   }
@@ -103,10 +104,10 @@ class SensorStreamClientTestPeer {
   static std::function<bool()> MakePendingStatusCallback(
       SensorStreamClient* client,
       const mujoco_sim::v2::ServerStatus& status) {
-    const auto state = client->callback_state_;
+    const auto state = client->impl_->callback_state_;
     const std::string bytes = status.SerializeAsString();
     return [state, bytes] {
-      SensorStreamClient::CallbackLease callback(state);
+      SensorStreamClient::Impl::CallbackLease callback(state);
       if (callback.client() == nullptr) {
         return false;
       }
@@ -118,32 +119,32 @@ class SensorStreamClientTestPeer {
   static void HoldCallback(SensorStreamClient* client,
                            std::promise<void>* entered,
                            std::shared_future<void> release) {
-    SensorStreamClient::CallbackLease callback(client->callback_state_);
+    SensorStreamClient::Impl::CallbackLease callback(client->impl_->callback_state_);
     entered->set_value();
     release.wait();
   }
 
   static void StopSampleReception(SensorStreamClient* client) {
-    client->StopSampleReception();
+    client->impl_->StopSampleReception();
   }
 
   static void StopFromCallback(SensorStreamClient* client) {
-    SensorStreamClient::CallbackLease callback(client->callback_state_);
+    SensorStreamClient::Impl::CallbackLease callback(client->impl_->callback_state_);
     ASSERT_NE(callback.client(), nullptr);
     callback.client()->StopSampleReception();
   }
 
   static void DestroyFromCallback(
       std::unique_ptr<SensorStreamClient>* client) {
-    const auto state = (*client)->callback_state_;
-    SensorStreamClient::CallbackLease callback(state);
+    const auto state = (*client)->impl_->callback_state_;
+    SensorStreamClient::Impl::CallbackLease callback(state);
     ASSERT_NE(callback.client(), nullptr);
     client->reset();
   }
 
   static bool WaitForSampleReceptionDisabled(
       SensorStreamClient* client, std::chrono::milliseconds timeout) {
-    const auto state = client->callback_state_;
+    const auto state = client->impl_->callback_state_;
     std::unique_lock lock(state->mutex);
     return state->condition.wait_for(lock, timeout, [&] {
       return !state->enabled && state->client == nullptr;
@@ -152,10 +153,10 @@ class SensorStreamClientTestPeer {
 
   static bool WaitInProgress(SensorStreamClient* client,
                              const std::string& stream_name) {
-    std::lock_guard lock(client->mutex_);
-    const auto found = client->streams_.find(stream_name);
-    return found != client->streams_.end() &&
-           found->second->wait_in_progress;
+    std::lock_guard lock(client->impl_->mutex_);
+    const auto found = client->impl_->streams_.find(stream_name);
+    return found != client->impl_->streams_.end() &&
+           found->second->samples.wait_in_progress();
   }
 };
 

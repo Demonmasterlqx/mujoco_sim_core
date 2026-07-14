@@ -7,6 +7,7 @@
 
 - [`mujoco_sim_core_maintainability_refactor_plan.md`](./mujoco_sim_core_maintainability_refactor_plan.md)
 - [`reduce_wrapper.md`](./reduce_wrapper.md)
+- [`adapter_sdk_lifecycle_and_wrapper_reduction_plan.md`](./adapter_sdk_lifecycle_and_wrapper_reduction_plan.md)
 - [`../v1.1/handoff.md`](../v1.1/handoff.md)
 
 V1.1 handoff 中关于 Protocol V2、Core Barrier、Tick cache、SDK 生命周期和可选构建的说明仍然
@@ -72,9 +73,12 @@ Server 单写者改造已经完成并迁移到新的 Core effects API：
 - Server 的多个内部 component libraries 合并为一个 `mujoco_sim::server` library；安装态只导出
   该 library 和 `mujoco-sim-server` executable target。
 
-本轮仍没有实施 `reduce_wrapper.md` 中的 Adapter SDK `ActivateWith`、`CommitWith`、
-`UnregisterWith` 等清理。该部分属于后续 SDK Pimpl/Transport 抽取，应独立实施，不能与本次
-Server 单写者交付混淆。
+Adapter SDK 阶段 E 也已独立完成：三个 Client 已改为 Pimpl，Register/Activate/Unregister 与
+publish/discovery 收敛到类型化 Transport；共享 `AdapterSession`（阶段、远端 presence 和
+`session_id/epoch` 的唯一 owner）、`CallbackGate`、
+`BlockingMailbox` 和 status monitor 已落地。生产路径已删除 `ActivateWith`、`CommitWith`、
+`UnregisterWith`、`PublishSerialized` 和重复 `CallService`。`Stop()` 仍只做本地取消，远端
+session 由可重试的 `Unregister()` 独立清理，Protocol V2 与 Server/Core 行为未改变。
 
 ## 3. 当前 Core 结构
 
@@ -299,6 +303,33 @@ complexity checker self-tests:        3/3 passed
 git diff --check:                    passed
 ```
 
+2026-07-14 Adapter SDK 阶段 E 追加验证：
+
+```text
+SDK unit cases:                     69 passed
+SDK CTest with quality gates:        9/9 passed
+SDK ASAN/UBSAN CTest:                7/7 passed
+SDK warnings build:                 passed
+SDK complexity checker:             passed, 188 functions
+SDK complexity checker self-tests:  2/2 passed
+SDK maximum production .cpp:        471 lines
+public header eCAL/lock/thread scan: clean
+removed wrapper full SDK scan:      clean
+install/package artifacts:          passed
+colcon build:                        9 packages passed
+colcon test-result:                 53 tests, 0 failures, 0 skipped
+git diff --check:                    passed
+```
+
+Sensor Demo headless quality E2E 首次运行因 landmark inlier ratio 波动失败，单项重跑和完整
+Sensor Demo 包重跑均通过；本轮最终 colcon XML 汇总为 53/53，其中新增两项为 SDK 复杂度门禁。
+SDK TSAN target 可以完整构建，但本
+容器直接运行时报 `ThreadSanitizer: unexpected memory mapping`，未得到可解释的 race 结果；该项
+不能记为通过，需在支持 `setarch "$(uname -m)" -R` 的宿主机复跑。
+
+SDK 已增加 Doxygen warning-as-error target，且公开类型、字段、枚举和方法均补齐契约；本容器
+没有安装 `doxygen`，因此本轮未执行该 target，不能把 SDK Doxygen 记为已通过。
+
 复杂度门禁当前覆盖 209 个 Core 函数，要求 `CCN <= 15`、`NLOC <= 80`、每个 `.cpp <= 500`
 行，并拒绝相对 checked-in baseline 的回退。当前最大实现文件是 `resource_catalog.cpp`，378 行。
 baseline key 使用 source-relative path 和完整函数签名，不使用易变的起始行号。
@@ -374,9 +405,10 @@ Server/SDK/Demo E2E 继续覆盖：
 
 ## 12. 当前工作树和提交边界
 
-本 handoff 所在提交包含 `SimulationCore` 模块化、统一 effects API、仓库调用方迁移、测试、
-架构文档和质量门禁。它建立在上一提交的 Server 单写者实现之上，不包含新的 Protocol wire
-字段，也不包含 Adapter SDK Pimpl 重构。
+本 handoff 所在工作包含 `SimulationCore` 模块化、统一 effects API、仓库调用方迁移、测试、
+架构文档和质量门禁，以及随后独立完成的 Adapter SDK Pimpl/Transport/生命周期重构。它建立在
+上一提交的 Server 单写者实现之上，不包含新的 Protocol wire 字段，也没有改变 Server/Core
+行为。
 
 仓库根目录的未跟踪 `screenshot.png` 是本地 GUI 测试产物，不属于源码提交。build/install/log、
 quality venv、sanitizer build tree 和生成的 Doxygen 输出也不得纳入版本控制。
@@ -399,8 +431,8 @@ git diff --check
    清晰的调用聚合边界时再继续收敛，不要为数字增加无语义 wrapper。
 2. Core 内部仍使用部分 V2 Protobuf message。后续 protocol-isolation 应先引入稳定领域 command
    和 projection boundary，再考虑拆 proto 文件，不能改变现有字段号或 enum 数值。
-3. 独立实施 Adapter SDK Pimpl、Transport、CallbackGate、AdapterSession 和 BlockingMailbox，
-   再删除 SDK `XxxWith(lambda)` 测试 wrapper。
+3. Adapter SDK Pimpl、Transport、CallbackGate、AdapterSession、BlockingMailbox 和
+   `XxxWith(lambda)` 清理已完成；后续修改必须保持 Stop/Unregister 分离和单次生命周期。
 4. 将 Sensor queue policy 从 worker 中进一步策略化并增加独立测试。
 5. 增加 queue overload/malformed/shutdown transport E2E。
 6. 继续压低 `simulation_loop.cpp` 文件规模；事件 visitor 已拆为 typed handler，后续可按

@@ -10,6 +10,11 @@
 新增 API 不改变同步控制契约：`SyncAdapterClient` 的 `Tick` 仍按 registration layout 携带
 关节状态、IMU 等小 observation，控制器仍在同一 Tick 上提交 Commit。
 
+公开类均为 Pimpl facade，eCAL、线程、锁、callback state 和 lifecycle state 不进入安装头文件。
+Controller 与 Observer 共享单一 `AdapterSession` 状态机、callback drain、阻塞 mailbox 和状态
+监控；所有 registry RPC 与 publish/discovery 通过类型化 Transport 执行。测试只替换一次
+Transport，生产 API 与测试 API 不再经过不同的 `XxxWith(lambda)` 路径。
+
 **本包只安装 C++ 库和头文件，不安装独立生产可执行程序。** 可运行参考程序见
 [mujoco_sim_sample_adapter](../mujoco_sim_sample_adapter/Readme.md)。
 
@@ -201,9 +206,10 @@ malformed/mismatch/callback 异常。
 
 模式一旦选定不可切换；callback 模式和 blocking 模式互相拒绝。模式尚未选择时收到的帧先进入
 有界队列，选择 callback 时这些旧帧会被清除并计入 drop。`Stop()` 禁止新的 sample delivery、
-唤醒全部 Wait，但不等待已经进入的 callback；析构会移除 eCAL callback 并等待这些 callback
-返回。因此 callback 捕获的外部对象必须至少存活到 Client 销毁完成，不能在 callback 内销毁
-Client 本身。
+唤醒全部 Wait，但不等待已经进入的 callback；析构会移除 eCAL callback，并等待其他线程中已
+进入的 callback 返回。当前 callback 自己销毁 Client 时不会等待自身，Impl 由 callback 持有到
+返回，因此该用法受支持；销毁后 callback 不得再次访问 Client，外部捕获对象仍须由调用方保证
+生命周期。
 
 ```cpp
 #include <mujoco_sim/adapter_sdk/sensor_stream_client.hpp>

@@ -1,161 +1,94 @@
 #pragma once
 
-#include <atomic>
 #include <chrono>
-#include <condition_variable>
-#include <cstddef>
 #include <cstdint>
-#include <deque>
-#include <functional>
 #include <memory>
-#include <mutex>
 #include <optional>
 #include <string>
-#include <thread>
 #include <vector>
 
-#include <ecal/pubsub/publisher.h>
-#include <ecal/pubsub/subscriber.h>
-#include <ecal/service/client.h>
 #include <mujoco_sim/v2/sync.pb.h>
 
 namespace mujoco_sim::adapter_sdk {
 
+/// Observer registration, sampling, queue, and transport options.
 struct ObserverOptions {
+  /// Server namespace used to derive service and topic names.
   std::string server_name = "default";
+  /// Non-empty Observer identifier, unique within the selected Server.
   std::string observer_id;
+  /// Observation resources requested in registration order.
   std::vector<std::string> observation_names;
+  /// Server-side Observer timeout in milliseconds; must be positive.
   std::uint32_t timeout_ms = 1000;
+  /// Discovery and RPC timeout in milliseconds; must be positive.
   std::uint32_t service_timeout_ms = 5000;
+  /// Heartbeat period in milliseconds; must be positive and below timeout_ms.
   std::uint32_t keepalive_period_ms = 250;
+  /// Optional step-based delivery cadence; when set, must be positive.
   std::optional<std::uint32_t> every_n_steps = 1;
+  /// Optional simulation-time delivery cadence in seconds; must be positive.
   std::optional<double> period_s;
+  /// Bounded frame queue capacity; must be positive.
   std::size_t queue_capacity = 1;
 };
 
+/// Result of a blocking or polling observation wait.
 enum class ObservationWaitResult {
+  /// An ObservationFrame was written to the output argument.
   kReceived,
+  /// The deadline elapsed; output arguments were not changed.
   kTimeout,
+  /// Local cancellation or successful remote cleanup ended the wait.
   kStopped,
+  /// A terminal lifecycle or protocol error ended the wait.
   kError,
 };
 
+/// Single-session read-only Observer client.
+///
+/// Lifecycle calls are serialized internally. Stop() may cancel waits from
+/// another thread, while Unregister() performs separately retryable cleanup.
 class ObserverClient {
  public:
+  /// Creates a non-started, single-use Observer client.
   explicit ObserverClient(ObserverOptions options);
+  /// Stops local work, drains callbacks, and attempts remote cleanup once.
   ~ObserverClient();
 
+  /// Clients are neither copyable nor movable.
   ObserverClient(const ObserverClient&) = delete;
+  /// Clients are neither copyable nor movable.
   ObserverClient& operator=(const ObserverClient&) = delete;
 
+  /// Registers the Observer and starts receive/heartbeat infrastructure.
   bool Start(std::string* error_message);
+  /// Activates the provisional session. Start() must have succeeded.
   bool Activate(std::string* error_message);
+  /// Waits for one frame. Only one waiter is allowed per client.
+  /// Output is changed only when kReceived is returned.
   ObservationWaitResult WaitForObservation(
       std::chrono::milliseconds timeout,
       mujoco_sim::v2::ObservationFrame* frame,
       std::string* error_message);
+  /// Cancels local waits and heartbeat without contacting the Server.
   void Stop();
+  /// Removes the remote session; failures preserve it for a later retry.
   bool Unregister(std::string* error_message);
 
+  /// Returns sequence gaps plus frames evicted by the bounded mailbox.
   std::uint64_t dropped_frames() const;
+  /// Returns the accumulated asynchronous lifecycle diagnostic.
   std::string lifecycle_warning() const;
 
-  const mujoco_sim::v2::RegisterAdapterResponse& registration() const {
-    return registration_;
-  }
+  /// Returns the last successful registration response.
+  /// Call only after Start() has completed and do not race this access with it.
+  const mujoco_sim::v2::RegisterAdapterResponse& registration() const;
 
  private:
   friend class ObserverClientTestPeer;
-
-  template <typename Request, typename Response>
-  bool CallService(const std::string& method, const Request& request,
-                   Response* response, std::string* error_message,
-                   bool allow_after_stop = false);
-
-  bool ValidateOptions(std::string* error_message) const;
-  bool Register(std::string* error_message);
-  bool FinishStart(const std::function<void()>& unregister,
-                   std::string* error_message);
-  bool ActivateWith(
-      const std::function<bool(
-          const mujoco_sim::v2::ActivateAdapterRequest&,
-          mujoco_sim::v2::ActivateAdapterResponse*, std::string*)>& call,
-      std::chrono::milliseconds discovery_delay,
-      std::string* error_message);
-  bool WaitBeforeActivation(std::chrono::milliseconds delay);
-  bool UnregisterWith(
-      const std::function<bool(
-          const mujoco_sim::v2::UnregisterAdapterRequest&,
-          mujoco_sim::v2::UnregisterAdapterResponse*, std::string*)>& call,
-      std::string* error_message);
-  bool CompleteUnregister(
-      const mujoco_sim::v2::UnregisterAdapterResponse& response,
-      std::string* error_message);
-  void MarkStoppedLocked();
-  void TransitionToStopped();
-
-  bool IsExpectedObservation(
-      const mujoco_sim::v2::ObservationFrame& frame) const;
-  void HandleObservationBytes(const void* data, std::size_t size);
-  void HandleStatusBytes(const void* data, std::size_t size);
-  void HandleObservation(const mujoco_sim::v2::ObservationFrame& frame);
-  void SetTerminalError(const std::string& error);
-  void StopObservationReception();
-
-  void StartHeartbeatThread();
-  void JoinHeartbeatThread();
-  void HeartbeatLoop();
-  mujoco_sim::v2::AdapterHeartbeat BuildHeartbeat() const;
-  void PublishHeartbeat(const mujoco_sim::v2::AdapterHeartbeat& heartbeat);
-
-  struct CallbackState {
-    std::mutex mutex;
-    std::condition_variable condition;
-    ObserverClient* client = nullptr;
-    bool enabled = false;
-    std::size_t active_callbacks = 0;
-  };
-
-  class CallbackLease {
-   public:
-    explicit CallbackLease(std::shared_ptr<CallbackState> state);
-    ~CallbackLease();
-
-    ObserverClient* client() const { return client_; }
-
-   private:
-    std::shared_ptr<CallbackState> state_;
-    ObserverClient* client_ = nullptr;
-  };
-
-  ObserverOptions options_;
-  mujoco_sim::v2::RegisterAdapterResponse registration_;
-  std::unique_ptr<eCAL::CServiceClient> registry_client_;
-  std::unique_ptr<eCAL::CPublisher> heartbeat_publisher_;
-  std::unique_ptr<eCAL::CSubscriber> observation_subscriber_;
-  std::unique_ptr<eCAL::CSubscriber> status_subscriber_;
-  std::shared_ptr<CallbackState> callback_state_;
-  std::mutex lifecycle_mutex_;
-  std::mutex publisher_mutex_;
-  std::mutex heartbeat_thread_mutex_;
-  mutable std::mutex mutex_;
-  std::condition_variable condition_;
-  std::condition_variable heartbeat_condition_;
-  std::thread heartbeat_thread_;
-  std::atomic<bool> stop_requested_{false};
-  std::shared_ptr<void> ecal_runtime_;
-  bool monitor_ecal_ = false;
-  bool started_ = false;
-  bool activated_ = false;
-  bool registered_ = false;
-  bool accepting_observations_ = false;
-  bool wait_in_progress_ = false;
-  std::deque<mujoco_sim::v2::ObservationFrame> observations_;
-  std::uint64_t last_sequence_ = 0;
-  std::uint64_t last_tick_id_ = 0;
-  std::uint64_t dropped_frames_ = 0;
-  std::string terminal_error_;
-  std::string lifecycle_warning_;
+  class Impl;
+  std::shared_ptr<Impl> impl_;
 };
 
 }  // namespace mujoco_sim::adapter_sdk

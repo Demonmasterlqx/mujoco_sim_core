@@ -12,21 +12,58 @@
 #include <mujoco_sim/adapter_sdk/observer_client.hpp>
 #include <mujoco_sim/protocol/topics.hpp>
 
+#include "../src/internal/observer_client_impl.hpp"
+
 namespace mujoco_sim::adapter_sdk {
+
+class FakeObserverTransport final : public internal::AdapterTransport {
+ public:
+  bool Register(const mujoco_sim::v2::RegisterAdapterRequest&,
+                mujoco_sim::v2::RegisterAdapterResponse*,
+                std::string*) override {
+    return false;
+  }
+  bool Activate(const mujoco_sim::v2::ActivateAdapterRequest& request,
+                mujoco_sim::v2::ActivateAdapterResponse* response,
+                std::string* error) override {
+    return activate ? activate(request, response, error) : false;
+  }
+  bool Unregister(const mujoco_sim::v2::UnregisterAdapterRequest& request,
+                  mujoco_sim::v2::UnregisterAdapterResponse* response,
+                  std::string* error) override {
+    return unregister ? unregister(request, response, error) : false;
+  }
+  bool PublishCommit(const mujoco_sim::v2::AdapterCommit&) override {
+    return false;
+  }
+  void PublishHeartbeat(
+      const mujoco_sim::v2::AdapterHeartbeat& heartbeat) override {
+    if (publish_heartbeat) publish_heartbeat(heartbeat);
+  }
+
+  std::function<bool(const mujoco_sim::v2::ActivateAdapterRequest&,
+                     mujoco_sim::v2::ActivateAdapterResponse*, std::string*)>
+      activate;
+  std::function<bool(const mujoco_sim::v2::UnregisterAdapterRequest&,
+                     mujoco_sim::v2::UnregisterAdapterResponse*, std::string*)>
+      unregister;
+  std::function<void(const mujoco_sim::v2::AdapterHeartbeat&)>
+      publish_heartbeat;
+};
 
 class ObserverClientTestPeer {
  public:
   static bool ValidateOptions(ObserverClient* client, std::string* error) {
-    return client->ValidateOptions(error);
+    return client->impl_->ValidateOptions(error);
   }
 
   static void Configure(ObserverClient* client,
                         const mujoco_sim::v2::ObservationFrame& frame,
-                        bool activated = true, bool registered = false) {
-    client->stop_requested_ = false;
+                        bool activated = true) {
+    client->impl_->stop_requested_ = false;
     {
-      std::lock_guard lock(client->mutex_);
-      auto& registration = client->registration_;
+      std::lock_guard lock(client->impl_->mutex_);
+      auto& registration = client->impl_->registration_;
       registration.Clear();
       registration.set_code(mujoco_sim::v2::OK);
       registration.set_adapter_id(frame.adapter_id());
@@ -39,23 +76,27 @@ class ObserverClientTestPeer {
         descriptor->set_type(mujoco_sim::v2::OBSERVATION_SENSOR);
         descriptor->set_dimension(block.values_size());
       }
-      client->started_ = true;
-      client->activated_ = activated;
-      client->registered_ = registered;
-      client->accepting_observations_ = activated;
-      client->monitor_ecal_ = false;
-      client->wait_in_progress_ = false;
-      client->observations_.clear();
-      client->last_sequence_ = 0;
-      client->last_tick_id_ = 0;
-      client->dropped_frames_ = 0;
-      client->terminal_error_.clear();
-      client->lifecycle_warning_.clear();
+      client->impl_->session_ = internal::AdapterSession{};
+      client->impl_->session_.Registered(
+          {frame.header().session_id(), frame.header().epoch()});
+      client->impl_->session_.StartCompleted();
+      if (activated) {
+        client->impl_->session_.BeginActivation();
+        client->impl_->session_.Activated();
+      }
+      client->impl_->monitor_ecal_ = false;
+      client->impl_->observations_.Clear();
+      client->impl_->last_sequence_ = 0;
+      client->impl_->last_tick_id_ = 0;
+      client->impl_->dropped_frames_ = 0;
+      client->impl_->terminal_error_.clear();
+      client->impl_->lifecycle_warning_.clear();
+      client->impl_->transport_ = std::make_shared<FakeObserverTransport>();
     }
     {
-      std::lock_guard lock(client->callback_state_->mutex);
-      client->callback_state_->client = client;
-      client->callback_state_->enabled = true;
+      std::lock_guard lock(client->impl_->callback_state_->mutex);
+      client->impl_->callback_state_->client = client->impl_.get();
+      client->impl_->callback_state_->enabled = true;
     }
   }
 
@@ -63,64 +104,70 @@ class ObserverClientTestPeer {
       ObserverClient* client,
       const mujoco_sim::v2::ObservationFrame& frame) {
     const std::string bytes = frame.SerializeAsString();
-    client->HandleObservationBytes(bytes.data(), bytes.size());
+    client->impl_->HandleObservationBytes(bytes.data(), bytes.size());
   }
 
   static void HandleStatusBytes(ObserverClient* client,
                                 const mujoco_sim::v2::ServerStatus& status) {
     const std::string bytes = status.SerializeAsString();
-    client->HandleStatusBytes(bytes.data(), bytes.size());
+    client->impl_->HandleStatusBytes(bytes.data(), bytes.size());
   }
 
-  static bool ActivateWith(
+  static bool ActivateUsingFakeTransport(
       ObserverClient* client,
       const std::function<bool(
           const mujoco_sim::v2::ActivateAdapterRequest&,
           mujoco_sim::v2::ActivateAdapterResponse*, std::string*)>& call,
       std::string* error) {
-    std::lock_guard lifecycle_lock(client->lifecycle_mutex_);
-    return client->ActivateWith(call, std::chrono::milliseconds(0), error);
+    auto transport = std::make_shared<FakeObserverTransport>();
+    transport->activate = call;
+    client->impl_->transport_ = std::move(transport);
+    client->impl_->activation_delay_ = std::chrono::milliseconds(0);
+    return client->Activate(error);
   }
 
-  static bool UnregisterWith(
+  static bool UnregisterUsingFakeTransport(
       ObserverClient* client,
       const std::function<bool(
           const mujoco_sim::v2::UnregisterAdapterRequest&,
           mujoco_sim::v2::UnregisterAdapterResponse*, std::string*)>& call,
       std::string* error) {
-    return client->UnregisterWith(call, error);
+    auto transport = std::make_shared<FakeObserverTransport>();
+    transport->unregister = call;
+    client->impl_->transport_ = std::move(transport);
+    return client->Unregister(error);
   }
 
   static mujoco_sim::v2::AdapterHeartbeat BuildHeartbeat(
       ObserverClient* client) {
-    return client->BuildHeartbeat();
+    return client->impl_->BuildHeartbeat();
   }
 
   static void StartHeartbeatThread(ObserverClient* client) {
-    client->StartHeartbeatThread();
+    client->impl_->StartHeartbeatThread();
   }
 
   static bool WaitInProgress(ObserverClient* client) {
-    std::lock_guard lock(client->mutex_);
-    return client->wait_in_progress_;
+    std::lock_guard lock(client->impl_->mutex_);
+    return client->impl_->observations_.wait_in_progress();
   }
 
   static void HoldStoppedTransitionBeforeNotify(
       ObserverClient* client, std::promise<void>* transitioned,
       std::shared_future<void> release) {
-    std::unique_lock lock(client->mutex_);
-    client->MarkStoppedLocked();
+    std::unique_lock lock(client->impl_->mutex_);
+    client->impl_->MarkStoppedLocked();
     transitioned->set_value();
     release.wait();
     lock.unlock();
-    client->condition_.notify_all();
-    client->heartbeat_condition_.notify_all();
+    client->impl_->condition_.notify_all();
+    client->impl_->heartbeat_condition_.notify_all();
   }
 
   static std::function<bool()> MakePendingCallback(ObserverClient* client) {
-    const auto state = client->callback_state_;
+    const auto state = client->impl_->callback_state_;
     return [state] {
-      ObserverClient::CallbackLease callback(state);
+      ObserverClient::Impl::CallbackLease callback(state);
       return callback.client() != nullptr;
     };
   }
@@ -128,18 +175,18 @@ class ObserverClientTestPeer {
   static void HoldCallback(ObserverClient* client,
                            std::promise<void>* entered,
                            std::shared_future<void> release) {
-    ObserverClient::CallbackLease callback(client->callback_state_);
+    ObserverClient::Impl::CallbackLease callback(client->impl_->callback_state_);
     entered->set_value();
     release.wait();
   }
 
   static void StopObservationReception(ObserverClient* client) {
-    client->StopObservationReception();
+    client->impl_->StopObservationReception();
   }
 
   static bool WaitForObservationReceptionDisabled(
       ObserverClient* client, std::chrono::milliseconds timeout) {
-    const auto state = client->callback_state_;
+    const auto state = client->impl_->callback_state_;
     std::unique_lock lock(state->mutex);
     return state->condition.wait_for(lock, timeout, [&] {
       return !state->enabled && state->client == nullptr;
@@ -460,9 +507,9 @@ TEST(ObserverClientTest, StatusRequiresExactProtocolTwoZero) {
 
 TEST(ObserverClientTest, ActivateAndUnregisterUseObserverRole) {
   ObserverClient client(MakeOptions());
-  ObserverClientTestPeer::Configure(&client, MakeFrame(1), false, true);
+  ObserverClientTestPeer::Configure(&client, MakeFrame(1), false);
   std::string error;
-  ASSERT_TRUE(ObserverClientTestPeer::ActivateWith(
+  ASSERT_TRUE(ObserverClientTestPeer::ActivateUsingFakeTransport(
       &client,
       [](const auto& request, auto* response, std::string*) {
         EXPECT_EQ(request.adapter_id(), "watcher");
@@ -476,7 +523,7 @@ TEST(ObserverClientTest, ActivateAndUnregisterUseObserverRole) {
       << error;
   EXPECT_EQ(client.registration().role(), mujoco_sim::v2::OBSERVER);
 
-  EXPECT_TRUE(ObserverClientTestPeer::UnregisterWith(
+  EXPECT_TRUE(ObserverClientTestPeer::UnregisterUsingFakeTransport(
       &client,
       [](const auto& request, auto* response, std::string*) {
         EXPECT_EQ(request.adapter_id(), "watcher");
@@ -489,7 +536,7 @@ TEST(ObserverClientTest, ActivateAndUnregisterUseObserverRole) {
 
 TEST(ObserverClientTest, SuccessfulUnregisterWakesConcurrentWaitAsStopped) {
   ObserverClient client(MakeOptions());
-  ObserverClientTestPeer::Configure(&client, MakeFrame(1), true, true);
+  ObserverClientTestPeer::Configure(&client, MakeFrame(1), true);
   mujoco_sim::v2::ObservationFrame output;
   std::string wait_error;
   auto waiting = std::async(std::launch::async, [&] {
@@ -508,7 +555,8 @@ TEST(ObserverClientTest, SuccessfulUnregisterWakesConcurrentWaitAsStopped) {
   }
 
   std::string unregister_error;
-  const bool unregistered = ObserverClientTestPeer::UnregisterWith(
+  const bool unregistered =
+      ObserverClientTestPeer::UnregisterUsingFakeTransport(
       &client,
       [](const auto&, auto* response, std::string*) {
         response->set_code(mujoco_sim::v2::OK);
@@ -528,14 +576,14 @@ TEST(ObserverClientTest, SuccessfulUnregisterWakesConcurrentWaitAsStopped) {
 
 TEST(ObserverClientTest, StopWinsRaceWithSuccessfulActivationResponse) {
   ObserverClient client(MakeOptions());
-  ObserverClientTestPeer::Configure(&client, MakeFrame(1), false, true);
+  ObserverClientTestPeer::Configure(&client, MakeFrame(1), false);
   std::promise<void> entered_promise;
   auto entered = entered_promise.get_future();
   std::promise<void> release_promise;
   auto release = release_promise.get_future().share();
   std::string error;
   auto activating = std::async(std::launch::async, [&] {
-    return ObserverClientTestPeer::ActivateWith(
+    return ObserverClientTestPeer::ActivateUsingFakeTransport(
         &client,
         [&](const auto&, auto* response, std::string*) {
           entered_promise.set_value();
@@ -555,7 +603,7 @@ TEST(ObserverClientTest, StopWinsRaceWithSuccessfulActivationResponse) {
 
 TEST(ObserverClientTest, HeartbeatTracksLatestAcceptedObservation) {
   ObserverClient client(MakeOptions());
-  ObserverClientTestPeer::Configure(&client, MakeFrame(1), true, true);
+  ObserverClientTestPeer::Configure(&client, MakeFrame(1), true);
   ObserverClientTestPeer::HandleObservationBytes(&client, MakeFrame(5));
   const auto heartbeat = ObserverClientTestPeer::BuildHeartbeat(&client);
   EXPECT_EQ(heartbeat.adapter_id(), "watcher");

@@ -1,5 +1,19 @@
 # SimulationCore quality gates
 
+Adapter SDK 已达到最终硬门槛，不需要历史超限 baseline。可直接运行：
+
+```bash
+build/quality-venv/bin/python \
+  tools/quality/check_adapter_sdk_complexity.py \
+  --lizard build/quality-venv/bin/lizard \
+  --root .
+python3 tools/quality/test_check_adapter_sdk_complexity.py
+```
+
+在 Adapter SDK 配置时启用 `MUJOCO_SIM_ENABLE_QUALITY_GATES=ON` 会把上述
+两项加入 CTest；启用 `MUJOCO_SIM_BUILD_DOCS=ON` 会生成 warning-clean Doxygen
+文档，并把未文档化的公开 API 当作错误。
+
 Install the pinned analyzer in an isolated environment:
 
 ```bash

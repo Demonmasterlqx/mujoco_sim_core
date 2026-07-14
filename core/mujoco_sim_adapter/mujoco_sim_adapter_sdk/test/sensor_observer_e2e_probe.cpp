@@ -266,32 +266,6 @@ mujoco_sim::adapter_sdk::AdapterOptions ControllerOptions(
   return options;
 }
 
-template <typename Request, typename Response>
-bool CallService(eCAL::CServiceClient* client, const std::string& method,
-                 const Request& request, Response* response,
-                 std::string* error) {
-  const auto deadline = std::chrono::steady_clock::now() + 3s;
-  while (std::chrono::steady_clock::now() < deadline) {
-    eCAL::ServiceResponseVecT responses;
-    client->CallWithResponse(method, request.SerializeAsString(), responses,
-                             200);
-    for (const auto& candidate : responses) {
-      if (candidate.call_state != eCAL::eCallState::executed ||
-          candidate.ret_state != 0) {
-        continue;
-      }
-      if (!response->ParseFromString(candidate.response)) {
-        *error = "invalid service response: " + method;
-        return false;
-      }
-      return true;
-    }
-    std::this_thread::sleep_for(20ms);
-  }
-  *error = "service call timed out: " + method;
-  return false;
-}
-
 bool StartController(mujoco_sim::adapter_sdk::SyncAdapterClient* controller,
                      std::string* error) {
   return controller->Start(error) && controller->Activate(error);

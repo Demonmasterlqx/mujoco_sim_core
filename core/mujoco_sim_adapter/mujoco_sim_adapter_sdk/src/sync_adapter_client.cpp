@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <exception>
 #include <limits>
 #include <string>
 #include <thread>
@@ -14,93 +15,34 @@
 #include <mujoco_sim/protocol/topics.hpp>
 
 #include "ecal_runtime.hpp"
+#include "internal/callback_boundary.hpp"
+#include "internal/adapter_status_monitor.hpp"
+#include "internal/sync_adapter_client_impl.hpp"
 
 namespace mujoco_sim::adapter_sdk {
 namespace {
 
-using mujoco_sim::v2::COMMIT_OK;
 using mujoco_sim::v2::OK;
-
-eCAL::SServiceMethodInformation MethodInfo(const std::string& method) {
-  eCAL::SServiceMethodInformation info;
-  info.method_name = method;
-  return info;
-}
-
-bool SameTickStream(const mujoco_sim::v2::Tick& lhs,
-                    const mujoco_sim::v2::Tick& rhs) {
-  return lhs.adapter_id() == rhs.adapter_id() &&
-         lhs.header().server_name() == rhs.header().server_name() &&
-         lhs.header().session_id() == rhs.header().session_id() &&
-         lhs.header().epoch() == rhs.header().epoch() &&
-         lhs.header().protocol_major() == rhs.header().protocol_major() &&
-         lhs.header().protocol_minor() == rhs.header().protocol_minor();
-}
-
-bool SameTickIdentity(const mujoco_sim::v2::Tick& lhs,
-                      const mujoco_sim::v2::Tick& rhs) {
-  return SameTickStream(lhs, rhs) &&
-         lhs.header().tick_id() == rhs.header().tick_id();
-}
-
-bool SameTickPayload(const mujoco_sim::v2::Tick& lhs,
-                     const mujoco_sim::v2::Tick& rhs) {
-  auto normalized_lhs = lhs;
-  auto normalized_rhs = rhs;
-  normalized_lhs.mutable_header()->set_timestamp_unix_nanos(0);
-  normalized_rhs.mutable_header()->set_timestamp_unix_nanos(0);
-  return normalized_lhs.SerializeAsString() ==
-         normalized_rhs.SerializeAsString();
-}
-
-mujoco_sim::v2::AdapterHeartbeat BuildHeartbeat(
-    const mujoco_sim::v2::Tick& tick) {
-  mujoco_sim::v2::AdapterHeartbeat heartbeat;
-  *heartbeat.mutable_header() = tick.header();
-  heartbeat.set_adapter_id(tick.adapter_id());
-  heartbeat.set_role(mujoco_sim::v2::CONTROLLER);
-  return heartbeat;
-}
 
 }  // namespace
 
-SyncAdapterClient::SyncAdapterClient(AdapterOptions options)
+SyncAdapterClient::Impl::Impl(AdapterOptions options)
     : options_(std::move(options)),
       callback_state_(std::make_shared<CallbackState>()) {
   callback_state_->client = this;
 }
 
-SyncAdapterClient::~SyncAdapterClient() {
+SyncAdapterClient::Impl::~Impl() {
   Stop();
   StopTickReception();
   std::string ignored;
   Unregister(&ignored);
-  {
-    std::lock_guard publish_lock(publisher_mutex_);
-    commit_publisher_.reset();
-    heartbeat_publisher_.reset();
-  }
-  registry_client_.reset();
+  transport_.reset();
   ecal_runtime_.reset();
 }
 
-bool SyncAdapterClient::Start(std::string* error_message) {
-  if (error_message == nullptr) {
-    return false;
-  }
-  std::lock_guard lifecycle_lock(lifecycle_mutex_);
-  error_message->clear();
-  {
-    std::lock_guard lock(mutex_);
-    if (started_) {
-      *error_message = "adapter client has already been started";
-      return false;
-    }
-  }
-  if (stop_requested_) {
-    *error_message = "adapter client has been stopped";
-    return false;
-  }
+bool SyncAdapterClient::Impl::ValidateOptions(
+    std::string* error_message) const {
   if (options_.adapter_id.empty()) {
     *error_message = "adapter_id is required";
     return false;
@@ -117,105 +59,129 @@ bool SyncAdapterClient::Start(std::string* error_message) {
     *error_message = "at least one command actuator is required";
     return false;
   }
+  return true;
+}
+
+bool SyncAdapterClient::Impl::Start(std::string* error_message) {
+  if (error_message == nullptr) {
+    return false;
+  }
+  std::lock_guard session_lock(lifecycle_mutex_);
+  error_message->clear();
+  {
+    std::lock_guard lock(mutex_);
+    if (session_.started()) {
+      *error_message = "adapter client has already been started";
+      return false;
+    }
+  }
+  if (stop_requested_) {
+    *error_message = "adapter client has been stopped";
+    return false;
+  }
+  if (!ValidateOptions(error_message)) return false;
   ecal_runtime_ = internal::AcquireEcalRuntime(
       "mujoco-sim-adapter-" + options_.adapter_id, error_message);
   if (!ecal_runtime_) {
     return false;
   }
 
-  eCAL::ServiceMethodInformationSetT methods;
-  methods.insert(MethodInfo(mujoco_sim::protocol::kGetAvailableResourcesMethod));
-  methods.insert(MethodInfo(mujoco_sim::protocol::kRegisterAdapterMethod));
-  methods.insert(MethodInfo(mujoco_sim::protocol::kActivateAdapterMethod));
-  methods.insert(MethodInfo(mujoco_sim::protocol::kUnregisterAdapterMethod));
-  registry_client_ = std::make_unique<eCAL::CServiceClient>(
-      mujoco_sim::protocol::RegistryServiceName(options_.server_name), methods);
+  if (!transport_) {
+    transport_ = internal::MakeEcalAdapterTransport(
+        options_.server_name, options_.service_timeout_ms, &stop_requested_,
+        true);
+  }
   if (!Register(error_message)) {
     std::string ignored;
-    UnregisterWith(
-        [this](const mujoco_sim::v2::UnregisterAdapterRequest& request,
-               mujoco_sim::v2::UnregisterAdapterResponse* response,
-               std::string* error) {
-          return CallService(mujoco_sim::protocol::kUnregisterAdapterMethod,
-                             request, response, error, true);
-        },
-        &ignored);
+    UnregisterSession(&ignored);
     return false;
   }
 
-  commit_publisher_ = std::make_unique<eCAL::CPublisher>(
-      mujoco_sim::protocol::CommitTopicName(options_.server_name));
-  heartbeat_publisher_ = std::make_unique<eCAL::CPublisher>(
-      mujoco_sim::protocol::AdapterHeartbeatTopicName(options_.server_name));
-  {
+  if (!StartTickReception(error_message)) {
+    StopTickReception();
+    std::string ignored;
+    UnregisterSession(&ignored);
+    return false;
+  }
+  return FinishStart(error_message);
+}
+
+bool SyncAdapterClient::Impl::StartTickReception(
+    std::string* error_message) {
+  try {
+    {
     std::lock_guard callback_lock(callback_state_->mutex);
     callback_state_->client = this;
     callback_state_->enabled = true;
+    }
+    const auto callback_state = callback_state_;
+    const auto weak_self = weak_from_this();
+    tick_subscriber_ = std::make_unique<eCAL::CSubscriber>(
+        mujoco_sim::protocol::TickTopicName(options_.server_name,
+                                            options_.adapter_id));
+    tick_subscriber_->SetReceiveCallback(
+        [callback_state, weak_self](const eCAL::STopicId&,
+                       const eCAL::SDataTypeInformation&,
+                       const eCAL::SReceiveCallbackData& data) {
+          const auto self = weak_self.lock();
+          if (!self) return;
+          CallbackLease callback(callback_state);
+          if (callback.client() != nullptr) {
+            internal::InvokeCallbackBoundary(
+                [&] { self->HandleTickBytes(data.buffer, data.buffer_size); },
+                [&](const char* error) {
+                  self->SetTerminalError(
+                      std::string("Tick callback failed: ") + error);
+                });
+          }
+        });
+    status_subscriber_ = std::make_unique<eCAL::CSubscriber>(
+        mujoco_sim::protocol::StatusTopicName(options_.server_name));
+    status_subscriber_->SetReceiveCallback(
+        [callback_state, weak_self](const eCAL::STopicId&,
+                       const eCAL::SDataTypeInformation&,
+                       const eCAL::SReceiveCallbackData& data) {
+          const auto self = weak_self.lock();
+          if (!self) return;
+          CallbackLease callback(callback_state);
+          if (callback.client() != nullptr) {
+            internal::InvokeCallbackBoundary(
+                [&] { self->HandleStatusBytes(data.buffer, data.buffer_size); },
+                [&](const char* error) {
+                  self->SetTerminalError(
+                      std::string("status callback failed: ") + error);
+                });
+          }
+        });
+  } catch (const std::exception& error) {
+    *error_message = std::string("failed to create controller endpoints: ") +
+                     error.what();
+    return false;
   }
-  const auto callback_state = callback_state_;
-  tick_subscriber_ = std::make_unique<eCAL::CSubscriber>(
-      mujoco_sim::protocol::TickTopicName(options_.server_name,
-                                          options_.adapter_id));
-  tick_subscriber_->SetReceiveCallback(
-      [callback_state](const eCAL::STopicId&,
-                       const eCAL::SDataTypeInformation&,
-                       const eCAL::SReceiveCallbackData& data) {
-        CallbackLease callback(callback_state);
-        if (callback.client() != nullptr) {
-          callback.client()->HandleTickBytes(data.buffer, data.buffer_size);
-        }
-      });
-  status_subscriber_ = std::make_unique<eCAL::CSubscriber>(
-      mujoco_sim::protocol::StatusTopicName(options_.server_name));
-  status_subscriber_->SetReceiveCallback(
-      [callback_state](const eCAL::STopicId&,
-                       const eCAL::SDataTypeInformation&,
-                       const eCAL::SReceiveCallbackData& data) {
-        CallbackLease callback(callback_state);
-        if (callback.client() != nullptr) {
-          callback.client()->HandleStatusBytes(data.buffer, data.buffer_size);
-        }
-      });
-
-  return FinishStart(
-      [this] {
-        std::string ignored;
-        UnregisterWith(
-            [this](
-                const mujoco_sim::v2::UnregisterAdapterRequest& request,
-                mujoco_sim::v2::UnregisterAdapterResponse* response,
-                std::string* unregister_error) {
-              return CallService(
-                  mujoco_sim::protocol::kUnregisterAdapterMethod, request,
-                  response, unregister_error, true);
-            },
-            &ignored);
-      },
-      error_message);
+  return true;
 }
 
-bool SyncAdapterClient::FinishStart(
-    const std::function<void()>& unregister,
-    std::string* error_message) {
+bool SyncAdapterClient::Impl::FinishStart(std::string* error_message) {
   bool cancelled = false;
   {
     std::lock_guard lock(mutex_);
     cancelled = stop_requested_;
     if (!cancelled) {
       monitor_ecal_ = true;
-      started_ = true;
+      session_.StartCompleted();
     }
   }
   if (cancelled) {
     StopTickReception();
-    unregister();
+    std::string ignored;
+    UnregisterSession(&ignored);
     *error_message = "adapter start was cancelled";
     return false;
   }
   return true;
 }
 
-bool SyncAdapterClient::Register(std::string* error_message) {
+bool SyncAdapterClient::Impl::Register(std::string* error_message) {
   mujoco_sim::v2::RegisterAdapterRequest request;
   request.set_server_name(options_.server_name);
   request.set_adapter_id(options_.adapter_id);
@@ -230,8 +196,7 @@ bool SyncAdapterClient::Register(std::string* error_message) {
     request.add_command_names(name);
   }
 
-  if (!CallService(mujoco_sim::protocol::kRegisterAdapterMethod, request,
-                   &registration_, error_message)) {
+  if (!transport_->Register(request, &registration_, error_message)) {
     return false;
   }
   if (registration_.code() != OK) {
@@ -240,7 +205,8 @@ bool SyncAdapterClient::Register(std::string* error_message) {
   }
   {
     std::lock_guard lock(mutex_);
-    registered_ = true;
+    session_.Registered(
+        {registration_.session_id(), registration_.epoch()});
   }
   if (registration_.adapter_id() != options_.adapter_id ||
       registration_.role() != mujoco_sim::v2::CONTROLLER ||
@@ -265,35 +231,19 @@ bool SyncAdapterClient::Register(std::string* error_message) {
   return true;
 }
 
-bool SyncAdapterClient::Activate(std::string* error_message) {
-  std::lock_guard lifecycle_lock(lifecycle_mutex_);
-  return ActivateWith(
-      [this](const mujoco_sim::v2::ActivateAdapterRequest& request,
-             mujoco_sim::v2::ActivateAdapterResponse* response,
-             std::string* error) {
-        return CallService(mujoco_sim::protocol::kActivateAdapterMethod,
-                           request, response, error);
-      },
-      std::chrono::milliseconds(100), error_message);
-}
-
-bool SyncAdapterClient::ActivateWith(
-    const std::function<bool(
-        const mujoco_sim::v2::ActivateAdapterRequest&,
-        mujoco_sim::v2::ActivateAdapterResponse*, std::string*)>& call,
-    std::chrono::milliseconds discovery_delay,
-    std::string* error_message) {
+bool SyncAdapterClient::Impl::Activate(std::string* error_message) {
+  std::lock_guard session_lock(lifecycle_mutex_);
   if (error_message == nullptr) {
     return false;
   }
   error_message->clear();
   {
     std::lock_guard lock(mutex_);
-    if (!started_ || !registered_) {
+    if (!session_.started() || !session_.has_session()) {
       *error_message = "adapter client must be started before activation";
       return false;
     }
-    if (activated_) {
+    if (session_.active()) {
       *error_message = "adapter client has already been activated";
       return false;
     }
@@ -302,7 +252,7 @@ bool SyncAdapterClient::ActivateWith(
       return false;
     }
   }
-  if (!WaitBeforeActivation(discovery_delay)) {
+  if (!WaitBeforeActivation(activation_delay_)) {
     *error_message = "adapter activation was cancelled";
     return false;
   }
@@ -310,8 +260,8 @@ bool SyncAdapterClient::ActivateWith(
   mujoco_sim::v2::ActivateAdapterRequest request;
   request.set_adapter_id(options_.adapter_id);
   request.set_role(mujoco_sim::v2::CONTROLLER);
-  request.set_session_id(registration_.session_id());
-  request.set_epoch(registration_.epoch());
+  request.set_session_id(session_.identity().session_id);
+  request.set_epoch(session_.identity().epoch);
 
   {
     std::lock_guard lock(mutex_);
@@ -319,339 +269,54 @@ bool SyncAdapterClient::ActivateWith(
       *error_message = "adapter activation was cancelled";
       return false;
     }
-    accepting_ticks_ = true;
+    session_.BeginActivation();
   }
   mujoco_sim::v2::ActivateAdapterResponse response;
-  const bool called = call(request, &response, error_message);
+  const bool called = transport_->Activate(request, &response, error_message);
   if (!called || response.code() != OK) {
     if (called) {
       *error_message = response.message();
     }
     std::lock_guard lock(mutex_);
-    accepting_ticks_ = false;
+    session_.ActivationRejected();
     queued_tick_.reset();
     return false;
   }
   {
     std::lock_guard lock(mutex_);
     if (stop_requested_) {
-      accepting_ticks_ = false;
       queued_tick_.reset();
       *error_message = "adapter activation was cancelled";
       return false;
     }
-    activated_ = true;
+    session_.Activated();
   }
   condition_.notify_all();
   return true;
 }
 
-template <typename Request, typename Response>
-bool SyncAdapterClient::CallService(const std::string& method,
-                                    const Request& request, Response* response,
-                                    std::string* error_message,
-                                    bool allow_after_stop) {
-  if (response == nullptr || error_message == nullptr) {
-    return false;
-  }
-  if (!registry_client_) {
-    *error_message = "registry client is not initialized";
-    return false;
-  }
-  std::string bytes;
-  if (!request.SerializeToString(&bytes)) {
-    *error_message = "failed to serialize service request";
-    return false;
-  }
-
-  const auto deadline = std::chrono::steady_clock::now() +
-                        std::chrono::milliseconds(options_.service_timeout_ms);
-  while ((allow_after_stop || !stop_requested_) &&
-         std::chrono::steady_clock::now() < deadline) {
-    if (!registry_client_->IsConnected()) {
-      std::this_thread::sleep_for(std::chrono::milliseconds(50));
-      continue;
-    }
-    eCAL::ServiceResponseVecT responses;
-    registry_client_->CallWithResponse(method, bytes, responses, 100);
-    for (const auto& service_response : responses) {
-      if (service_response.call_state == eCAL::eCallState::executed) {
-        if (!response->ParseFromString(service_response.response)) {
-          *error_message = "failed to parse service response";
-          return false;
-        }
-        return true;
-      }
-    }
-    std::this_thread::sleep_for(std::chrono::milliseconds(50));
-  }
-  *error_message = stop_requested_ && !allow_after_stop
-                       ? "service call cancelled: " + method
-                       : "service call timed out: " + method;
-  return false;
-}
-
-TickWaitResult SyncAdapterClient::WaitForTick(
-    std::chrono::milliseconds timeout, mujoco_sim::v2::Tick* tick,
-    std::string* error_message) {
-  if (tick == nullptr || error_message == nullptr) {
-    if (error_message != nullptr) {
-      *error_message = "tick and error_message must not be null";
-    }
-    return TickWaitResult::kError;
-  }
-  error_message->clear();
-  if (timeout.count() < 0) {
-    *error_message = "tick wait timeout must not be negative";
-    return TickWaitResult::kError;
-  }
-
-  std::unique_lock lock(mutex_);
-  if (!terminal_error_.empty()) {
-    *error_message = terminal_error_;
-    return TickWaitResult::kError;
-  }
-  if (stop_requested_ || (monitor_ecal_ && !eCAL::Ok())) {
-    return TickWaitResult::kStopped;
-  }
-  if (!started_ || !activated_) {
-    *error_message = "adapter client must be activated before waiting";
-    return TickWaitResult::kError;
-  }
-  if (wait_in_progress_) {
-    *error_message = "another thread is already waiting for a Tick";
-    return TickWaitResult::kError;
-  }
-  if (outstanding_tick_.has_value()) {
-    *error_message = "the previously received Tick has not been committed";
-    return TickWaitResult::kError;
-  }
-  wait_in_progress_ = true;
-  const auto finish = [this] { wait_in_progress_ = false; };
-  const auto ready = [this] {
-    return queued_tick_.has_value() || !terminal_error_.empty() ||
-           stop_requested_.load() || (monitor_ecal_ && !eCAL::Ok());
-  };
-
-  bool signaled = ready();
-  if (!signaled && timeout == std::chrono::milliseconds::max()) {
-    while (!(signaled = ready())) {
-      condition_.wait_for(lock, std::chrono::milliseconds(50));
-    }
-  } else if (!signaled) {
-    signaled = condition_.wait_for(lock, timeout, ready);
-  }
-  if (!signaled) {
-    finish();
-    return TickWaitResult::kTimeout;
-  }
-  if (!terminal_error_.empty()) {
-    *error_message = terminal_error_;
-    finish();
-    return TickWaitResult::kError;
-  }
-  if (stop_requested_ || (monitor_ecal_ && !eCAL::Ok())) {
-    finish();
-    return TickWaitResult::kStopped;
-  }
-
-  outstanding_tick_ = std::move(queued_tick_);
-  queued_tick_.reset();
-  *tick = *outstanding_tick_;
-  finish();
-  return TickWaitResult::kReceived;
-}
-
-bool SyncAdapterClient::BuildValidatedCommit(
-    const mujoco_sim::v2::Tick& tick,
-    const std::vector<CommandValue>& commands,
-    mujoco_sim::v2::AdapterCommit* commit,
-    std::string* error_message) const {
-  if (commit == nullptr || error_message == nullptr) {
-    return false;
-  }
-  std::unordered_map<std::string, double> values;
-  values.reserve(commands.size());
-  for (const auto& command : commands) {
-    if (command.name.empty()) {
-      *error_message = "command name must not be empty";
-      return false;
-    }
-    if (!std::isfinite(command.value)) {
-      *error_message = "command value must be finite: " + command.name;
-      return false;
-    }
-    if (!values.emplace(command.name, command.value).second) {
-      *error_message = "duplicate actuator command: " + command.name;
-      return false;
-    }
-  }
-
-  mujoco_sim::v2::AdapterCommit output;
-  *output.mutable_header() = tick.header();
-  output.set_adapter_id(tick.adapter_id());
-  output.set_status(COMMIT_OK);
-  for (const auto& descriptor : registration_.layout().commands()) {
-    if (descriptor.dimension() != 1) {
-      *error_message = "unsupported non-scalar actuator command: " +
-                       descriptor.name();
-      return false;
-    }
-    const auto value = values.find(descriptor.name());
-    if (value == values.end()) {
-      *error_message = "missing actuator command: " + descriptor.name();
-      return false;
-    }
-    if (descriptor.has_ctrl_range() &&
-        (value->second < descriptor.ctrl_min() ||
-         value->second > descriptor.ctrl_max())) {
-      *error_message = "actuator command is outside ctrlrange: " +
-                       descriptor.name();
-      return false;
-    }
-    auto* block = output.add_commands();
-    block->set_name(descriptor.name());
-    block->add_values(value->second);
-  }
-  if (values.size() !=
-      static_cast<std::size_t>(registration_.layout().commands_size())) {
-    for (const auto& [name, _] : values) {
-      const auto known = std::find_if(
-          registration_.layout().commands().begin(),
-          registration_.layout().commands().end(),
-          [&name](const auto& descriptor) {
-            return descriptor.name() == name;
-          });
-      if (known == registration_.layout().commands().end()) {
-        *error_message = "unknown actuator command: " + name;
-        return false;
-      }
-    }
-    *error_message = "command set does not match the registered layout";
-    return false;
-  }
-  *commit = std::move(output);
-  return true;
-}
-
-bool SyncAdapterClient::Commit(
-    const mujoco_sim::v2::Tick& tick,
-    const std::vector<CommandValue>& commands,
-    std::string* error_message) {
-  std::lock_guard lifecycle_lock(lifecycle_mutex_);
-  return CommitWith(
-      tick, commands,
-      [this](const mujoco_sim::v2::AdapterCommit& commit) {
-        return PublishCommit(commit);
-      },
-      error_message);
-}
-
-bool SyncAdapterClient::CommitWith(
-    const mujoco_sim::v2::Tick& tick,
-    const std::vector<CommandValue>& commands,
-    const std::function<bool(const mujoco_sim::v2::AdapterCommit&)>& publish,
-    std::string* error_message) {
-  if (error_message == nullptr) {
-    return false;
-  }
-  error_message->clear();
-
-  mujoco_sim::v2::Tick canonical_tick;
-  {
-    std::lock_guard lock(mutex_);
-    if (!started_ || !activated_ || stop_requested_) {
-      *error_message = "adapter client is not active";
-      return false;
-    }
-    if (outstanding_tick_.has_value() &&
-        SameTickIdentity(tick, *outstanding_tick_) &&
-        SameTickPayload(tick, *outstanding_tick_)) {
-      canonical_tick = *outstanding_tick_;
-    } else if (committed_tick_.has_value() &&
-               SameTickIdentity(tick, *committed_tick_) &&
-               SameTickPayload(tick, *committed_tick_)) {
-      canonical_tick = *committed_tick_;
-    } else {
-      *error_message = "Tick is not the current outstanding or committed Tick";
-      return false;
-    }
-  }
-
-  mujoco_sim::v2::AdapterCommit commit;
-  if (!BuildValidatedCommit(canonical_tick, commands, &commit,
-                            error_message)) {
-    return false;
-  }
-
-  {
-    std::lock_guard lock(mutex_);
-    if (stop_requested_ || !activated_) {
-      *error_message = "adapter client stopped before Commit";
-      return false;
-    }
-    if (outstanding_tick_.has_value() &&
-        SameTickIdentity(canonical_tick, *outstanding_tick_) &&
-        SameTickPayload(canonical_tick, *outstanding_tick_)) {
-      committed_tick_ = *outstanding_tick_;
-      cached_commit_ = commit;
-      outstanding_tick_.reset();
-    } else if (committed_tick_.has_value() && cached_commit_.has_value() &&
-               SameTickIdentity(canonical_tick, *committed_tick_) &&
-               SameTickPayload(canonical_tick, *committed_tick_)) {
-      if (commit.SerializeAsString() != cached_commit_->SerializeAsString()) {
-        *error_message = "a different Commit was already sent for this Tick";
-        return false;
-      }
-      commit = *cached_commit_;
-    } else {
-      *error_message = "Tick is no longer available for Commit";
-      return false;
-    }
-  }
-
-  const bool published = publish(commit);
-  condition_.notify_all();
-  if (!published) {
-    *error_message = "failed to publish Commit";
-    return false;
-  }
-  return true;
-}
-
-bool SyncAdapterClient::WaitBeforeActivation(std::chrono::milliseconds delay) {
+bool SyncAdapterClient::Impl::WaitBeforeActivation(std::chrono::milliseconds delay) {
   std::unique_lock lock(mutex_);
   condition_.wait_for(lock, delay,
                       [this] { return stop_requested_.load(); });
   return !stop_requested_;
 }
 
-void SyncAdapterClient::Stop() {
+void SyncAdapterClient::Impl::Stop() {
   stop_requested_ = true;
   {
     std::lock_guard lock(mutex_);
-    accepting_ticks_ = false;
+    session_.Stop();
   }
   condition_.notify_all();
 }
 
-bool SyncAdapterClient::Unregister(std::string* error_message) {
-  std::lock_guard lifecycle_lock(lifecycle_mutex_);
-  return UnregisterWith(
-      [this](const mujoco_sim::v2::UnregisterAdapterRequest& request,
-             mujoco_sim::v2::UnregisterAdapterResponse* response,
-             std::string* error) {
-        return CallService(mujoco_sim::protocol::kUnregisterAdapterMethod,
-                           request, response, error, true);
-      },
-      error_message);
+bool SyncAdapterClient::Impl::Unregister(std::string* error_message) {
+  std::lock_guard session_lock(lifecycle_mutex_);
+  return UnregisterSession(error_message);
 }
 
-bool SyncAdapterClient::UnregisterWith(
-    const std::function<bool(
-        const mujoco_sim::v2::UnregisterAdapterRequest&,
-        mujoco_sim::v2::UnregisterAdapterResponse*, std::string*)>& call,
-    std::string* error_message) {
+bool SyncAdapterClient::Impl::UnregisterSession(std::string* error_message) {
   if (error_message == nullptr) {
     return false;
   }
@@ -659,23 +324,23 @@ bool SyncAdapterClient::UnregisterWith(
   mujoco_sim::v2::UnregisterAdapterRequest request;
   {
     std::lock_guard lock(mutex_);
-    if (!registered_) {
+    if (!session_.has_session()) {
       return true;
     }
     request.set_adapter_id(options_.adapter_id);
     request.set_role(mujoco_sim::v2::CONTROLLER);
-    request.set_session_id(registration_.session_id());
-    request.set_epoch(registration_.epoch());
+    request.set_session_id(session_.identity().session_id);
+    request.set_epoch(session_.identity().epoch);
   }
 
   mujoco_sim::v2::UnregisterAdapterResponse response;
-  if (!call(request, &response, error_message)) {
+  if (!transport_ || !transport_->Unregister(request, &response, error_message)) {
     return false;
   }
   return CompleteUnregister(response, error_message);
 }
 
-bool SyncAdapterClient::CompleteUnregister(
+bool SyncAdapterClient::Impl::CompleteUnregister(
     const mujoco_sim::v2::UnregisterAdapterResponse& response,
     std::string* error_message) {
   if (response.code() != OK && response.code() != mujoco_sim::v2::NOT_FOUND &&
@@ -687,16 +352,14 @@ bool SyncAdapterClient::CompleteUnregister(
   return true;
 }
 
-void SyncAdapterClient::MarkStoppedLocked() {
+void SyncAdapterClient::Impl::MarkStoppedLocked() {
   stop_requested_ = true;
-  registered_ = false;
-  activated_ = false;
-  accepting_ticks_ = false;
+  session_.ReleaseSession();
   queued_tick_.reset();
   outstanding_tick_.reset();
 }
 
-void SyncAdapterClient::TransitionToStopped() {
+void SyncAdapterClient::Impl::TransitionToStopped() {
   {
     std::lock_guard lock(mutex_);
     MarkStoppedLocked();
@@ -704,7 +367,7 @@ void SyncAdapterClient::TransitionToStopped() {
   condition_.notify_all();
 }
 
-void SyncAdapterClient::AddLifecycleWarning(const std::string& warning) {
+void SyncAdapterClient::Impl::AddLifecycleWarning(const std::string& warning) {
   if (warning.empty()) {
     return;
   }
@@ -716,9 +379,10 @@ void SyncAdapterClient::AddLifecycleWarning(const std::string& warning) {
   }
 }
 
-void SyncAdapterClient::SetTerminalError(const std::string& error) {
+void SyncAdapterClient::Impl::SetTerminalError(const std::string& error) {
   {
     std::lock_guard lock(mutex_);
+    session_.Fail();
     if (terminal_error_.empty()) {
       terminal_error_ = error;
     }
@@ -727,273 +391,81 @@ void SyncAdapterClient::SetTerminalError(const std::string& error) {
     } else if (lifecycle_warning_.find(error) == std::string::npos) {
       lifecycle_warning_ += "; " + error;
     }
-    accepting_ticks_ = false;
   }
   stop_requested_ = true;
   condition_.notify_all();
 }
 
-std::string SyncAdapterClient::lifecycle_warning() const {
+std::string SyncAdapterClient::Impl::lifecycle_warning() const {
   std::lock_guard lock(mutex_);
   return lifecycle_warning_;
 }
 
-std::uint64_t SyncAdapterClient::layout_hash_mismatches() const {
+std::uint64_t SyncAdapterClient::Impl::layout_hash_mismatches() const {
   std::lock_guard lock(mutex_);
   return layout_hash_mismatches_;
 }
 
-SyncAdapterClient::CallbackLease::CallbackLease(
-    std::shared_ptr<CallbackState> state)
-    : state_(std::move(state)) {
-  std::lock_guard lock(state_->mutex);
-  if (state_->enabled && state_->client != nullptr) {
-    ++state_->active_callbacks;
-    client_ = state_->client;
-  }
-}
-
-SyncAdapterClient::CallbackLease::~CallbackLease() {
-  if (client_ == nullptr) {
-    return;
-  }
-  {
-    std::lock_guard lock(state_->mutex);
-    --state_->active_callbacks;
-  }
-  state_->condition.notify_all();
-}
-
-void SyncAdapterClient::StopTickReception() {
-  {
-    std::lock_guard callback_lock(callback_state_->mutex);
-    callback_state_->enabled = false;
-    callback_state_->client = nullptr;
-  }
-  callback_state_->condition.notify_all();
-  {
-    std::lock_guard lock(mutex_);
-    accepting_ticks_ = false;
-  }
+void SyncAdapterClient::Impl::StopTickReception() {
+  CallbackGate::Disable(callback_state_);
   if (tick_subscriber_) {
     tick_subscriber_->RemoveReceiveCallback();
   }
   if (status_subscriber_) {
     status_subscriber_->RemoveReceiveCallback();
   }
-  std::unique_lock callback_lock(callback_state_->mutex);
-  callback_state_->condition.wait(
-      callback_lock,
-      [this] { return callback_state_->active_callbacks == 0; });
-  callback_lock.unlock();
+  CallbackGate::WaitForOtherCallbacks(callback_state_);
   tick_subscriber_.reset();
   status_subscriber_.reset();
 }
 
-bool SyncAdapterClient::HasExpectedTickIdentity(
-    const mujoco_sim::v2::Tick& tick) const {
-  const auto& header = tick.header();
-  return tick.adapter_id() == options_.adapter_id &&
-         (tick.controller_state() == mujoco_sim::v2::ACTIVE ||
-          tick.controller_state() == mujoco_sim::v2::TIMED_OUT) &&
-         header.server_name() == options_.server_name &&
-         header.session_id() == registration_.session_id() &&
-         header.epoch() == registration_.epoch() &&
-         header.protocol_major() == mujoco_sim::protocol::kProtocolMajor &&
-         header.protocol_minor() == mujoco_sim::protocol::kProtocolMinor;
+SyncAdapterClient::SyncAdapterClient(AdapterOptions options)
+    : impl_(std::make_shared<Impl>(std::move(options))) {}
+
+SyncAdapterClient::~SyncAdapterClient() {
+  impl_->Stop();
+  impl_->StopTickReception();
+  std::string ignored;
+  impl_->Unregister(&ignored);
 }
 
-bool SyncAdapterClient::IsExpectedTick(
-    const mujoco_sim::v2::Tick& tick) const {
-  return HasExpectedTickIdentity(tick) &&
-         tick.layout_hash().size() == mujoco_sim::protocol::kLayoutHashSize &&
-         tick.layout_hash() == registration_.layout().layout_hash();
+bool SyncAdapterClient::Start(std::string* error_message) {
+  return impl_->Start(error_message);
 }
 
-void SyncAdapterClient::HandleStatusBytes(const void* data, std::size_t size) {
-  if (data == nullptr || size == 0 ||
-      size > static_cast<std::size_t>(std::numeric_limits<int>::max())) {
-    return;
-  }
-  mujoco_sim::v2::ServerStatus status;
-  if (!status.ParseFromArray(data, static_cast<int>(size)) ||
-      status.header().server_name() != options_.server_name ||
-      status.header().epoch() != registration_.epoch() ||
-      status.header().protocol_major() !=
-          mujoco_sim::protocol::kProtocolMajor ||
-      status.header().protocol_minor() !=
-          mujoco_sim::protocol::kProtocolMinor) {
-    return;
-  }
-  if (status.state() == mujoco_sim::v2::STOPPED) {
-    TransitionToStopped();
-    return;
-  }
-  if (status.state() == mujoco_sim::v2::ERROR_PAUSED) {
-    SetTerminalError(status.message().empty()
-                         ? "server entered ERROR_PAUSED"
-                         : status.message());
-    return;
-  }
-  for (const auto& adapter : status.adapters()) {
-    if (adapter.role() != mujoco_sim::v2::CONTROLLER ||
-        adapter.adapter_id() != options_.adapter_id) {
-      continue;
-    }
-    if (adapter.session_id() != registration_.session_id()) {
-      SetTerminalError("server replaced adapter session");
-      return;
-    }
-    if (adapter.state() == mujoco_sim::v2::ERROR) {
-      SetTerminalError(adapter.message().empty()
-                           ? "server marked adapter as ERROR"
-                           : adapter.message());
-      return;
-    }
-  }
+bool SyncAdapterClient::Activate(std::string* error_message) {
+  return impl_->Activate(error_message);
 }
 
-void SyncAdapterClient::HandleTickBytes(const void* data, std::size_t size) {
-  if (data == nullptr || size == 0 ||
-      size > static_cast<std::size_t>(std::numeric_limits<int>::max())) {
-    return;
-  }
-  mujoco_sim::v2::Tick tick;
-  if (!tick.ParseFromArray(data, static_cast<int>(size)) ||
-      !HasExpectedTickIdentity(tick)) {
-    return;
-  }
-  if (tick.layout_hash().size() != mujoco_sim::protocol::kLayoutHashSize ||
-      tick.layout_hash() != registration_.layout().layout_hash()) {
-    {
-      std::lock_guard lock(mutex_);
-      ++layout_hash_mismatches_;
-    }
-    SetTerminalError(
-        "event=layout_hash_mismatch adapter_id=" + options_.adapter_id +
-        " expected_bytes=" +
-        std::to_string(mujoco_sim::protocol::kLayoutHashSize) +
-        " actual_bytes=" + std::to_string(tick.layout_hash().size()));
-    return;
-  }
-  HandleTick(
-      tick,
-      [this](const mujoco_sim::v2::AdapterHeartbeat& heartbeat) {
-        PublishHeartbeat(heartbeat);
-      },
-      [this](const mujoco_sim::v2::AdapterCommit& commit) {
-        (void)PublishCommit(commit);
-      });
+TickWaitResult SyncAdapterClient::WaitForTick(
+    std::chrono::milliseconds timeout, mujoco_sim::v2::Tick* tick,
+    std::string* error_message) {
+  return impl_->WaitForTick(timeout, tick, error_message);
 }
 
-void SyncAdapterClient::HandleTick(
-    const mujoco_sim::v2::Tick& tick,
-    const std::function<void(const mujoco_sim::v2::AdapterHeartbeat&)>&
-        publish_heartbeat,
-    const std::function<void(const mujoco_sim::v2::AdapterCommit&)>&
-        publish_commit) {
-  std::optional<mujoco_sim::v2::AdapterCommit> retry_commit;
-  bool accepted = false;
-  bool queued = false;
-  {
-    std::lock_guard lock(mutex_);
-    if (!accepting_ticks_ || stop_requested_) {
-      return;
-    }
-
-    const auto record_conflict = [&] {
-      const std::string warning =
-          "conflicting payload for Tick " +
-          std::to_string(tick.header().tick_id());
-      if (lifecycle_warning_.empty()) {
-        lifecycle_warning_ = warning;
-      } else if (lifecycle_warning_.find(warning) == std::string::npos) {
-        lifecycle_warning_ += "; " + warning;
-      }
-    };
-
-    const auto inspect_known = [&](const auto& known) {
-      return known.has_value() && SameTickIdentity(tick, *known);
-    };
-    if (inspect_known(committed_tick_)) {
-      if (!SameTickPayload(tick, *committed_tick_)) {
-        record_conflict();
-        return;
-      }
-      retry_commit = cached_commit_;
-      accepted = true;
-    } else if (inspect_known(outstanding_tick_)) {
-      if (!SameTickPayload(tick, *outstanding_tick_)) {
-        record_conflict();
-        return;
-      }
-      accepted = true;
-    } else if (inspect_known(queued_tick_)) {
-      if (!SameTickPayload(tick, *queued_tick_)) {
-        record_conflict();
-        return;
-      }
-      accepted = true;
-    } else {
-      std::uint64_t newest_tick_id = 0;
-      bool have_known_tick = false;
-      const auto include = [&](const auto& known) {
-        if (known.has_value() && SameTickStream(tick, *known)) {
-          newest_tick_id = std::max(newest_tick_id,
-                                    known->header().tick_id());
-          have_known_tick = true;
-        }
-      };
-      include(committed_tick_);
-      include(outstanding_tick_);
-      include(queued_tick_);
-      if (have_known_tick && tick.header().tick_id() < newest_tick_id) {
-        return;
-      }
-      queued_tick_ = tick;
-      accepted = true;
-      queued = true;
-    }
-  }
-
-  if (!accepted) {
-    return;
-  }
-  publish_heartbeat(BuildHeartbeat(tick));
-  if (retry_commit.has_value()) {
-    publish_commit(*retry_commit);
-  }
-  if (queued) {
-    condition_.notify_all();
-  }
+bool SyncAdapterClient::Commit(const mujoco_sim::v2::Tick& tick,
+                               const std::vector<CommandValue>& commands,
+                               std::string* error_message) {
+  return impl_->Commit(tick, commands, error_message);
 }
 
-bool SyncAdapterClient::PublishCommit(
-    const mujoco_sim::v2::AdapterCommit& commit) {
-  std::string bytes;
-  if (!commit.SerializeToString(&bytes)) {
-    return false;
-  }
-  return PublishSerialized([this, &bytes] {
-    return commit_publisher_ != nullptr && commit_publisher_->Send(bytes);
-  });
+void SyncAdapterClient::Stop() { impl_->Stop(); }
+
+bool SyncAdapterClient::Unregister(std::string* error_message) {
+  return impl_->Unregister(error_message);
 }
 
-void SyncAdapterClient::PublishHeartbeat(
-    const mujoco_sim::v2::AdapterHeartbeat& heartbeat) {
-  std::string bytes;
-  if (heartbeat.SerializeToString(&bytes)) {
-    (void)PublishSerialized([this, &bytes] {
-      return heartbeat_publisher_ != nullptr &&
-             heartbeat_publisher_->Send(bytes);
-    });
-  }
+std::string SyncAdapterClient::lifecycle_warning() const {
+  return impl_->lifecycle_warning();
 }
 
-bool SyncAdapterClient::PublishSerialized(
-    const std::function<bool()>& publish) {
-  std::lock_guard publish_lock(publisher_mutex_);
-  return publish();
+std::uint64_t SyncAdapterClient::layout_hash_mismatches() const {
+  return impl_->layout_hash_mismatches();
+}
+
+const mujoco_sim::v2::RegisterAdapterResponse&
+SyncAdapterClient::registration() const {
+  return impl_->registration_;
 }
 
 }  // namespace mujoco_sim::adapter_sdk
