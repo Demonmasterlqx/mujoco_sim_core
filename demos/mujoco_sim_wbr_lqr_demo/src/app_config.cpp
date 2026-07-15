@@ -214,7 +214,11 @@ bool BuildAppConfig(const generated::WbrConfig& generated_config,
   AppConfig output;
   output.adapter.server_name = generated_config.adapter.server_name;
   output.adapter.adapter_id = generated_config.adapter.adapter_id;
-  output.adapter.timeout_ms = generated_config.adapter.timeout_ms;
+  output.adapter.commit_timeout_ms = generated_config.adapter.commit_timeout_ms;
+  output.adapter.session_timeout_ms =
+      generated_config.adapter.session_timeout_ms;
+  output.adapter.heartbeat_period_ms =
+      generated_config.adapter.heartbeat_period_ms;
   output.adapter.service_timeout_ms = generated_config.adapter.service_timeout_ms;
   output.adapter.max_ticks = generated_config.adapter.max_ticks;
   output.log_every_ticks = generated_config.log_every_ticks;

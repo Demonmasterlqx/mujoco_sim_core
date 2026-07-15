@@ -24,7 +24,7 @@ constexpr double kTwoPi = 6.28318530717958647692528676655900577;
 
 struct RayLidar::Impl {
   RayLidarProfile profile;
-  mujoco_sim::v2::StreamDescriptor descriptor;
+  mujoco_sim::v3::StreamDescriptor descriptor;
   std::vector<double> vertical_angles;
   const mjModel* model = nullptr;
   int site_id = -1;
@@ -53,7 +53,7 @@ const RayLidarProfile& RayLidar::profile() const noexcept {
   return impl_->profile;
 }
 
-const mujoco_sim::v2::StreamDescriptor& RayLidar::descriptor() const noexcept {
+const mujoco_sim::v3::StreamDescriptor& RayLidar::descriptor() const noexcept {
   return impl_->descriptor;
 }
 

@@ -7,6 +7,14 @@ work_root="${2:-${TMPDIR:-/tmp}/mujoco_sim_server_matrix}"
 model="${source_dir}/../mujoco_sim_core/test/testdata/simple_actuator.xml"
 core_library_path="${workspace_prefix}/mujoco_sim_core/lib"
 
+cmake_prefix_path=""
+for package_prefix in "${workspace_prefix}"/*; do
+  if [[ -d "${package_prefix}/lib/cmake" || -d "${package_prefix}/share" ]]; then
+    cmake_prefix_path="${cmake_prefix_path:+${cmake_prefix_path};}${package_prefix}"
+  fi
+done
+cmake_prefix_path="${cmake_prefix_path:+${cmake_prefix_path};}${workspace_prefix}"
+
 rm -rf "${work_root}"
 mkdir -p "${work_root}"
 
@@ -21,7 +29,7 @@ build_case() {
     -DBUILD_TESTING=OFF \
     -DMUJOCO_SIM_BUILD_GUI="${gui}" \
     -DMUJOCO_SIM_BUILD_SENSOR_STREAMS="${sensors}" \
-    -DCMAKE_PREFIX_PATH="${workspace_prefix}" \
+    -DCMAKE_PREFIX_PATH="${cmake_prefix_path}" \
     -DCMAKE_INSTALL_PREFIX="${install_dir}"
   cmake --build "${build_dir}" --parallel 2
   cmake --install "${build_dir}"
@@ -49,7 +57,7 @@ build_case() {
 
   cmake -S "${source_dir}/test/package_consumer" \
     -B "${work_root}/${name}/consumer" \
-    -DCMAKE_PREFIX_PATH="${install_dir};${workspace_prefix}"
+    -DCMAKE_PREFIX_PATH="${install_dir};${cmake_prefix_path}"
   cmake --build "${work_root}/${name}/consumer" --parallel 2
 }
 

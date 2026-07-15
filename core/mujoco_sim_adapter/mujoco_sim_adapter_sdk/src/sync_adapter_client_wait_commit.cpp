@@ -1,119 +1,65 @@
 #include <mujoco_sim/adapter_sdk/sync_adapter_client.hpp>
 
-#include <algorithm>
 #include <cmath>
 #include <string>
-#include <unordered_map>
 
 #include <ecal/ecal.h>
 
 #include "internal/sync_adapter_client_impl.hpp"
-#include "internal/tick_identity.hpp"
 
 namespace mujoco_sim::adapter_sdk {
 namespace {
 
-using mujoco_sim::v2::COMMIT_OK;
-using internal::SameTickIdentity;
-using internal::SameTickPayload;
-
-bool ValidateTickWaitArguments(std::chrono::milliseconds timeout,
-                               mujoco_sim::v2::Tick* tick,
-                               std::string* error_message) {
-  if (tick == nullptr || error_message == nullptr) {
-    if (error_message != nullptr) {
-      *error_message = "tick and error_message must not be null";
-    }
+bool ValidateWaitArguments(std::chrono::milliseconds timeout, TickLease* tick,
+                           std::string* error) {
+  if (tick == nullptr || error == nullptr) {
+    if (error != nullptr) *error = "tick and error_message must not be null";
     return false;
   }
-  error_message->clear();
+  error->clear();
   if (timeout.count() >= 0) return true;
-  *error_message = "tick wait timeout must not be negative";
+  *error = "tick wait timeout must not be negative";
   return false;
 }
 
-using CommandMap = std::unordered_map<std::string, double>;
-
-bool BuildCommandMap(const std::vector<CommandValue>& commands,
-                     CommandMap* values, std::string* error_message) {
-  values->reserve(commands.size());
-  for (const auto& command : commands) {
-    if (command.name.empty() || !std::isfinite(command.value) ||
-        !values->emplace(command.name, command.value).second) {
-      if (command.name.empty()) {
-        *error_message = "command name must not be empty";
-      } else if (!std::isfinite(command.value)) {
-        *error_message = "command value must be finite: " + command.name;
-      } else {
-        *error_message = "duplicate actuator command: " + command.name;
-      }
-      return false;
-    }
+mujoco_sim::v3::FaultCode WireFaultCode(FaultCode code) {
+  switch (code) {
+    case FaultCode::kControllerError:
+      return mujoco_sim::v3::CONTROLLER_ERROR;
+    case FaultCode::kInvalidOutput:
+      return mujoco_sim::v3::INVALID_OUTPUT;
+    case FaultCode::kInternalControllerError:
+      return mujoco_sim::v3::INTERNAL_CONTROLLER_ERROR;
   }
-  return true;
+  return mujoco_sim::v3::FAULT_CODE_UNSPECIFIED;
 }
 
-bool AppendRegisteredCommands(
-    const mujoco_sim::v2::ResourceLayout& layout, const CommandMap& values,
-    mujoco_sim::v2::AdapterCommit* commit, std::string* error_message) {
-  for (const auto& descriptor : layout.commands()) {
-    const auto value = values.find(descriptor.name());
-    if (descriptor.dimension() != 1 || value == values.end()) {
-      *error_message = descriptor.dimension() != 1
-                           ? "unsupported non-scalar actuator command: " +
-                                 descriptor.name()
-                           : "missing actuator command: " + descriptor.name();
-      return false;
-    }
-    if (descriptor.has_ctrl_range() &&
-        (value->second < descriptor.ctrl_min() ||
-         value->second > descriptor.ctrl_max())) {
-      *error_message = "actuator command is outside ctrlrange: " +
-                       descriptor.name();
-      return false;
-    }
-    auto* block = commit->add_commands();
-    block->set_name(descriptor.name());
-    block->add_values(value->second);
-  }
-  return true;
-}
-
-bool HasOnlyRegisteredCommands(const mujoco_sim::v2::ResourceLayout& layout,
-                               const CommandMap& values,
-                               std::string* error_message) {
-  if (values.size() == static_cast<std::size_t>(layout.commands_size()))
-    return true;
-  for (const auto& [name, _] : values) {
-    const auto known = std::find_if(
-        layout.commands().begin(), layout.commands().end(),
-        [&name](const auto& descriptor) { return descriptor.name() == name; });
-    if (known == layout.commands().end()) {
-      *error_message = "unknown actuator command: " + name;
-      return false;
+std::string FingerprintBytes(
+    mujoco_sim::protocol::LayoutFingerprint fingerprint) {
+  std::string bytes(16, '\0');
+  const std::array words{fingerprint.low, fingerprint.high};
+  for (std::size_t word = 0; word < words.size(); ++word) {
+    for (std::size_t index = 0; index < 8; ++index) {
+      bytes[word * 8 + index] = static_cast<char>(
+          (words[word] >> (8U * index)) & 0xffU);
     }
   }
-  *error_message = "command set does not match the registered layout";
-  return false;
+  return bytes;
 }
 
 }  // namespace
 
 TickWaitResult SyncAdapterClient::Impl::WaitForTick(
-    std::chrono::milliseconds timeout, mujoco_sim::v2::Tick* tick,
-    std::string* error_message) {
-  if (!ValidateTickWaitArguments(timeout, tick, error_message))
-    return TickWaitResult::kError;
-
+    std::chrono::milliseconds timeout, TickLease* tick, std::string* error) {
+  if (!ValidateWaitArguments(timeout, tick, error)) return TickWaitResult::kError;
   std::unique_lock lock(mutex_);
-  if (const auto rejection = TickWaitRejectionLocked(error_message))
-    return *rejection;
+  if (const auto rejection = TickWaitRejectionLocked(error)) return *rejection;
   if (wait_in_progress_) {
-    *error_message = "another thread is already waiting for a Tick";
+    *error = "another thread is already waiting for a Tick";
     return TickWaitResult::kError;
   }
-  if (outstanding_tick_.has_value()) {
-    *error_message = "the previously received Tick has not been committed";
+  if (outstanding_tick_) {
+    *error = "the previously received Tick has not been committed";
     return TickWaitResult::kError;
   }
   wait_in_progress_ = true;
@@ -122,30 +68,29 @@ TickWaitResult SyncAdapterClient::Impl::WaitForTick(
     finish();
     return TickWaitResult::kTimeout;
   }
-  if (const auto rejection = TickWaitRejectionLocked(error_message)) {
+  if (const auto rejection = TickWaitRejectionLocked(error)) {
     finish();
     return *rejection;
   }
-
   outstanding_tick_ = std::move(queued_tick_);
-  queued_tick_.reset();
-  *tick = *outstanding_tick_;
+  TickLease received;
+  received.data_ = outstanding_tick_;
+  received.owner_ = this;
+  *tick = std::move(received);
   finish();
   return TickWaitResult::kReceived;
 }
 
-std::optional<TickWaitResult>
-SyncAdapterClient::Impl::TickWaitRejectionLocked(
-    std::string* error_message) const {
+std::optional<TickWaitResult> SyncAdapterClient::Impl::TickWaitRejectionLocked(
+    std::string* error) const {
   if (!terminal_error_.empty()) {
-    *error_message = terminal_error_;
+    *error = terminal_error_;
     return TickWaitResult::kError;
   }
-  if (stop_requested_ || (monitor_ecal_ && !eCAL::Ok())) {
+  if (stop_requested_ || (monitor_ecal_ && !eCAL::Ok()))
     return TickWaitResult::kStopped;
-  }
   if (!session_.active()) {
-    *error_message = "adapter client must be activated before waiting";
+    *error = "adapter client must be activated before waiting";
     return TickWaitResult::kError;
   }
   return std::nullopt;
@@ -154,128 +99,149 @@ SyncAdapterClient::Impl::TickWaitRejectionLocked(
 bool SyncAdapterClient::Impl::WaitForQueuedTick(
     std::unique_lock<std::mutex>& lock, std::chrono::milliseconds timeout) {
   const auto ready = [this] {
-    return queued_tick_.has_value() || !terminal_error_.empty() ||
-           stop_requested_.load() || (monitor_ecal_ && !eCAL::Ok());
+    return queued_tick_ || !terminal_error_.empty() || stop_requested_.load() ||
+           (monitor_ecal_ && !eCAL::Ok());
   };
   if (ready()) return true;
-  if (timeout != std::chrono::milliseconds::max()) {
+  if (timeout != std::chrono::milliseconds::max())
     return condition_.wait_for(lock, timeout, ready);
-  }
   while (!ready()) condition_.wait_for(lock, std::chrono::milliseconds(50));
   return true;
 }
 
-bool SyncAdapterClient::Impl::BuildValidatedCommit(
-    const mujoco_sim::v2::Tick& tick,
-    const std::vector<CommandValue>& commands,
-    mujoco_sim::v2::AdapterCommit* commit,
-    std::string* error_message) const {
-  if (commit == nullptr || error_message == nullptr) {
-    return false;
-  }
-  CommandMap values;
-  if (!BuildCommandMap(commands, &values, error_message)) return false;
-
-  mujoco_sim::v2::AdapterCommit output;
-  *output.mutable_header() = tick.header();
-  output.set_adapter_id(tick.adapter_id());
-  output.set_status(COMMIT_OK);
-  if (!AppendRegisteredCommands(registration_.layout(), values, &output,
-                                error_message) ||
-      !HasOnlyRegisteredCommands(registration_.layout(), values,
-                                 error_message))
-    return false;
-  *commit = std::move(output);
-  return true;
-}
-
-bool SyncAdapterClient::Impl::Commit(
-    const mujoco_sim::v2::Tick& tick,
-    const std::vector<CommandValue>& commands,
-    std::string* error_message) {
-  std::lock_guard session_lock(lifecycle_mutex_);
-  if (error_message == nullptr) {
-    return false;
-  }
-  error_message->clear();
-
-  mujoco_sim::v2::Tick canonical_tick;
-  {
-    std::lock_guard lock(mutex_);
-    if (!SelectCanonicalTickLocked(tick, &canonical_tick, error_message))
-      return false;
-  }
-
-  mujoco_sim::v2::AdapterCommit commit;
-  if (!BuildValidatedCommit(canonical_tick, commands, &commit,
-                            error_message)) {
-    return false;
-  }
-
-  {
-    std::lock_guard lock(mutex_);
-    if (!FinalizeCommitLocked(canonical_tick, &commit, error_message))
-      return false;
-  }
-
-  const bool published = transport_->PublishCommit(commit);
-  condition_.notify_all();
-  if (!published) {
-    *error_message = "failed to publish Commit";
-    return false;
-  }
-  return true;
-}
-
-bool SyncAdapterClient::Impl::SelectCanonicalTickLocked(
-    const mujoco_sim::v2::Tick& tick, mujoco_sim::v2::Tick* canonical_tick,
-    std::string* error_message) const {
+bool SyncAdapterClient::Impl::ValidateLeaseLocked(
+    const TickLease& tick, std::shared_ptr<const TickLease::Data>* canonical,
+    std::string* error) const {
   if (!session_.active() || stop_requested_) {
-    *error_message = "adapter client is not active";
+    *error = "adapter client is not active";
     return false;
   }
-  if (outstanding_tick_.has_value() &&
-      SameTickIdentity(tick, *outstanding_tick_) &&
-      SameTickPayload(tick, *outstanding_tick_)) {
-    *canonical_tick = *outstanding_tick_;
+  if (tick.owner_ != this || !tick.data_) {
+    *error = "Tick lease does not belong to this client";
+    return false;
+  }
+  if (outstanding_tick_ == tick.data_) {
+    *canonical = outstanding_tick_;
     return true;
   }
-  if (committed_tick_.has_value() &&
-      SameTickIdentity(tick, *committed_tick_) &&
-      SameTickPayload(tick, *committed_tick_)) {
-    *canonical_tick = *committed_tick_;
+  if (committed_tick_ == tick.data_) {
+    *canonical = committed_tick_;
     return true;
   }
-  *error_message = "Tick is not the current outstanding or committed Tick";
+  *error = "Tick is not the current outstanding or committed Tick";
   return false;
 }
 
-bool SyncAdapterClient::Impl::FinalizeCommitLocked(
-    const mujoco_sim::v2::Tick& canonical_tick,
-    mujoco_sim::v2::AdapterCommit* commit, std::string* error_message) {
-  if (stop_requested_ || !session_.active()) {
-    *error_message = "adapter client stopped before Commit";
+bool SyncAdapterClient::Impl::ValidateCommands(std::span<const double> commands,
+                                                std::string* error) const {
+  if (commands.size() != registration_.layout.command_scalar_count()) {
+    *error = "command scalar count does not match registered layout";
     return false;
   }
-  if (outstanding_tick_.has_value() &&
-      SameTickIdentity(canonical_tick, *outstanding_tick_) &&
-      SameTickPayload(canonical_tick, *outstanding_tick_)) {
-    committed_tick_ = *outstanding_tick_;
-    cached_commit_ = *commit;
-    outstanding_tick_.reset();
-    return true;
+  for (std::size_t index = 0; index < commands.size(); ++index) {
+    if (!std::isfinite(commands[index])) {
+      *error = "command value must be finite";
+      return false;
+    }
   }
-  if (!committed_tick_.has_value() || !cached_commit_.has_value() ||
-      !SameTickIdentity(canonical_tick, *committed_tick_) ||
-      !SameTickPayload(canonical_tick, *committed_tick_)) {
-    *error_message = "Tick is no longer available for Commit";
+  for (const auto& resource : registration_.layout.commands()) {
+    if (!resource.has_command_range) continue;
+    for (std::size_t offset = 0; offset < resource.scalars.count; ++offset) {
+      const double value = commands[resource.scalars.offset + offset];
+      if (value < resource.command_min || value > resource.command_max) {
+        *error = "actuator command is outside ctrlrange: " + resource.name;
+        return false;
+      }
+    }
+  }
+  return true;
+}
+
+bool SyncAdapterClient::Impl::Commit(const TickLease& tick,
+                                      std::span<const double> commands,
+                                      std::string* error) {
+  std::lock_guard lifecycle_lock(lifecycle_mutex_);
+  if (error == nullptr) return false;
+  error->clear();
+  std::shared_ptr<const TickLease::Data> canonical;
+  {
+    std::lock_guard lock(mutex_);
+    if (!ValidateLeaseLocked(tick, &canonical, error) ||
+        !ValidateCommands(commands, error)) {
+      return false;
+    }
+  }
+  mujoco_sim::protocol::DataFrameHeader header = canonical->header;
+  header.kind = mujoco_sim::protocol::DataFrameKind::kCommit;
+  header.flags = 0;
+  header.sequence = 0;
+  auto mutable_encoded = std::make_shared<std::string>();
+  mujoco_sim::protocol::DataFrameError encode_error;
+  if (!mujoco_sim::protocol::EncodeDataFrame(
+          header, commands, mutable_encoded.get(), &encode_error)) {
+    *error = encode_error.message;
     return false;
   }
-  if (commit->SerializeAsString() != cached_commit_->SerializeAsString()) {
-    *error_message = "a different Commit was already sent for this Tick";
+  std::shared_ptr<const std::string> encoded = std::move(mutable_encoded);
+  {
+    std::lock_guard lock(mutex_);
+    if (stop_requested_ || !session_.active()) {
+      *error = "adapter client stopped before Commit";
+      return false;
+    }
+    if (outstanding_tick_ == canonical) {
+      committed_tick_ = canonical;
+      cached_commit_ = encoded;
+      outstanding_tick_.reset();
+    } else if (committed_tick_ != canonical || !cached_commit_) {
+      *error = "Tick is no longer available for Commit";
+      return false;
+    } else if (*encoded != *cached_commit_) {
+      *error = "a different Commit was already sent for this Tick";
+      return false;
+    } else {
+      encoded = cached_commit_;
+    }
+  }
+  const bool published = transport_->PublishCommit(*encoded);
+  if (published) {
+    std::lock_guard lock(mutex_);
+    last_commit_publish_ = std::chrono::steady_clock::now();
+  } else {
+    *error = "failed to publish Commit";
+  }
+  condition_.notify_all();
+  heartbeat_condition_.notify_all();
+  return published;
+}
+
+bool SyncAdapterClient::Impl::FailTick(const TickLease& tick, FaultCode code,
+                                       std::string_view message,
+                                       std::string* error) {
+  std::lock_guard lifecycle_lock(lifecycle_mutex_);
+  if (error == nullptr) return false;
+  error->clear();
+  std::shared_ptr<const TickLease::Data> canonical;
+  {
+    std::lock_guard lock(mutex_);
+    if (!ValidateLeaseLocked(tick, &canonical, error)) return false;
+  }
+  mujoco_sim::v3::ControllerFault fault;
+  fault.set_session_id(canonical->header.session_id);
+  fault.set_epoch(canonical->header.epoch);
+  fault.set_tick_id(canonical->header.tick_id);
+  fault.set_layout_fingerprint(FingerprintBytes(canonical->header.layout));
+  fault.set_code(WireFaultCode(code));
+  fault.set_message(std::string(message));
+  if (!transport_->PublishFault(fault)) {
+    *error = "failed to publish ControllerFault";
     return false;
   }
-  *commit = *cached_commit_;
+  {
+    std::lock_guard lock(mutex_);
+    if (outstanding_tick_ == canonical) outstanding_tick_.reset();
+  }
+  condition_.notify_all();
   return true;
 }
 

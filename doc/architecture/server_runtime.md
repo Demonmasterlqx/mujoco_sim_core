@@ -15,12 +15,13 @@ resource queries. This makes all Core access ordered by one thread without a
 Core mutex.
 
 eCAL callbacks are transport boundaries only. They validate the 4 MiB protocol
-payload limit, parse protobuf once, and submit a typed `ServerEvent`. Registry
+payload limit, parse Protobuf control messages or fixed binary data frames
+once, and submit a typed `ServerEvent`. Registry
 RPC events carry a promise and wait for the loop's response. Commit and
 Heartbeat topics are fire-and-forget events.
 
 `ServerEventQueue` is FIFO and bounded to 1024 events and 64 MiB of parsed
-protobuf payload. The loop consumes at most 64 events per batch before running
+payload. The loop consumes at most 64 events per batch before running
 deadline, Tick, status, viewer, and metrics work. A registry RPC rejected by a
 full or closed queue receives `INTERNAL_ERROR`; Commit and Heartbeat events are
 dropped and counted. These bounds prevent callback traffic from creating
@@ -29,8 +30,14 @@ unbounded memory use or permanently starving timers.
 All operations that may complete a step produce effects consumed by the same
 `ApplyEffects()` path. Completed steps schedule Sensor capture, wait for any
 blocking Sensor work, publish Observer frames, update metrics, and establish the
-next Tick deadline. Tick retransmissions reuse the Core's serialized bytes and
-are published only while their issued identity is still current.
+next Tick deadline. `SimulationLoop` encodes each Tick issue generation once,
+caches the immutable bytes, and reuses them for at most three per-controller
+retries while the issued identity is still current.
+
+Status publishes every 100 ms in steady state. Lifecycle changes are coalesced
+behind a 20 ms minimum interval, while terminal status is sent immediately
+before teardown. Transport subscriber counts are sampled at 1 Hz; send paths
+never query them.
 
 ## Transport and optional runtimes
 

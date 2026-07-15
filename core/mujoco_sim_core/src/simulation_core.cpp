@@ -10,7 +10,7 @@ namespace mujoco_sim::core {
 namespace {
 
 std::size_t CountForState(const std::array<std::size_t, 6>& counts,
-                          mujoco_sim::v2::ControllerState state) noexcept {
+                          mujoco_sim::core::ControllerState state) noexcept {
   const int index = static_cast<int>(state);
   if (index < 0 || index >= static_cast<int>(counts.size())) {
     return 0;
@@ -44,21 +44,21 @@ void CountObservers(
 }  // namespace
 
 std::size_t CoreState::controller_count(
-    mujoco_sim::v2::ControllerState state) const noexcept {
+    mujoco_sim::core::ControllerState state) const noexcept {
   return CountForState(controller_counts, state);
 }
 
 std::size_t CoreState::observer_count(
-    mujoco_sim::v2::ControllerState state) const noexcept {
+    mujoco_sim::core::ControllerState state) const noexcept {
   return CountForState(observer_counts, state);
 }
 namespace {
 
-using mujoco_sim::v2::ERROR_PAUSED;
-using mujoco_sim::v2::OBSERVER;
-using mujoco_sim::v2::PROVISIONAL;
-using mujoco_sim::v2::TIMED_OUT;
-using mujoco_sim::v2::UNREGISTERED;
+using mujoco_sim::core::ERROR_PAUSED;
+using mujoco_sim::core::OBSERVER;
+using mujoco_sim::core::PROVISIONAL;
+using mujoco_sim::core::TIMED_OUT;
+using mujoco_sim::core::UNREGISTERED;
 using internal::ControllerPhase;
 using internal::ControllerStateMachine;
 using internal::ObserverPhase;
@@ -72,11 +72,42 @@ EngineEffects SimulationCore::Impl::DoCheckDeadlines(
   EngineEffects effects;
   ExpireProvisionalControllers(now, &effects.adapter_changes);
   UpdateObserverDeadlines(now, &effects.adapter_changes);
-  effects.step_completed =
-      UpdateBarrierDeadlines(now, &effects.adapter_changes);
-  effects.status_changed = !effects.adapter_changes.empty() ||
-                           effects.step_completed.has_value();
+  effects.step_completed = UpdateControllerPresenceDeadlines(
+      now, &effects.adapter_changes);
+  if (!effects.step_completed) {
+    effects.step_completed =
+        UpdateBarrierDeadlines(now, &effects.adapter_changes);
+  }
+  effects.status_urgency = !effects.adapter_changes.empty()
+                               ? EngineEffects::StatusUrgency::kLifecycle
+                               : (effects.step_completed
+                                      ? EngineEffects::StatusUrgency::kPeriodicOnly
+                                      : EngineEffects::StatusUrgency::kNone);
   return effects;
+}
+
+std::optional<StepCompletedEvent>
+SimulationCore::Impl::UpdateControllerPresenceDeadlines(
+    std::chrono::steady_clock::time_point now,
+    std::vector<AdapterChange>* changes) {
+  for (Controller* controller : adapter_registry_->Controllers()) {
+    if (controller->phase != ControllerPhase::kActive ||
+        now - controller->last_presence_at <=
+            std::chrono::milliseconds(controller->session_timeout_ms)) {
+      continue;
+    }
+    const auto old_state = WireState(controller->phase);
+    ControllerStateMachine::MarkTimedOut(
+        controller, current_tick_id_, "controller session presence timed out");
+    ZeroControllerCommands(*controller);
+    InvalidateIssuedTick(controller->id);
+    barrier_coordinator_->RemoveRequiredController(controller->id);
+    changes->push_back(
+        {AdapterChangeKind::kTimedOut, controller->id,
+         mujoco_sim::core::CONTROLLER, controller->session_id, std::nullopt,
+         old_state, TIMED_OUT, controller->message, current_tick_id_});
+  }
+  return CompleteBarrier(StepCompletionSource::kDeadline);
 }
 
 void SimulationCore::Impl::ExpireProvisionalControllers(
@@ -89,7 +120,7 @@ void SimulationCore::Impl::ExpireProvisionalControllers(
             std::chrono::milliseconds(options_.activation_timeout_ms)) {
       changes->push_back(
           {AdapterChangeKind::kActivationExpired, controller->id,
-           mujoco_sim::v2::CONTROLLER, controller->session_id, std::nullopt,
+           mujoco_sim::core::CONTROLLER, controller->session_id, std::nullopt,
            PROVISIONAL, UNREGISTERED, "controller activation timed out",
            current_tick_id_});
       ReleaseControllerResources(*controller);
@@ -116,7 +147,7 @@ void SimulationCore::Impl::UpdateObserverDeadlines(
     }
     if (observer->phase == ObserverPhase::kActive &&
         now - observer->last_heartbeat_at >
-            std::chrono::milliseconds(observer->timeout_ms)) {
+            std::chrono::milliseconds(observer->session_timeout_ms)) {
       const auto old_state = WireState(observer->phase);
       ObserverStateMachine::MarkTimedOut(
           observer, current_tick_id_, "observer keepalive timed out");
@@ -139,7 +170,7 @@ std::optional<StepCompletedEvent> SimulationCore::Impl::UpdateBarrierDeadlines(
   for (Controller* controller : adapter_registry_->Controllers()) {
     if (!barrier_coordinator_->IsRequired(controller->id) ||
         barrier_coordinator_->HasPendingCommit(controller->id) ||
-        elapsed_ms <= controller->timeout_ms) {
+        elapsed_ms <= controller->commit_timeout_ms) {
       continue;
     }
     const auto old_state = WireState(controller->phase);
@@ -150,14 +181,15 @@ std::optional<StepCompletedEvent> SimulationCore::Impl::UpdateBarrierDeadlines(
     barrier_coordinator_->RemoveRequiredController(controller->id);
     changes->push_back(
         {AdapterChangeKind::kTimedOut, controller->id,
-         mujoco_sim::v2::CONTROLLER, controller->session_id, std::nullopt,
+         mujoco_sim::core::CONTROLLER, controller->session_id, std::nullopt,
          old_state, TIMED_OUT, controller->message, current_tick_id_});
   }
   return CompleteBarrier(StepCompletionSource::kDeadline);
 }
 
-mujoco_sim::v2::ServerStatus SimulationCore::Impl::MakeStatus() const {
-  return status_projection_->Build(MakeHeader(0), server_state_, status_message_,
+mujoco_sim::core::ServerStatus SimulationCore::Impl::MakeStatus() const {
+  return status_projection_->Build(epoch_, current_tick_id_, simulation_time(),
+                                   server_state_, status_message_,
                                    *adapter_registry_, *barrier_coordinator_);
 }
 
@@ -191,7 +223,7 @@ void SimulationCore::Impl::EnterFatalError(const std::string& message) {
 }
 
 void SimulationCore::Impl::MarkStopped(const std::string& message) {
-  server_state_ = mujoco_sim::v2::STOPPED;
+  server_state_ = mujoco_sim::core::STOPPED;
   status_message_ = message;
   tick_open_ = false;
   InvalidateAllIssuedTicks();
@@ -212,7 +244,7 @@ double SimulationCore::Impl::timestep() const {
   return model_state_->timestep();
 }
 
-mujoco_sim::v2::ServerState SimulationCore::Impl::server_state() const {
+mujoco_sim::core::ServerState SimulationCore::Impl::server_state() const {
   return server_state_;
 }
 
@@ -233,11 +265,11 @@ CoreState SimulationCore::Impl::state() const {
 
 std::optional<AdapterInfo> SimulationCore::Impl::FindAdapterInfo(
     const std::string& adapter_id,
-    std::optional<mujoco_sim::v2::AdapterRole> role) const {
-  if (!role || *role == mujoco_sim::v2::CONTROLLER) {
+    std::optional<mujoco_sim::core::AdapterRole> role) const {
+  if (!role || *role == mujoco_sim::core::CONTROLLER) {
     const Controller* found = adapter_registry_->FindController(adapter_id);
     if (found != nullptr) {
-      return AdapterInfo{adapter_id, mujoco_sim::v2::CONTROLLER,
+      return AdapterInfo{adapter_id, mujoco_sim::core::CONTROLLER,
                          found->session_id, WireState(found->phase)};
     }
   }
@@ -256,7 +288,7 @@ std::vector<AdapterInfo> SimulationCore::Impl::AdapterInfos() const {
   infos.reserve(adapter_registry_->ControllerCount() +
                 adapter_registry_->ObserverCount());
   for (const Controller* controller : adapter_registry_->Controllers()) {
-    infos.push_back({controller->id, mujoco_sim::v2::CONTROLLER,
+    infos.push_back({controller->id, mujoco_sim::core::CONTROLLER,
                      controller->session_id, WireState(controller->phase)});
   }
   for (const Observer* observer : adapter_registry_->Observers()) {
@@ -271,7 +303,7 @@ SimulationCore::Impl::RecoveryPendingControllers() const {
   std::vector<AdapterInfo> infos;
   for (const Controller* controller : adapter_registry_->Controllers()) {
     if (controller->phase == ControllerPhase::kRecoveryPending) {
-      infos.push_back({controller->id, mujoco_sim::v2::CONTROLLER,
+      infos.push_back({controller->id, mujoco_sim::core::CONTROLLER,
                        controller->session_id, TIMED_OUT});
     }
   }
@@ -281,7 +313,7 @@ SimulationCore::Impl::RecoveryPendingControllers() const {
 std::uint64_t SimulationCore::Impl::ControllerHeartbeatTick(
     const std::string& adapter_id) const {
   const Controller* found = adapter_registry_->FindController(adapter_id);
-  return found == nullptr ? 0 : found->last_heartbeat_tick;
+  return found == nullptr ? 0 : found->last_heartbeat_tick.value_or(0);
 }
 
 std::chrono::steady_clock::time_point

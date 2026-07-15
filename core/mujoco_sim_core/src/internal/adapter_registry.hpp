@@ -7,8 +7,8 @@
 #include <unordered_map>
 #include <vector>
 
-#include <mujoco_sim/protocol/topics.hpp>
-#include <mujoco_sim/v2/sync.pb.h>
+#include <mujoco_sim/core/domain.hpp>
+
 
 #include "controller_state_machine.hpp"
 
@@ -18,19 +18,20 @@ struct ControllerRecord {
   std::string id;
   std::uint64_t session_id = 0;
   std::uint64_t epoch = 0;
-  std::uint32_t timeout_ms = 1000;
-  std::uint32_t protocol_minor = mujoco_sim::protocol::kProtocolMinor;
+  std::uint32_t commit_timeout_ms = 1000;
+  std::uint32_t session_timeout_ms = 1000;
   ControllerPhase phase = ControllerPhase::kProvisional;
-  mujoco_sim::v2::ResourceLayout layout;
+  mujoco_sim::core::ResourceLayout layout;
   std::chrono::steady_clock::time_point registered_at =
       std::chrono::steady_clock::now();
-  std::uint64_t last_heartbeat_tick = 0;
+  std::chrono::steady_clock::time_point last_presence_at = registered_at;
+  std::optional<std::uint64_t> last_heartbeat_tick;
   std::optional<std::uint64_t> last_tick_sent;
   std::uint64_t state_since_tick = 0;
   std::uint64_t timed_out_since_tick = 0;
   std::uint64_t timeout_count = 0;
-  std::optional<mujoco_sim::v2::AdapterCommit> recovery_proof;
-  std::optional<mujoco_sim::v2::AdapterCommit> last_commit;
+  std::optional<mujoco_sim::core::AdapterCommit> recovery_proof;
+  std::optional<mujoco_sim::core::AdapterCommit> last_commit;
   std::string message;
 };
 
@@ -38,11 +39,10 @@ struct ObserverRecord {
   std::string id;
   std::uint64_t session_id = 0;
   std::uint64_t epoch = 0;
-  std::uint32_t timeout_ms = 1000;
-  std::uint32_t protocol_minor = mujoco_sim::protocol::kProtocolMinor;
+  std::uint32_t session_timeout_ms = 1000;
   ObserverPhase phase = ObserverPhase::kProvisional;
-  mujoco_sim::v2::ResourceLayout layout;
-  mujoco_sim::v2::ObservationDelivery delivery;
+  mujoco_sim::core::ResourceLayout layout;
+  mujoco_sim::core::ObservationDelivery delivery;
   std::chrono::steady_clock::time_point registered_at =
       std::chrono::steady_clock::now();
   std::chrono::steady_clock::time_point last_heartbeat_at = registered_at;
@@ -63,8 +63,10 @@ class AdapterRegistry {
 
   ControllerRecord* FindController(const std::string& id);
   const ControllerRecord* FindController(const std::string& id) const;
+  ControllerRecord* FindControllerBySession(std::uint64_t session_id);
   ObserverRecord* FindObserver(const std::string& id);
   const ObserverRecord* FindObserver(const std::string& id) const;
+  ObserverRecord* FindObserverBySession(std::uint64_t session_id);
   bool HasController(const std::string& id) const;
   bool HasObserver(const std::string& id) const;
 
@@ -89,6 +91,8 @@ class AdapterRegistry {
  private:
   std::unordered_map<std::string, ControllerRecord> controllers_;
   std::unordered_map<std::string, ObserverRecord> observers_;
+  std::unordered_map<std::uint64_t, std::string> controller_sessions_;
+  std::unordered_map<std::uint64_t, std::string> observer_sessions_;
   std::unordered_map<std::string, std::string> actuator_owners_;
   std::uint64_t next_session_id_ = 1;
 };

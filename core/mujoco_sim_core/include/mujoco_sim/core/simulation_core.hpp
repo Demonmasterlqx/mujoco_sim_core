@@ -11,7 +11,7 @@
 #include <unordered_map>
 #include <vector>
 
-#include <mujoco_sim/v2/sync.pb.h>
+#include <mujoco_sim/core/domain.hpp>
 
 struct mjData_;
 struct mjModel_;
@@ -27,8 +27,10 @@ class SnapshotManager;
 struct CoreOptions {
   /// Logical server identity required in all addressed protocol messages.
   std::string server_name = "default";
-  /// Default Controller/Observer liveness timeout in milliseconds.
-  std::uint32_t default_timeout_ms = 1000;
+  /// Default Controller Barrier Commit timeout in milliseconds.
+  std::uint32_t default_commit_timeout_ms = 1000;
+  /// Default Controller/Observer presence timeout in milliseconds.
+  std::uint32_t default_session_timeout_ms = 1000;
   /// Maximum provisional lifetime before registration expires, in milliseconds.
   std::uint32_t activation_timeout_ms = 5000;
   /// Whether a timed-out adapter ID may atomically receive a new session.
@@ -61,7 +63,7 @@ struct StepCompletedEvent {
   /// Lifecycle operation that completed the Barrier.
   StepCompletionSource source = StepCompletionSource::kCommit;
   /// Post-step frames due for active Observers, in delivery order.
-  std::vector<mujoco_sim::v2::ObservationFrame> observer_frames;
+  std::vector<ObservationFrame> observer_frames;
 };
 
 /// Adapter lifecycle transition emitted by a mutating Core operation.
@@ -85,18 +87,18 @@ struct AdapterChange {
   /// Stable adapter ID affected by the mutation.
   std::string adapter_id;
   /// Adapter role for disambiguating Controller and Observer namespaces.
-  mujoco_sim::v2::AdapterRole role =
-      mujoco_sim::v2::ADAPTER_ROLE_UNSPECIFIED;
+  mujoco_sim::core::AdapterRole role =
+      mujoco_sim::core::ADAPTER_ROLE_UNSPECIFIED;
   /// Session affected by the mutation; nonzero for registered adapters.
   std::uint64_t session_id = 0;
   /// Replaced session, present only for kReplaced.
   std::optional<std::uint64_t> previous_session_id;
   /// Wire-visible state immediately before the mutation.
-  mujoco_sim::v2::ControllerState old_state =
-      mujoco_sim::v2::CONTROLLER_STATE_UNSPECIFIED;
+  mujoco_sim::core::ControllerState old_state =
+      mujoco_sim::core::CONTROLLER_STATE_UNSPECIFIED;
   /// Wire-visible state immediately after the mutation.
-  mujoco_sim::v2::ControllerState new_state =
-      mujoco_sim::v2::CONTROLLER_STATE_UNSPECIFIED;
+  mujoco_sim::core::ControllerState new_state =
+      mujoco_sim::core::CONTROLLER_STATE_UNSPECIFIED;
   /// Diagnostic associated with the transition; may be empty on success.
   std::string message;
   /// Current Core Tick when the transition was recorded.
@@ -109,8 +111,8 @@ struct EngineEffects {
   std::vector<AdapterChange> adapter_changes;
   /// Present when this operation completed exactly one MuJoCo step.
   std::optional<StepCompletedEvent> step_completed;
-  /// True when callers should publish a fresh ServerStatus projection.
-  bool status_changed = false;
+  enum class StatusUrgency { kNone, kPeriodicOnly, kLifecycle, kTerminal };
+  StatusUrgency status_urgency = StatusUrgency::kNone;
 };
 
 /// Response and all externally applied effects from one Core operation.
@@ -134,7 +136,7 @@ struct ModelLoadReceipt {
 /// Core result of processing one AdapterCommit.
 struct CommitReceipt {
   /// Validation or lifecycle result code.
-  mujoco_sim::v2::ErrorCode code = mujoco_sim::v2::OK;
+  mujoco_sim::core::ErrorCode code = mujoco_sim::core::OK;
   /// Human-readable result; callers must branch on code, not this text.
   std::string message;
   /// True when an identical prior Commit was recognized without mutation.
@@ -144,9 +146,9 @@ struct CommitReceipt {
 /// Borrowed resource catalog for the current model generation.
 struct CoreResources {
   /// Observation descriptors in canonical layout order.
-  std::span<const mujoco_sim::v2::ResourceDescriptor> observations;
+  std::span<const mujoco_sim::core::ResourceDescriptor> observations;
   /// Command descriptors in canonical layout order.
-  std::span<const mujoco_sim::v2::ResourceDescriptor> commands;
+  std::span<const mujoco_sim::core::ResourceDescriptor> commands;
 };
 
 /// Coherent read-only summary of the current Core state.
@@ -160,23 +162,23 @@ struct CoreState {
   /// Loaded model timestep in seconds, or zero before model load.
   double timestep_s = 0.0;
   /// Current wire-visible server lifecycle state.
-  mujoco_sim::v2::ServerState server_state =
-      mujoco_sim::v2::SERVER_STATE_UNSPECIFIED;
+  mujoco_sim::core::ServerState server_state =
+      mujoco_sim::core::SERVER_STATE_UNSPECIFIED;
   /// True while Barrier membership is frozen for a Tick.
   bool tick_open = false;
   /// Number of Controllers participating in future Barriers.
   std::size_t active_controller_count = 0;
-  /// Controller counts indexed by the numeric V2 ControllerState value.
+  /// Controller counts indexed by the numeric domain ControllerState value.
   std::array<std::size_t, 6> controller_counts{};
-  /// Observer counts indexed by the numeric V2 ControllerState value.
+  /// Observer counts indexed by the numeric domain ControllerState value.
   std::array<std::size_t, 6> observer_counts{};
 
   /// Returns the number of Controllers projected to `state`.
   std::size_t controller_count(
-      mujoco_sim::v2::ControllerState state) const noexcept;
+      mujoco_sim::core::ControllerState state) const noexcept;
   /// Returns the number of Observers projected to `state`.
   std::size_t observer_count(
-      mujoco_sim::v2::ControllerState state) const noexcept;
+      mujoco_sim::core::ControllerState state) const noexcept;
 };
 
 /// Identity required to prove that an issued Tick handle is still current.
@@ -193,16 +195,9 @@ struct IssuedTickIdentity {
   std::uint64_t issue_generation = 0;
 };
 
-/// Immutable Tick payload serialized exactly once for one Controller/Tick.
+/// Immutable dense Tick payload for one Controller/Tick.
 struct IssuedTick {
-  /// Parsed protocol message retained for in-process consumers.
-  mujoco_sim::v2::Tick message;
-  /// Cached wire bytes; retransmission must reuse these exact bytes.
-  std::string serialized_bytes;
-  /// Instrumentation: layout bytes avoided by cached serialization.
-  std::size_t layout_bytes_avoided = 0;
-  /// Instrumentation invariant: exactly one after successful issue.
-  std::uint32_t serialization_count = 0;
+  Tick frame;
   /// Identity used to query current validity.
   IssuedTickIdentity identity;
   /// False after a lifecycle boundary invalidates this handle.
@@ -241,7 +236,7 @@ class SimulationSnapshot {
   friend class detail::SnapshotManager;
 };
 
-/// Single-writer Protobuf façade for deterministic lockstep simulation.
+/// Single-writer domain facade for deterministic lockstep simulation.
 ///
 /// No method is internally synchronized. Except for destruction or
 /// move-assignment of a moved-from object, every method must be invoked by the
@@ -294,17 +289,17 @@ class SimulationCore {
 
   /// Validates protocol identity and returns the current resource catalog.
   /// This query does not mutate Core state and is safe to retry.
-  mujoco_sim::v2::GetAvailableResourcesResponse GetAvailableResources(
-      const mujoco_sim::v2::GetAvailableResourcesRequest& request) const;
+  mujoco_sim::core::GetAvailableResourcesResponse GetAvailableResources(
+      const mujoco_sim::core::GetAvailableResourcesRequest& request) const;
   /// Registers a provisional adapter without opening the current Barrier.
-  EngineResult<mujoco_sim::v2::RegisterAdapterResponse> RegisterAdapter(
-      const mujoco_sim::v2::RegisterAdapterRequest& request);
+  EngineResult<mujoco_sim::core::RegisterAdapterResponse> RegisterAdapter(
+      const mujoco_sim::core::RegisterAdapterRequest& request);
   /// Activates a provisional adapter; Controllers join on the next Tick.
-  EngineResult<mujoco_sim::v2::ActivateAdapterResponse> ActivateAdapter(
-      const mujoco_sim::v2::ActivateAdapterRequest& request);
+  EngineResult<mujoco_sim::core::ActivateAdapterResponse> ActivateAdapter(
+      const mujoco_sim::core::ActivateAdapterRequest& request);
   /// Removes one matching adapter session and releases its resources.
-  EngineResult<mujoco_sim::v2::UnregisterAdapterResponse> UnregisterAdapter(
-      const mujoco_sim::v2::UnregisterAdapterRequest& request);
+  EngineResult<mujoco_sim::core::UnregisterAdapterResponse> UnregisterAdapter(
+      const mujoco_sim::core::UnregisterAdapterRequest& request);
 
   /// Opens the next Barrier and returns immutable serialized Tick handles.
   /// Repeated calls while open return current cached handles without
@@ -319,10 +314,11 @@ class SimulationCore {
   /// Recovery proof never applies actuator commands and only makes the
   /// Controller active when the next Tick is opened.
   EngineResult<CommitReceipt> SubmitCommit(
-      const mujoco_sim::v2::AdapterCommit& commit);
+      const mujoco_sim::core::AdapterCommit& commit);
+  EngineResult<CommitReceipt> SubmitFault(const ControllerFault& fault);
   /// Accepts a valid monotonic keepalive without changing simulation state.
   EngineEffects AcceptHeartbeat(
-      const mujoco_sim::v2::AdapterHeartbeat& heartbeat,
+      const mujoco_sim::core::AdapterHeartbeat& heartbeat,
       std::chrono::steady_clock::time_point now =
           std::chrono::steady_clock::now());
   /// Applies activation, keepalive and Barrier deadlines at `now`.
@@ -335,7 +331,7 @@ class SimulationCore {
   EngineEffects MarkStopped(const std::string& message = {});
 
   /// Builds a read-only wire projection of current server and adapter state.
-  mujoco_sim::v2::ServerStatus MakeStatus() const;
+  mujoco_sim::core::ServerStatus MakeStatus() const;
 
   /// Returns one coherent copy of scalar state and adapter phase counts.
   CoreState state() const;

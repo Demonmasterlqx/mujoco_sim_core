@@ -5,13 +5,13 @@
 namespace mujoco_sim::core {
 namespace {
 
-using mujoco_sim::v2::ACTIVE;
-using mujoco_sim::v2::ERROR;
-using mujoco_sim::v2::OBSERVER;
-using mujoco_sim::v2::OK;
-using mujoco_sim::v2::PROVISIONAL;
-using mujoco_sim::v2::TIMED_OUT;
-using mujoco_sim::v2::UNREGISTERED;
+using mujoco_sim::core::ACTIVE;
+using mujoco_sim::core::ERROR;
+using mujoco_sim::core::OBSERVER;
+using mujoco_sim::core::OK;
+using mujoco_sim::core::PROVISIONAL;
+using mujoco_sim::core::TIMED_OUT;
+using mujoco_sim::core::UNREGISTERED;
 
 }  // namespace
 
@@ -29,14 +29,14 @@ EngineResult<ModelLoadReceipt> SimulationCore::Impl::LoadModelWithEffects(
          adapter.session_id, std::nullopt, adapter.state, UNREGISTERED,
          "model reloaded", current_tick_id_});
   }
-  result.effects.status_changed = true;
+  result.effects.status_urgency = EngineEffects::StatusUrgency::kLifecycle;
   return result;
 }
 
-EngineResult<mujoco_sim::v2::RegisterAdapterResponse>
+EngineResult<mujoco_sim::core::RegisterAdapterResponse>
 SimulationCore::Impl::RegisterAdapterWithEffects(
-    const mujoco_sim::v2::RegisterAdapterRequest& request) {
-  EngineResult<mujoco_sim::v2::RegisterAdapterResponse> result;
+    const mujoco_sim::core::RegisterAdapterRequest& request) {
+  EngineResult<mujoco_sim::core::RegisterAdapterResponse> result;
   const auto previous = FindAdapterInfo(request.adapter_id());
   result.response = DoRegisterAdapter(request);
   if (result.response.code() != OK) return result;
@@ -47,30 +47,30 @@ SimulationCore::Impl::RegisterAdapterWithEffects(
        result.response.session_id(),
        previous ? std::optional(previous->session_id) : std::nullopt,
        previous ? previous->state
-                : mujoco_sim::v2::CONTROLLER_STATE_UNSPECIFIED,
+                : mujoco_sim::core::CONTROLLER_STATE_UNSPECIFIED,
        result.response.state(), result.response.message(), current_tick_id_});
-  result.effects.status_changed = true;
+  result.effects.status_urgency = EngineEffects::StatusUrgency::kLifecycle;
   return result;
 }
 
-EngineResult<mujoco_sim::v2::ActivateAdapterResponse>
+EngineResult<mujoco_sim::core::ActivateAdapterResponse>
 SimulationCore::Impl::ActivateAdapterWithEffects(
-    const mujoco_sim::v2::ActivateAdapterRequest& request) {
-  EngineResult<mujoco_sim::v2::ActivateAdapterResponse> result;
+    const mujoco_sim::core::ActivateAdapterRequest& request) {
+  EngineResult<mujoco_sim::core::ActivateAdapterResponse> result;
   result.response = DoActivateAdapter(request);
   if (result.response.code() != OK) return result;
   result.effects.adapter_changes.push_back(
       {AdapterChangeKind::kActivated, request.adapter_id(), request.role(),
        request.session_id(), std::nullopt, PROVISIONAL,
        result.response.state(), result.response.message(), current_tick_id_});
-  result.effects.status_changed = true;
+  result.effects.status_urgency = EngineEffects::StatusUrgency::kLifecycle;
   return result;
 }
 
-EngineResult<mujoco_sim::v2::UnregisterAdapterResponse>
+EngineResult<mujoco_sim::core::UnregisterAdapterResponse>
 SimulationCore::Impl::UnregisterAdapterWithEffects(
-    const mujoco_sim::v2::UnregisterAdapterRequest& request) {
-  EngineResult<mujoco_sim::v2::UnregisterAdapterResponse> result;
+    const mujoco_sim::core::UnregisterAdapterRequest& request) {
+  EngineResult<mujoco_sim::core::UnregisterAdapterResponse> result;
   const auto previous = FindAdapterInfo(request.adapter_id(), request.role());
   result = DoUnregisterAdapter(request);
   if (result.response.code() != OK) return result;
@@ -78,9 +78,9 @@ SimulationCore::Impl::UnregisterAdapterWithEffects(
       {AdapterChangeKind::kUnregistered, request.adapter_id(), request.role(),
        request.session_id(), std::nullopt,
        previous ? previous->state
-                : mujoco_sim::v2::CONTROLLER_STATE_UNSPECIFIED,
+                : mujoco_sim::core::CONTROLLER_STATE_UNSPECIFIED,
        UNREGISTERED, result.response.message(), current_tick_id_});
-  result.effects.status_changed = true;
+  result.effects.status_urgency = EngineEffects::StatusUrgency::kLifecycle;
   return result;
 }
 
@@ -96,40 +96,39 @@ SimulationCore::Impl::OpenIssuedTicksWithEffects() {
          adapter.session_id, std::nullopt, TIMED_OUT, ACTIVE, {},
          current_tick_id_});
   }
-  result.effects.status_changed = (!was_open && tick_open_) ||
-                                  !recovering.empty();
+  result.effects.status_urgency = !recovering.empty()
+                                      ? EngineEffects::StatusUrgency::kLifecycle
+                                      : ((!was_open && tick_open_)
+                                             ? EngineEffects::StatusUrgency::kPeriodicOnly
+                                             : EngineEffects::StatusUrgency::kNone);
   return result;
 }
 
 EngineEffects SimulationCore::Impl::CompleteEmptyBarrierWithEffects() {
   EngineEffects effects;
   effects.step_completed = DoCompleteEmptyBarrier();
-  effects.status_changed = effects.step_completed.has_value();
+  effects.status_urgency = effects.step_completed
+                               ? EngineEffects::StatusUrgency::kPeriodicOnly
+                               : EngineEffects::StatusUrgency::kNone;
   return effects;
 }
 
 EngineResult<CommitReceipt> SimulationCore::Impl::SubmitCommitWithEffects(
-    const mujoco_sim::v2::AdapterCommit& commit) {
+    const mujoco_sim::core::AdapterCommit& commit) {
   return DoSubmitCommit(commit);
 }
 
+EngineResult<CommitReceipt> SimulationCore::Impl::SubmitFaultWithEffects(
+    const ControllerFault& fault) {
+  return DoSubmitFault(fault);
+}
+
 EngineEffects SimulationCore::Impl::AcceptHeartbeatWithEffects(
-    const mujoco_sim::v2::AdapterHeartbeat& heartbeat,
+    const mujoco_sim::core::AdapterHeartbeat& heartbeat,
     std::chrono::steady_clock::time_point now) {
   EngineEffects effects;
-  const auto previous_tick = ControllerHeartbeatTick(heartbeat.adapter_id());
-  const auto previous_time = ObserverHeartbeatTime(heartbeat.adapter_id());
   DoAcceptHeartbeat(heartbeat, now);
-  if (heartbeat.role() == mujoco_sim::v2::CONTROLLER) {
-    effects.status_changed =
-        FindAdapterInfo(heartbeat.adapter_id(), mujoco_sim::v2::CONTROLLER)
-            .has_value() &&
-        ControllerHeartbeatTick(heartbeat.adapter_id()) != previous_tick;
-  } else if (heartbeat.role() == OBSERVER) {
-    effects.status_changed =
-        FindAdapterInfo(heartbeat.adapter_id(), OBSERVER).has_value() &&
-        ObserverHeartbeatTime(heartbeat.adapter_id()) != previous_time;
-  }
+  effects.status_urgency = EngineEffects::StatusUrgency::kPeriodicOnly;
   return effects;
 }
 
@@ -152,14 +151,15 @@ EngineEffects SimulationCore::Impl::MarkFailedWithEffects(
            message, current_tick_id_});
     }
   }
-  effects.status_changed = true;
+  effects.status_urgency = EngineEffects::StatusUrgency::kTerminal;
   return effects;
 }
 
 EngineEffects SimulationCore::Impl::MarkStoppedWithEffects(
     const std::string& message) {
   MarkStopped(message);
-  return EngineEffects{{}, std::nullopt, true};
+  return EngineEffects{{}, std::nullopt,
+                       EngineEffects::StatusUrgency::kTerminal};
 }
 
 

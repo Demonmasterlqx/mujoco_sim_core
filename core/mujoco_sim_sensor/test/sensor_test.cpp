@@ -33,7 +33,7 @@ std::vector<T> Decode(const RawFrame& frame) {
 }
 
 const RawFrame& FrameWithFormat(const std::vector<RawFrame>& frames,
-                                mujoco_sim::v2::StreamFormat format) {
+                                mujoco_sim::v3::StreamFormat format) {
   const auto found = std::find_if(
       frames.begin(), frames.end(), [format](const RawFrame& frame) {
         return frame.header.format() == format;
@@ -50,10 +50,10 @@ CameraProfile FullCameraProfile() {
   profile.rate_hz = 30.0;
   profile.frame_id = "camera_optical";
   profile.outputs = {
-      {mujoco_sim::v2::RGB8, "camera/rgb"},
-      {mujoco_sim::v2::DEPTH32F, "camera/depth"},
-      {mujoco_sim::v2::SEGMENTATION32U, "camera/segmentation"},
-      {mujoco_sim::v2::XYZ32F, "camera/points"},
+      {mujoco_sim::v3::RGB8, "camera/rgb"},
+      {mujoco_sim::v3::DEPTH32F, "camera/depth"},
+      {mujoco_sim::v3::SEGMENTATION32U, "camera/segmentation"},
+      {mujoco_sim::v3::XYZ32F, "camera/points"},
   };
   return profile;
 }
@@ -73,13 +73,9 @@ RayLidarProfile LidarProfile() {
 
 CaptureMetadata TestMetadata() {
   CaptureMetadata metadata;
-  metadata.header.set_server_name("test-server");
-  metadata.header.set_epoch(7);
-  metadata.header.set_tick_id(11);
-  metadata.header.set_timestamp_unix_nanos(123456789);
-  metadata.header.set_protocol_major(1);
-  metadata.header.set_protocol_minor(2);
-  metadata.header.set_simulation_time_s(0.25);
+  metadata.epoch = 7;
+  metadata.tick_id = 11;
+  metadata.simulation_time_s = 0.25;
   metadata.stream_sequence = 13;
   metadata.capture_id = 17;
   metadata.dropped_since_previous = 2;
@@ -103,34 +99,34 @@ class SensorTest : public ::testing::Test {
 TEST(SensorShapeTest, AppliesRendererAndProtocolPayloadLimits) {
   StreamShape shape;
   std::string error;
-  ASSERT_TRUE(StreamShapeFor(mujoco_sim::v2::RGB8, 64, 48, &shape, &error))
+  ASSERT_TRUE(StreamShapeFor(mujoco_sim::v3::RGB8, 64, 48, &shape, &error))
       << error;
   EXPECT_EQ(shape.row_stride_bytes, 64U * 3U);
   EXPECT_EQ(shape.payload_bytes, 64U * 48U * 3U);
 
   EXPECT_FALSE(StreamShapeFor(
-      mujoco_sim::v2::RGB8,
+      mujoco_sim::v3::RGB8,
       static_cast<std::uint32_t>(std::numeric_limits<int>::max()) + 1U, 1,
       &shape, &error));
   EXPECT_NE(error.find("integer limits"), std::string::npos);
 
-  EXPECT_FALSE(StreamShapeFor(mujoco_sim::v2::XYZ32F, 100'000U, 500U,
+  EXPECT_FALSE(StreamShapeFor(mujoco_sim::v3::XYZ32F, 100'000U, 500U,
                               &shape, &error));
   EXPECT_NE(error.find("payload limits"), std::string::npos);
 }
 
 TEST_F(SensorTest, DescriptorsExposeShapesConventionsAndLabels) {
-  std::vector<mujoco_sim::v2::StreamDescriptor> camera_descriptors;
+  std::vector<mujoco_sim::v3::StreamDescriptor> camera_descriptors;
   std::string error;
   ASSERT_TRUE(DescribeCameraStreams(*snapshot_, FullCameraProfile(),
                                     &camera_descriptors, &error))
       << error;
   ASSERT_EQ(camera_descriptors.size(), 4U);
-  EXPECT_EQ(camera_descriptors[0].format(), mujoco_sim::v2::RGB8);
+  EXPECT_EQ(camera_descriptors[0].format(), mujoco_sim::v3::RGB8);
   EXPECT_EQ(camera_descriptors[0].row_stride_bytes(), 64U * 3U);
   EXPECT_EQ(camera_descriptors[0].maximum_payload_bytes(), 64U * 48U * 3U);
   EXPECT_EQ(camera_descriptors[0].frame_convention(),
-            mujoco_sim::v2::ROS_OPTICAL);
+            mujoco_sim::v3::ROS_OPTICAL);
   EXPECT_EQ(camera_descriptors[0].topic(), "");
   EXPECT_GT(camera_descriptors[0].camera_intrinsics().fx(), 0.0);
   EXPECT_DOUBLE_EQ(camera_descriptors[0].camera_intrinsics().cx(), 31.5);
@@ -160,20 +156,20 @@ TEST_F(SensorTest, DescriptorsExposeShapesConventionsAndLabels) {
   EXPECT_EQ(segmentation.segmentation_labels(target_id).name(),
             "camera_target");
 
-  mujoco_sim::v2::StreamDescriptor lidar_descriptor;
+  mujoco_sim::v3::StreamDescriptor lidar_descriptor;
   ASSERT_TRUE(DescribeRayLidarStream(*snapshot_, LidarProfile(),
                                      &lidar_descriptor, &error))
       << error;
   EXPECT_EQ(lidar_descriptor.width(), 4U);
   EXPECT_EQ(lidar_descriptor.height(), 1U);
   EXPECT_EQ(lidar_descriptor.row_stride_bytes(), 4U * 3U * sizeof(float));
-  EXPECT_EQ(lidar_descriptor.frame_convention(), mujoco_sim::v2::ROS_BODY);
+  EXPECT_EQ(lidar_descriptor.frame_convention(), mujoco_sim::v3::ROS_BODY);
 }
 
 TEST_F(SensorTest, CalibratedPrincipalPointMatchesRenderedTarget) {
   CameraProfile profile = FullCameraProfile();
   profile.camera_name = "intrinsic_camera";
-  profile.outputs = {{mujoco_sim::v2::RGB8, "intrinsic/rgb"}};
+  profile.outputs = {{mujoco_sim::v3::RGB8, "intrinsic/rgb"}};
   std::string error;
   auto renderer = OffscreenRenderer::Create(*snapshot_, profile, &error);
   ASSERT_NE(renderer, nullptr) << error;
@@ -224,8 +220,10 @@ TEST_F(SensorTest, CameraCaptureProducesAllConsistentOutputs) {
       << error;
   ASSERT_EQ(frames.size(), 4U);
   for (const RawFrame& frame : frames) {
-    EXPECT_EQ(frame.header.header().SerializeAsString(),
-              metadata.header.SerializeAsString());
+    EXPECT_EQ(frame.header.epoch(), metadata.epoch);
+    EXPECT_EQ(frame.header.tick_id(), metadata.tick_id);
+    EXPECT_DOUBLE_EQ(frame.header.simulation_time_s(),
+                     metadata.simulation_time_s);
     EXPECT_EQ(frame.header.stream_sequence(), metadata.stream_sequence);
     EXPECT_EQ(frame.header.capture_id(), metadata.capture_id);
     EXPECT_EQ(frame.header.dropped_since_previous(),
@@ -234,7 +232,7 @@ TEST_F(SensorTest, CameraCaptureProducesAllConsistentOutputs) {
   }
 
   const auto rgb = Decode<std::uint8_t>(
-      FrameWithFormat(frames, mujoco_sim::v2::RGB8));
+      FrameWithFormat(frames, mujoco_sim::v3::RGB8));
   ASSERT_EQ(rgb.size(), 64U * 48U * 3U);
   const auto [minimum_rgb, maximum_rgb] =
       std::minmax_element(rgb.begin(), rgb.end());
@@ -242,11 +240,11 @@ TEST_F(SensorTest, CameraCaptureProducesAllConsistentOutputs) {
   EXPECT_GT(*maximum_rgb, 20U);
 
   const auto depth = Decode<float>(
-      FrameWithFormat(frames, mujoco_sim::v2::DEPTH32F));
+      FrameWithFormat(frames, mujoco_sim::v3::DEPTH32F));
   const auto segmentation = Decode<std::uint32_t>(
-      FrameWithFormat(frames, mujoco_sim::v2::SEGMENTATION32U));
+      FrameWithFormat(frames, mujoco_sim::v3::SEGMENTATION32U));
   const auto points = Decode<float>(
-      FrameWithFormat(frames, mujoco_sim::v2::XYZ32F));
+      FrameWithFormat(frames, mujoco_sim::v3::XYZ32F));
   ASSERT_EQ(depth.size(), 64U * 48U);
   ASSERT_EQ(segmentation.size(), depth.size());
   ASSERT_EQ(points.size(), depth.size() * 3U);
@@ -281,8 +279,8 @@ TEST_F(SensorTest, CameraCaptureProducesAllConsistentOutputs) {
 TEST_F(SensorTest, IntrinsicCameraPointCloudReprojectsToSourcePixels) {
   CameraProfile profile = FullCameraProfile();
   profile.camera_name = "intrinsic_camera";
-  profile.outputs = {{mujoco_sim::v2::DEPTH32F, "intrinsic/depth"},
-                     {mujoco_sim::v2::XYZ32F, "intrinsic/points"}};
+  profile.outputs = {{mujoco_sim::v3::DEPTH32F, "intrinsic/depth"},
+                     {mujoco_sim::v3::XYZ32F, "intrinsic/points"}};
   std::string error;
   auto renderer = OffscreenRenderer::Create(*snapshot_, profile, &error);
   ASSERT_NE(renderer, nullptr) << error;
@@ -291,7 +289,7 @@ TEST_F(SensorTest, IntrinsicCameraPointCloudReprojectsToSourcePixels) {
   ASSERT_TRUE(renderer->Capture(*snapshot_, TestMetadata(), &frames, &error))
       << error;
   const auto points = Decode<float>(
-      FrameWithFormat(frames, mujoco_sim::v2::XYZ32F));
+      FrameWithFormat(frames, mujoco_sim::v3::XYZ32F));
   const auto& intrinsics =
       renderer->descriptors().front().camera_intrinsics();
   constexpr std::size_t kColumn = 17;
@@ -309,8 +307,8 @@ TEST_F(SensorTest, IntrinsicCameraPointCloudReprojectsToSourcePixels) {
 TEST_F(SensorTest, SegmentationUsesTheRenderedMonoCamera) {
   CameraProfile profile = FullCameraProfile();
   profile.camera_name = "wide_ipd_camera";
-  profile.outputs = {{mujoco_sim::v2::RGB8, "wide/rgb"},
-                     {mujoco_sim::v2::SEGMENTATION32U,
+  profile.outputs = {{mujoco_sim::v3::RGB8, "wide/rgb"},
+                     {mujoco_sim::v3::SEGMENTATION32U,
                       "wide/segmentation"}};
   std::string error;
   auto renderer = OffscreenRenderer::Create(*snapshot_, profile, &error);
@@ -320,9 +318,9 @@ TEST_F(SensorTest, SegmentationUsesTheRenderedMonoCamera) {
   ASSERT_TRUE(renderer->Capture(*snapshot_, TestMetadata(), &frames, &error))
       << error;
   const auto rgb =
-      Decode<std::uint8_t>(FrameWithFormat(frames, mujoco_sim::v2::RGB8));
+      Decode<std::uint8_t>(FrameWithFormat(frames, mujoco_sim::v3::RGB8));
   const auto segmentation = Decode<std::uint32_t>(
-      FrameWithFormat(frames, mujoco_sim::v2::SEGMENTATION32U));
+      FrameWithFormat(frames, mujoco_sim::v3::SEGMENTATION32U));
   const int target_id =
       mj_name2id(snapshot_->model(), mjOBJ_GEOM, "camera_target");
   ASSERT_GE(target_id, 0);
@@ -358,7 +356,7 @@ TEST_F(SensorTest, ForcedEglIsHeadlessAndRenders) {
   OffscreenRendererOptions options;
   options.backend = BackendPreference::kEglOnly;
   CameraProfile profile = FullCameraProfile();
-  profile.outputs = {{mujoco_sim::v2::RGB8, "egl/rgb"}};
+  profile.outputs = {{mujoco_sim::v3::RGB8, "egl/rgb"}};
   auto renderer =
       OffscreenRenderer::Create(*snapshot_, std::move(profile), options, &error);
   ASSERT_NE(renderer, nullptr) << error;
@@ -377,7 +375,7 @@ TEST_F(SensorTest, RecreatesEglRendererAfterDestroyingPreviousContext) {
     options.backend = BackendPreference::kEglOnly;
     CameraProfile profile = FullCameraProfile();
     profile.outputs = {
-        {mujoco_sim::v2::RGB8, "egl/recreated/rgb"}};
+        {mujoco_sim::v3::RGB8, "egl/recreated/rgb"}};
     auto renderer = OffscreenRenderer::Create(
         *snapshot_, std::move(profile), options, &error);
     ASSERT_NE(renderer, nullptr) << error;
@@ -395,7 +393,7 @@ TEST_F(SensorTest, ConcurrentRendererCreationUsesOneProcessBackend) {
   auto create = [this](std::string stream_name) {
     CameraProfile profile = FullCameraProfile();
     profile.outputs = {
-        {mujoco_sim::v2::RGB8, std::move(stream_name)}};
+        {mujoco_sim::v3::RGB8, std::move(stream_name)}};
     std::string error;
     auto renderer = OffscreenRenderer::Create(*snapshot_, std::move(profile),
                                               &error);
@@ -414,7 +412,7 @@ TEST_F(SensorTest, ConcurrentRendererCreationUsesOneProcessBackend) {
 TEST_F(SensorTest, DestroyingOneEglRendererKeepsOtherDisplayAlive) {
   auto create = [this](const std::string& stream_name) {
     CameraProfile profile = FullCameraProfile();
-    profile.outputs = {{mujoco_sim::v2::RGB8, stream_name}};
+    profile.outputs = {{mujoco_sim::v3::RGB8, stream_name}};
     OffscreenRendererOptions options;
     options.backend = BackendPreference::kEglOnly;
     std::string error;
@@ -458,7 +456,7 @@ TEST_F(SensorTest, ForcedOsMesaIsHeadlessAndRenders) {
     OffscreenRendererOptions options;
     options.backend = BackendPreference::kOsMesaOnly;
     CameraProfile profile = FullCameraProfile();
-    profile.outputs = {{mujoco_sim::v2::RGB8, "osmesa/rgb"}};
+    profile.outputs = {{mujoco_sim::v3::RGB8, "osmesa/rgb"}};
     auto renderer = OffscreenRenderer::Create(
         *snapshot_, std::move(profile), options, &error);
     if (renderer == nullptr &&
@@ -501,7 +499,7 @@ TEST_F(SensorTest, VerticalFovBuildsInclusiveOrganizedRings) {
   RayLidarProfile profile = LidarProfile();
   profile.vertical_angles_rad.clear();
   profile.vertical_fov = VerticalFieldOfView{3, -0.2, 0.3};
-  mujoco_sim::v2::StreamDescriptor descriptor;
+  mujoco_sim::v3::StreamDescriptor descriptor;
   std::string error;
   ASSERT_TRUE(DescribeRayLidarStream(*snapshot_, profile, &descriptor, &error))
       << error;
@@ -512,7 +510,7 @@ TEST_F(SensorTest, VerticalFovBuildsInclusiveOrganizedRings) {
 
 TEST_F(SensorTest, InvalidProfilesAreRejectedBeforeAllocation) {
   std::string error;
-  std::vector<mujoco_sim::v2::StreamDescriptor> descriptors;
+  std::vector<mujoco_sim::v3::StreamDescriptor> descriptors;
   CameraProfile camera = FullCameraProfile();
   camera.width = 0;
   EXPECT_FALSE(DescribeCameraStreams(*snapshot_, camera, &descriptors, &error));
@@ -532,7 +530,7 @@ TEST_F(SensorTest, InvalidProfilesAreRejectedBeforeAllocation) {
   camera.width = std::numeric_limits<std::uint32_t>::max();
   EXPECT_FALSE(DescribeCameraStreams(*snapshot_, camera, &descriptors, &error));
 
-  mujoco_sim::v2::StreamDescriptor descriptor;
+  mujoco_sim::v3::StreamDescriptor descriptor;
   RayLidarProfile lidar = LidarProfile();
   lidar.vertical_fov = VerticalFieldOfView{2, -0.1, 0.1};
   EXPECT_FALSE(DescribeRayLidarStream(*snapshot_, lidar, &descriptor, &error));
@@ -557,8 +555,7 @@ TEST_F(SensorTest, CaptureRejectsInvalidMetadataAndForeignSnapshot) {
   auto lidar = RayLidar::Create(*snapshot_, LidarProfile(), &error);
   ASSERT_NE(lidar, nullptr) << error;
   CaptureMetadata metadata = TestMetadata();
-  metadata.header.set_simulation_time_s(
-      std::numeric_limits<double>::quiet_NaN());
+  metadata.simulation_time_s = std::numeric_limits<double>::quiet_NaN();
   RawFrame frame;
   EXPECT_FALSE(lidar->Capture(*snapshot_, metadata, &frame, &error));
 

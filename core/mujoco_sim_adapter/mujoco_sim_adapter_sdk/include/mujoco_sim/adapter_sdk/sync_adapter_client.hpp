@@ -3,10 +3,12 @@
 #include <chrono>
 #include <cstdint>
 #include <memory>
+#include <span>
 #include <string>
+#include <string_view>
 #include <vector>
 
-#include <mujoco_sim/v2/sync.pb.h>
+#include <mujoco_sim/adapter_sdk/adapter_domain.hpp>
 
 namespace mujoco_sim::adapter_sdk {
 
@@ -20,18 +22,36 @@ struct AdapterOptions {
   std::vector<std::string> observation_names;
   /// Command resources requested in registration order.
   std::vector<std::string> command_names;
-  /// Server-side Controller timeout in milliseconds; must be positive.
-  std::uint32_t timeout_ms = 1000;
+  /// Barrier Commit timeout in milliseconds; must be positive.
+  std::uint32_t commit_timeout_ms = 1000;
+  /// Session presence timeout in milliseconds; must be positive.
+  std::uint32_t session_timeout_ms = 1000;
+  /// Suppressed keepalive period; must not exceed session_timeout_ms / 3.
+  std::uint32_t heartbeat_period_ms = 250;
   /// Discovery and RPC timeout in milliseconds; must be positive.
   std::uint32_t service_timeout_ms = 5000;
 };
 
-/// One scalar actuator command supplied to Commit().
-struct CommandValue {
-  /// Registered scalar command resource name.
-  std::string name;
-  /// Command value in the resource unit declared by the Server.
-  double value = 0.0;
+class TickLease {
+ public:
+  struct Data;
+  TickLease();
+  ~TickLease();
+  TickLease(const TickLease&) = delete;
+  TickLease& operator=(const TickLease&) = delete;
+  TickLease(TickLease&&) noexcept;
+  TickLease& operator=(TickLease&&) noexcept;
+
+  std::uint64_t tick_id() const noexcept;
+  double simulation_time_s() const noexcept;
+  bool recovery_proof() const noexcept;
+  std::span<const double> observations() const noexcept;
+  explicit operator bool() const noexcept;
+
+ private:
+  std::shared_ptr<const Data> data_;
+  const void* owner_ = nullptr;
+  friend class SyncAdapterClient;
 };
 
 /// Result of a blocking or polling Tick wait.
@@ -70,13 +90,14 @@ class SyncAdapterClient {
   /// Waits for one Tick. A zero timeout polls; max() waits indefinitely.
   /// Output is changed only when kReceived is returned.
   TickWaitResult WaitForTick(std::chrono::milliseconds timeout,
-                             mujoco_sim::v2::Tick* tick,
+                             TickLease* tick,
                              std::string* error_message);
   /// Validates and publishes commands for the current outstanding Tick.
   /// A failed local validation keeps the Tick available for correction.
-  bool Commit(const mujoco_sim::v2::Tick& tick,
-              const std::vector<CommandValue>& commands,
+  bool Commit(const TickLease& tick, std::span<const double> commands,
               std::string* error_message);
+  bool FailTick(const TickLease& tick, FaultCode code,
+                std::string_view message, std::string* error_message);
   /// Cancels local waits and delivery without contacting the Server.
   void Stop();
   /// Removes the remote session; failures preserve it for a later retry.
@@ -86,9 +107,8 @@ class SyncAdapterClient {
   /// Returns the count of rejected Tick layout hash mismatches.
   std::uint64_t layout_hash_mismatches() const;
 
-  /// Returns the last successful registration response.
-  /// Call only after Start() has completed and do not race this access with it.
-  const mujoco_sim::v2::RegisterAdapterResponse& registration() const;
+  const AdapterRegistration& registration() const;
+  const ControllerLayout& layout() const;
 
  private:
   friend class SyncAdapterClientTestPeer;

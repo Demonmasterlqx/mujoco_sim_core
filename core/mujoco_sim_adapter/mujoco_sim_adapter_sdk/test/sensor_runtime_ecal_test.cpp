@@ -95,7 +95,7 @@ TEST(SensorRuntimeEcalTest, CaptureErrorReachesStreamClient) {
       [&runtime](const eCAL::SServiceMethodInformation&,
                  const std::string& request_bytes,
                  std::string& response_bytes) {
-        mujoco_sim::v2::GetSensorStreamsRequest request;
+        mujoco_sim::v3::GetSensorStreamsRequest request;
         if (!request.ParseFromString(request_bytes)) return 1;
         const auto response = runtime.GetCatalog(request);
         return response.SerializeToString(&response_bytes) ? 0 : 1;
@@ -127,7 +127,11 @@ TEST(SensorRuntimeEcalTest, CaptureErrorReachesStreamClient) {
     ASSERT_TRUE(core.CompleteEmptyBarrier().step_completed.has_value());
     runtime.OnStepCompleted(core);
     runtime.CompleteBlockingEnqueues();
-    auto status = core.MakeStatus();
+    mujoco_sim::v3::ServerStatus status;
+    status.set_epoch(core.state().epoch);
+    status.set_tick_id(core.state().current_tick_id);
+    status.set_simulation_time_s(core.state().simulation_time_s);
+    status.set_state(mujoco_sim::v3::RUNNING);
     runtime.AppendStatus(&status);
     status_publisher.Send(status.SerializeAsString());
     std::this_thread::sleep_for(20ms);

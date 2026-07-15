@@ -16,8 +16,8 @@ sequenceDiagram
 
   L->>C: OpenIssuedTicks()
   C->>C: freeze required/recipient membership
-  C->>C: serialize once per Controller/Tick
-  C-->>L: immutable IssuedTick handles + effects
+  C-->>L: immutable dense IssuedTick handles + effects
+  L->>L: encode/cache once per issue generation
   L-->>A: publish cached Tick bytes
   A-->>L: AdapterCommit
   L->>C: SubmitCommit(commit)
@@ -35,8 +35,8 @@ sequenceDiagram
 ```
 
 Repeated `OpenIssuedTicks()` calls while the Barrier is open return the same
-shared handles and cached bytes. A successful issue has
-`serialization_count == 1`. Completion, unregister, replacement, model load,
+shared handles. `SimulationLoop` cache hits reuse the exact encoded bytes.
+Completion, unregister, replacement, model load,
 failure, or stop invalidates identity lookup without destroying handles already
 owned by a publisher.
 

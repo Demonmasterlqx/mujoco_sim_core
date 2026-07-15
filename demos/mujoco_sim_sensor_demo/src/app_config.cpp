@@ -42,10 +42,9 @@ bool RequireUnique(const std::vector<std::string>& values,
 bool ValidateObserverOptions(
     const mujoco_sim::adapter_sdk::ObserverOptions& options,
     const std::string& label, std::string* error_message) {
-  if (options.timeout_ms != 0 &&
-      options.keepalive_period_ms >= options.timeout_ms) {
+  if (options.heartbeat_period_ms > options.session_timeout_ms / 3) {
     return Fail(label +
-                    ".keepalive_period_ms must be less than timeout_ms",
+                    ".heartbeat_period_ms must not exceed session_timeout_ms / 3",
                 error_message);
   }
   return RequireUnique(options.observation_names, label + " observations",
@@ -126,7 +125,12 @@ bool BuildAppConfig(const generated::SensorDemoConfig& generated_config,
       ControllerObservationNames(next.controller.interfaces);
   next.controller.adapter.command_names =
       ControllerCommandNames(next.controller.interfaces);
-  next.controller.adapter.timeout_ms = generated_config.controller.timeout_ms;
+  next.controller.adapter.commit_timeout_ms =
+      generated_config.controller.commit_timeout_ms;
+  next.controller.adapter.session_timeout_ms =
+      generated_config.controller.session_timeout_ms;
+  next.controller.adapter.heartbeat_period_ms =
+      generated_config.controller.heartbeat_period_ms;
   next.controller.adapter.service_timeout_ms =
       generated_config.common.service_timeout_ms;
   next.controller.control =
@@ -144,12 +148,12 @@ bool BuildAppConfig(const generated::SensorDemoConfig& generated_config,
       generated_config.state_observer.adapter_id;
   next.state_observer.observer.observation_names =
       StateObservationNames(next.state_observer.interfaces);
-  next.state_observer.observer.timeout_ms =
-      generated_config.state_observer.timeout_ms;
+  next.state_observer.observer.session_timeout_ms =
+      generated_config.state_observer.session_timeout_ms;
   next.state_observer.observer.service_timeout_ms =
       generated_config.common.service_timeout_ms;
-  next.state_observer.observer.keepalive_period_ms =
-      generated_config.state_observer.keepalive_period_ms;
+  next.state_observer.observer.heartbeat_period_ms =
+      generated_config.state_observer.heartbeat_period_ms;
   next.state_observer.observer.every_n_steps =
       generated_config.state_observer.every_n_steps;
   next.state_observer.observer.period_s.reset();
@@ -183,10 +187,10 @@ bool BuildAppConfig(const generated::SensorDemoConfig& generated_config,
   next.mapper.observer.server_name = next.server_name;
   next.mapper.observer.observer_id = mapper.adapter_id;
   next.mapper.observer.observation_names = {mapper.imu_quaternion};
-  next.mapper.observer.timeout_ms = mapper.timeout_ms;
+  next.mapper.observer.session_timeout_ms = mapper.session_timeout_ms;
   next.mapper.observer.service_timeout_ms =
       generated_config.common.service_timeout_ms;
-  next.mapper.observer.keepalive_period_ms = mapper.keepalive_period_ms;
+  next.mapper.observer.heartbeat_period_ms = mapper.heartbeat_period_ms;
   next.mapper.observer.every_n_steps = mapper.every_n_steps;
   next.mapper.observer.period_s.reset();
   next.mapper.observer.queue_capacity = mapper.observer_queue_capacity;

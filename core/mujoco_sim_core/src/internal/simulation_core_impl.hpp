@@ -32,9 +32,9 @@ using internal::TickStore;
 
 struct AdapterInfo {
   std::string adapter_id;
-  mujoco_sim::v2::AdapterRole role;
+  mujoco_sim::core::AdapterRole role;
   std::uint64_t session_id;
-  mujoco_sim::v2::ControllerState state;
+  mujoco_sim::core::ControllerState state;
 };
 
 struct SimulationCore::Impl {
@@ -42,21 +42,22 @@ struct SimulationCore::Impl {
 
   EngineResult<ModelLoadReceipt> LoadModelWithEffects(
       const std::string& model_path, const ModelLoadOptions& options);
-  EngineResult<mujoco_sim::v2::RegisterAdapterResponse>
+  EngineResult<mujoco_sim::core::RegisterAdapterResponse>
   RegisterAdapterWithEffects(
-      const mujoco_sim::v2::RegisterAdapterRequest& request);
-  EngineResult<mujoco_sim::v2::ActivateAdapterResponse>
+      const mujoco_sim::core::RegisterAdapterRequest& request);
+  EngineResult<mujoco_sim::core::ActivateAdapterResponse>
   ActivateAdapterWithEffects(
-      const mujoco_sim::v2::ActivateAdapterRequest& request);
-  EngineResult<mujoco_sim::v2::UnregisterAdapterResponse>
+      const mujoco_sim::core::ActivateAdapterRequest& request);
+  EngineResult<mujoco_sim::core::UnregisterAdapterResponse>
   UnregisterAdapterWithEffects(
-      const mujoco_sim::v2::UnregisterAdapterRequest& request);
+      const mujoco_sim::core::UnregisterAdapterRequest& request);
   EngineResult<std::vector<IssuedTickHandle>> OpenIssuedTicksWithEffects();
   EngineEffects CompleteEmptyBarrierWithEffects();
   EngineResult<CommitReceipt> SubmitCommitWithEffects(
-      const mujoco_sim::v2::AdapterCommit& commit);
+      const mujoco_sim::core::AdapterCommit& commit);
+  EngineResult<CommitReceipt> SubmitFaultWithEffects(const ControllerFault& fault);
   EngineEffects AcceptHeartbeatWithEffects(
-      const mujoco_sim::v2::AdapterHeartbeat& heartbeat,
+      const mujoco_sim::core::AdapterHeartbeat& heartbeat,
       std::chrono::steady_clock::time_point now);
   EngineEffects CheckDeadlinesWithEffects(
       std::chrono::steady_clock::time_point now);
@@ -73,33 +74,38 @@ struct SimulationCore::Impl {
       const SimulationSnapshot& source, std::string* error_message) const;
   bool UpdateSnapshot(SimulationSnapshot* snapshot,
                       std::string* error_message) const;
-  const std::vector<mujoco_sim::v2::ResourceDescriptor>& observations() const;
-  const std::vector<mujoco_sim::v2::ResourceDescriptor>& commands() const;
+  const std::vector<mujoco_sim::core::ResourceDescriptor>& observations() const;
+  const std::vector<mujoco_sim::core::ResourceDescriptor>& commands() const;
   CoreResources resources() const;
-  mujoco_sim::v2::GetAvailableResourcesResponse GetAvailableResources(
-      const mujoco_sim::v2::GetAvailableResourcesRequest& request) const;
-  mujoco_sim::v2::RegisterAdapterResponse DoRegisterAdapter(
-      const mujoco_sim::v2::RegisterAdapterRequest& request);
-  mujoco_sim::v2::ActivateAdapterResponse DoActivateAdapter(
-      const mujoco_sim::v2::ActivateAdapterRequest& request);
-  EngineResult<mujoco_sim::v2::UnregisterAdapterResponse> DoUnregisterAdapter(
-      const mujoco_sim::v2::UnregisterAdapterRequest& request);
+  mujoco_sim::core::GetAvailableResourcesResponse GetAvailableResources(
+      const mujoco_sim::core::GetAvailableResourcesRequest& request) const;
+  mujoco_sim::core::RegisterAdapterResponse DoRegisterAdapter(
+      const mujoco_sim::core::RegisterAdapterRequest& request);
+  mujoco_sim::core::ActivateAdapterResponse DoActivateAdapter(
+      const mujoco_sim::core::ActivateAdapterRequest& request);
+  EngineResult<mujoco_sim::core::UnregisterAdapterResponse> DoUnregisterAdapter(
+      const mujoco_sim::core::UnregisterAdapterRequest& request);
   std::vector<IssuedTickHandle> DoOpenIssuedTicks();
   bool OpenNewBarrier();
   bool IsIssuedTickCurrent(const IssuedTickIdentity& identity) const;
   std::optional<StepCompletedEvent> DoCompleteEmptyBarrier();
   EngineResult<CommitReceipt> DoSubmitCommit(
-      const mujoco_sim::v2::AdapterCommit& commit);
-  void DoAcceptHeartbeat(const mujoco_sim::v2::AdapterHeartbeat& heartbeat,
+      const mujoco_sim::core::AdapterCommit& commit);
+  EngineResult<CommitReceipt> DoSubmitFault(const ControllerFault& fault);
+  void DoAcceptHeartbeat(const mujoco_sim::core::AdapterHeartbeat& heartbeat,
                        std::chrono::steady_clock::time_point now);
   void AcceptControllerHeartbeat(
-      const mujoco_sim::v2::AdapterHeartbeat& heartbeat);
+      const mujoco_sim::core::AdapterHeartbeat& heartbeat,
+      std::chrono::steady_clock::time_point now);
   void AcceptObserverHeartbeat(
-      const mujoco_sim::v2::AdapterHeartbeat& heartbeat,
+      const mujoco_sim::core::AdapterHeartbeat& heartbeat,
       std::chrono::steady_clock::time_point now);
   EngineEffects DoCheckDeadlines(
       std::chrono::steady_clock::time_point now);
   void ExpireProvisionalControllers(
+      std::chrono::steady_clock::time_point now,
+      std::vector<AdapterChange>* changes);
+  std::optional<StepCompletedEvent> UpdateControllerPresenceDeadlines(
       std::chrono::steady_clock::time_point now,
       std::vector<AdapterChange>* changes);
   void UpdateObserverDeadlines(
@@ -110,90 +116,86 @@ struct SimulationCore::Impl {
       std::vector<AdapterChange>* changes);
   void EnterFatalError(const std::string& message);
   void MarkStopped(const std::string& message);
-  mujoco_sim::v2::ServerStatus MakeStatus() const;
+  mujoco_sim::core::ServerStatus MakeStatus() const;
   std::uint64_t epoch() const;
   std::uint64_t current_tick_id() const;
   double simulation_time() const;
   double timestep() const;
-  mujoco_sim::v2::ServerState server_state() const;
+  mujoco_sim::core::ServerState server_state() const;
   bool tick_open() const;
   CoreState state() const;
   std::optional<AdapterInfo> FindAdapterInfo(
       const std::string& adapter_id,
-      std::optional<mujoco_sim::v2::AdapterRole> role = std::nullopt) const;
+      std::optional<mujoco_sim::core::AdapterRole> role = std::nullopt) const;
   std::vector<AdapterInfo> AdapterInfos() const;
   std::vector<AdapterInfo> RecoveryPendingControllers() const;
   std::uint64_t ControllerHeartbeatTick(const std::string& adapter_id) const;
   std::chrono::steady_clock::time_point ObserverHeartbeatTime(
       const std::string& adapter_id) const;
 
-  mujoco_sim::v2::RegisterAdapterResponse RegisterControlAdapter(
-      const mujoco_sim::v2::RegisterAdapterRequest& request);
-  mujoco_sim::v2::RegisterAdapterResponse RegisterObserverAdapter(
-      const mujoco_sim::v2::RegisterAdapterRequest& request);
-  std::optional<mujoco_sim::v2::RegisterAdapterResponse>
+  mujoco_sim::core::RegisterAdapterResponse RegisterControlAdapter(
+      const mujoco_sim::core::RegisterAdapterRequest& request);
+  mujoco_sim::core::RegisterAdapterResponse RegisterObserverAdapter(
+      const mujoco_sim::core::RegisterAdapterRequest& request);
+  std::optional<mujoco_sim::core::RegisterAdapterResponse>
   ValidateRegistrationRequest(
-      const mujoco_sim::v2::RegisterAdapterRequest& request) const;
-  std::optional<mujoco_sim::v2::RegisterAdapterResponse>
+      const mujoco_sim::core::RegisterAdapterRequest& request) const;
+  std::optional<mujoco_sim::core::RegisterAdapterResponse>
   ValidateControllerRequest(
-      const mujoco_sim::v2::RegisterAdapterRequest& request,
+      const mujoco_sim::core::RegisterAdapterRequest& request,
       Controller** existing, bool* replacing) const;
-  std::optional<mujoco_sim::v2::RegisterAdapterResponse>
+  std::optional<mujoco_sim::core::RegisterAdapterResponse>
   PopulateControllerLayout(
-      const mujoco_sim::v2::RegisterAdapterRequest& request, bool replacing,
+      const mujoco_sim::core::RegisterAdapterRequest& request, bool replacing,
       Controller* controller) const;
-  std::optional<mujoco_sim::v2::RegisterAdapterResponse>
+  std::optional<mujoco_sim::core::RegisterAdapterResponse>
   ValidateObserverRequest(
-      const mujoco_sim::v2::RegisterAdapterRequest& request,
+      const mujoco_sim::core::RegisterAdapterRequest& request,
       Observer** existing, bool* replacing) const;
-  mujoco_sim::v2::ActivateAdapterResponse ActivateControlAdapter(
-      const mujoco_sim::v2::ActivateAdapterRequest& request);
-  EngineResult<mujoco_sim::v2::UnregisterAdapterResponse>
+  mujoco_sim::core::ActivateAdapterResponse ActivateControlAdapter(
+      const mujoco_sim::core::ActivateAdapterRequest& request);
+  EngineResult<mujoco_sim::core::UnregisterAdapterResponse>
   UnregisterControlAdapter(
-      const mujoco_sim::v2::UnregisterAdapterRequest& request);
-  mujoco_sim::v2::Tick BuildTickFor(const Controller& controller) const;
-  mujoco_sim::v2::ObservationFrame BuildObservationFrame(
+      const mujoco_sim::core::UnregisterAdapterRequest& request);
+  mujoco_sim::core::Tick BuildTickFor(const Controller& controller) const;
+  mujoco_sim::core::ObservationFrame BuildObservationFrame(
       Observer* observer) const;
-  std::vector<mujoco_sim::v2::ObservationFrame>
+  std::vector<mujoco_sim::core::ObservationFrame>
   BuildObservationFramesForCompletedStep();
   std::optional<StepCompletedEvent> CompleteBarrier(
       StepCompletionSource source);
-  mujoco_sim::v2::Header MakeHeader(std::uint64_t session_id) const;
   void EnterErrorPaused(const std::string& message);
   bool ValidateCommands(const Controller& controller,
-                        const mujoco_sim::v2::AdapterCommit& commit,
+                        const mujoco_sim::core::AdapterCommit& commit,
                         std::string* message) const;
   bool ValidateCommitEnvelope(const Controller& controller,
-                              const mujoco_sim::v2::AdapterCommit& commit,
+                              const mujoco_sim::core::AdapterCommit& commit,
                               EngineResult<CommitReceipt>* result) const;
   EngineResult<CommitReceipt> HandleRecoveryCommit(
-      Controller* controller, const mujoco_sim::v2::AdapterCommit& commit);
+      Controller* controller, const mujoco_sim::core::AdapterCommit& commit);
   EngineResult<CommitReceipt> HandleActiveCommit(
-      Controller* controller, const mujoco_sim::v2::AdapterCommit& commit);
+      Controller* controller, const mujoco_sim::core::AdapterCommit& commit);
   EngineResult<CommitReceipt> HandleStaleCommit(
-      Controller* controller, const mujoco_sim::v2::AdapterCommit& commit);
+      Controller* controller, const mujoco_sim::core::AdapterCommit& commit);
   std::optional<CommitReceipt> ValidateCurrentCommitContext(
       const Controller& controller,
-      const mujoco_sim::v2::AdapterCommit& commit) const;
+      const mujoco_sim::core::AdapterCommit& commit) const;
   EngineResult<CommitReceipt> HandlePendingCommit(
-      Controller* controller, const mujoco_sim::v2::AdapterCommit& commit,
-      const mujoco_sim::v2::AdapterCommit& pending);
+      Controller* controller, const mujoco_sim::core::AdapterCommit& commit,
+      const mujoco_sim::core::AdapterCommit& pending);
   EngineResult<CommitReceipt> RejectActiveCommit(
       Controller* controller, const std::string& message);
   EngineResult<CommitReceipt> AcceptActiveCommit(
-      Controller* controller, const mujoco_sim::v2::AdapterCommit& commit);
+      Controller* controller, const mujoco_sim::core::AdapterCommit& commit);
   void ZeroControllerCommands(const Controller& controller);
   std::optional<StepCompletedEvent> EnterControllerError(
       Controller* controller, const std::string& message);
   void RecordCommitChange(EngineResult<CommitReceipt>* result,
                           AdapterChangeKind kind,
                           const Controller& controller,
-                          mujoco_sim::v2::ControllerState old_state,
-                          mujoco_sim::v2::ControllerState new_state) const;
+                          mujoco_sim::core::ControllerState old_state,
+                          mujoco_sim::core::ControllerState new_state) const;
   void ReleaseControllerResources(const Controller& controller);
-  bool ValidateCommonHeader(const mujoco_sim::v2::Header& header,
-                            const Controller& controller,
-                            std::string* message) const;
   void InvalidateIssuedTick(const std::string& adapter_id);
   void InvalidateAllIssuedTicks();
 
@@ -208,7 +210,7 @@ struct SimulationCore::Impl {
   std::unique_ptr<TickStore> tick_store_;
   std::uint64_t epoch_ = 1;
   std::uint64_t current_tick_id_ = 0;
-  mujoco_sim::v2::ServerState server_state_ = mujoco_sim::v2::IDLE;
+  mujoco_sim::core::ServerState server_state_ = mujoco_sim::core::IDLE;
   bool tick_open_ = false;
   std::chrono::steady_clock::time_point tick_started_at_{};
   std::string status_message_;

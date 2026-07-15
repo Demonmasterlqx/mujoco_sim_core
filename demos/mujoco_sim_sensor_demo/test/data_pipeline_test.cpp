@@ -25,22 +25,33 @@
 namespace demo = mujoco_sim::sensor_demo;
 namespace {
 
-void SetHeader(mujoco_sim::v2::Header* header, double time) {
-  header->set_server_name("test");
-  header->set_session_id(1);
-  header->set_epoch(2);
-  header->set_tick_id(3);
-  header->set_protocol_major(1);
-  header->set_protocol_minor(2);
-  header->set_simulation_time_s(time);
+using Resource = std::pair<std::string, std::size_t>;
+
+mujoco_sim::adapter_sdk::ControllerLayout MakeLayout(
+    std::initializer_list<Resource> observation_specs,
+    std::initializer_list<std::string> command_names = {}) {
+  std::vector<mujoco_sim::adapter_sdk::ResourceInfo> observations, commands;
+  std::size_t offset = 0;
+  for (const auto& [name, count] : observation_specs) {
+    observations.push_back({name, {offset, count}});
+    offset += count;
+  }
+  std::size_t command_offset = 0;
+  for (const auto& name : command_names) {
+    commands.push_back({name, {command_offset++, 1}});
+  }
+  return {std::move(observations), std::move(commands), offset,
+          command_offset};
 }
 
-void AddObservation(
-    google::protobuf::RepeatedPtrField<mujoco_sim::v2::ObservationBlock>* blocks,
-    const std::string& name, std::initializer_list<double> values) {
-  auto* block = blocks->Add();
-  block->set_name(name);
-  for (double value : values) block->add_values(value);
+void SetObservation(const mujoco_sim::adapter_sdk::ControllerLayout& layout,
+                    const std::string& name,
+                    std::initializer_list<double> values,
+                    std::vector<double>* output) {
+  const auto span = layout.Observation(name);
+  ASSERT_TRUE(span.has_value());
+  ASSERT_EQ(span->count, values.size());
+  std::copy(values.begin(), values.end(), output->begin() + span->offset);
 }
 
 demo::ControllerInterfaces ControllerNames() {
@@ -51,12 +62,14 @@ demo::ControllerInterfaces ControllerNames() {
 }
 
 mujoco_sim::adapter_sdk::OwnedStreamSample MakeStreamSample(
-    const std::string& name, mujoco_sim::v2::StreamFormat format,
-    mujoco_sim::v2::FrameConvention convention, std::uint32_t width,
+    const std::string& name, mujoco_sim::v3::StreamFormat format,
+    mujoco_sim::v3::FrameConvention convention, std::uint32_t width,
     std::uint32_t height, std::uint32_t stride,
     std::vector<std::byte> payload) {
   mujoco_sim::adapter_sdk::OwnedStreamSample sample;
-  SetHeader(sample.header.mutable_header(), 1.25);
+  sample.header.set_epoch(2);
+  sample.header.set_tick_id(3);
+  sample.header.set_simulation_time_s(1.25);
   sample.header.set_stream_name(name);
   sample.header.set_stream_sequence(1);
   sample.header.set_capture_id(2);
@@ -71,9 +84,9 @@ mujoco_sim::adapter_sdk::OwnedStreamSample MakeStreamSample(
   return sample;
 }
 
-mujoco_sim::v2::StreamDescriptor DescriptorFor(
+mujoco_sim::v3::StreamDescriptor DescriptorFor(
     const mujoco_sim::adapter_sdk::OwnedStreamSample& sample) {
-  mujoco_sim::v2::StreamDescriptor descriptor;
+  mujoco_sim::v3::StreamDescriptor descriptor;
   descriptor.set_name(sample.header.stream_name());
   descriptor.set_format(sample.header.format());
   descriptor.set_width(sample.header.width());
@@ -113,38 +126,42 @@ std::filesystem::path TemporaryPng() {
 
 TEST(DataPipelineTest, DecodesControllerTickByConfiguredNames) {
   const auto interfaces = ControllerNames();
-  mujoco_sim::v2::Tick tick;
-  SetHeader(tick.mutable_header(), 4.5);
-  AddObservation(tick.mutable_observations(), "gyro", {0.1, 0.2, 0.3});
-  AddObservation(tick.mutable_observations(), "rr_pos", {4.0});
-  AddObservation(tick.mutable_observations(), "quat", {1.0, 0.0, 0.0, 0.0});
-  AddObservation(tick.mutable_observations(), "fl_pos", {1.0});
-  AddObservation(tick.mutable_observations(), "rl_pos", {3.0});
-  AddObservation(tick.mutable_observations(), "fr_pos", {2.0});
+  const auto layout = MakeLayout(
+      {{"gyro", 3}, {"rr_pos", 1}, {"quat", 4}, {"fl_pos", 1},
+       {"rl_pos", 1}, {"fr_pos", 1}},
+      {"fl_cmd", "fr_cmd", "rl_cmd", "rr_cmd"});
+  std::vector<double> values(layout.observation_scalar_count());
+  SetObservation(layout, "gyro", {0.1, 0.2, 0.3}, &values);
+  SetObservation(layout, "rr_pos", {4.0}, &values);
+  SetObservation(layout, "quat", {1.0, 0.0, 0.0, 0.0}, &values);
+  SetObservation(layout, "fl_pos", {1.0}, &values);
+  SetObservation(layout, "rl_pos", {3.0}, &values);
+  SetObservation(layout, "fr_pos", {2.0}, &values);
 
   demo::VehicleSample sample;
   std::string error;
-  ASSERT_TRUE(demo::DecodeVehicleSample(tick, interfaces, &sample, &error))
+  const demo::VehicleDecoder decoder(layout, interfaces);
+  ASSERT_TRUE(decoder.Decode(values, 4.5, &sample, &error))
       << error;
   EXPECT_DOUBLE_EQ(sample.simulation_time, 4.5);
   EXPECT_EQ(sample.wheel_positions, (std::array<double, 4>{1, 2, 3, 4}));
   EXPECT_DOUBLE_EQ(sample.imu_gyro[2], 0.3);
-  const auto commands = demo::BuildWheelCommands(interfaces, {5, 6, 7, 8});
+  const demo::WheelCommandMapper mapper(layout, interfaces);
+  std::vector<double> commands;
+  ASSERT_TRUE(mapper.Map({5, 6, 7, 8}, &commands, &error)) << error;
   ASSERT_EQ(commands.size(), 4U);
-  EXPECT_EQ(commands[2].name, "rl_cmd");
-  EXPECT_DOUBLE_EQ(commands[2].value, 7.0);
+  EXPECT_DOUBLE_EQ(commands[2], 7.0);
 }
 
 TEST(DataPipelineTest, ObservationDecodeFailureIsTransactional) {
-  mujoco_sim::v2::Tick tick;
-  SetHeader(tick.mutable_header(), 1.0);
-  AddObservation(tick.mutable_observations(), "fl_pos", {1.0});
+  const auto layout = MakeLayout({{"fl_pos", 1}});
+  std::vector<double> values{1.0};
   demo::VehicleSample sample;
   sample.simulation_time = 99.0;
   std::string error;
-  EXPECT_FALSE(
-      demo::DecodeVehicleSample(tick, ControllerNames(), &sample, &error));
-  EXPECT_NE(error.find("missing"), std::string::npos);
+  const demo::VehicleDecoder decoder(layout, ControllerNames());
+  EXPECT_FALSE(decoder.Decode(values, 1.0, &sample, &error));
+  EXPECT_NE(error.find("mismatch"), std::string::npos);
   EXPECT_DOUBLE_EQ(sample.simulation_time, 99.0);
 }
 
@@ -155,32 +172,32 @@ TEST(DataPipelineTest, DecodesObserverJointStateAndImuWithoutBarrierData) {
       "quat",
       "gyro",
       "accel"};
-  mujoco_sim::v2::ObservationFrame frame;
-  SetHeader(frame.mutable_header(), 2.5);
-  AddObservation(frame.mutable_observations(), "fl_pos", {1.0});
-  AddObservation(frame.mutable_observations(), "fr_pos", {2.0});
-  AddObservation(frame.mutable_observations(), "rl_pos", {3.0});
-  AddObservation(frame.mutable_observations(), "rr_pos", {4.0});
-  AddObservation(frame.mutable_observations(), "fl_vel", {5.0});
-  AddObservation(frame.mutable_observations(), "fr_vel", {6.0});
-  AddObservation(frame.mutable_observations(), "rl_vel", {7.0});
-  AddObservation(frame.mutable_observations(), "rr_vel", {8.0});
-  AddObservation(frame.mutable_observations(), "quat", {1.0, 0.0, 0.0, 0.0});
-  AddObservation(frame.mutable_observations(), "gyro", {0.1, 0.2, 0.3});
-  AddObservation(frame.mutable_observations(), "accel", {0.0, 0.0, 9.81});
+  const auto layout = MakeLayout(
+      {{"fl_pos", 1}, {"fr_pos", 1}, {"rl_pos", 1}, {"rr_pos", 1},
+       {"fl_vel", 1}, {"fr_vel", 1}, {"rl_vel", 1}, {"rr_vel", 1},
+       {"quat", 4}, {"gyro", 3}, {"accel", 3}});
+  std::vector<double> values(layout.observation_scalar_count());
+  for (const auto& [name, value] : std::array<std::pair<const char*, double>, 8>{{
+           {"fl_pos", 1}, {"fr_pos", 2}, {"rl_pos", 3}, {"rr_pos", 4},
+           {"fl_vel", 5}, {"fr_vel", 6}, {"rl_vel", 7}, {"rr_vel", 8}}}) {
+    SetObservation(layout, name, {value}, &values);
+  }
+  SetObservation(layout, "quat", {1, 0, 0, 0}, &values);
+  SetObservation(layout, "gyro", {0.1, 0.2, 0.3}, &values);
+  SetObservation(layout, "accel", {0, 0, 9.81}, &values);
 
   demo::StateSample state;
   std::string error;
-  ASSERT_TRUE(
-      demo::DecodeStateSample(frame, interfaces, &state, &error))
+  const demo::StateDecoder state_decoder(layout, interfaces);
+  ASSERT_TRUE(state_decoder.Decode(values, 2.5, &state, &error))
       << error;
   EXPECT_DOUBLE_EQ(state.simulation_time, 2.5);
   EXPECT_DOUBLE_EQ(state.wheel_velocities[3], 8.0);
   EXPECT_DOUBLE_EQ(state.imu_linear_acceleration[2], 9.81);
 
   demo::ImuOrientationSample orientation;
-  ASSERT_TRUE(
-      demo::DecodeImuOrientation(frame, "quat", &orientation, &error))
+  const demo::ImuOrientationDecoder imu_decoder(layout, "quat");
+  ASSERT_TRUE(imu_decoder.Decode(values, 2.5, &orientation, &error))
       << error;
   EXPECT_DOUBLE_EQ(orientation.simulation_time, 2.5);
   EXPECT_EQ(orientation.quaternion,
@@ -217,8 +234,8 @@ TEST(DataPipelineTest, ValidatesAllCameraFormatsAndWritesRgbPng) {
   std::vector<std::byte> rgb = {
       std::byte{10}, std::byte{20}, std::byte{30},
       std::byte{40}, std::byte{50}, std::byte{60}};
-  auto rgb_sample = MakeStreamSample("rgb", mujoco_sim::v2::RGB8,
-                                     mujoco_sim::v2::ROS_OPTICAL, 2, 1, 6,
+  auto rgb_sample = MakeStreamSample("rgb", mujoco_sim::v3::RGB8,
+                                     mujoco_sim::v3::ROS_OPTICAL, 2, 1, 6,
                                      std::move(rgb));
   auto descriptor = DescriptorFor(rgb_sample);
   ASSERT_TRUE(demo::ValidateCameraSample(
@@ -229,7 +246,7 @@ TEST(DataPipelineTest, ValidatesAllCameraFormatsAndWritesRgbPng) {
   AppendFloat32LittleEndian(1.0F, &depth);
   AppendFloat32LittleEndian(2.0F, &depth);
   auto depth_sample = MakeStreamSample(
-      "depth", mujoco_sim::v2::DEPTH32F, mujoco_sim::v2::ROS_OPTICAL, 2, 1,
+      "depth", mujoco_sim::v3::DEPTH32F, mujoco_sim::v3::ROS_OPTICAL, 2, 1,
       8, std::move(depth));
   descriptor = DescriptorFor(depth_sample);
   ASSERT_TRUE(demo::ValidateCameraSample(
@@ -241,8 +258,8 @@ TEST(DataPipelineTest, ValidatesAllCameraFormatsAndWritesRgbPng) {
   AppendUint32LittleEndian(0, &segmentation);
   AppendUint32LittleEndian(4, &segmentation);
   auto segmentation_sample = MakeStreamSample(
-      "seg", mujoco_sim::v2::SEGMENTATION32U,
-      mujoco_sim::v2::ROS_OPTICAL, 2, 1, 8, std::move(segmentation));
+      "seg", mujoco_sim::v3::SEGMENTATION32U,
+      mujoco_sim::v3::ROS_OPTICAL, 2, 1, 8, std::move(segmentation));
   descriptor = DescriptorFor(segmentation_sample);
   ASSERT_TRUE(demo::ValidateCameraSample(
       segmentation_sample, descriptor,
@@ -254,7 +271,7 @@ TEST(DataPipelineTest, ValidatesAllCameraFormatsAndWritesRgbPng) {
     AppendFloat32LittleEndian(value, &points);
   }
   auto point_sample = MakeStreamSample(
-      "points", mujoco_sim::v2::XYZ32F, mujoco_sim::v2::ROS_OPTICAL, 2, 1,
+      "points", mujoco_sim::v3::XYZ32F, mujoco_sim::v3::ROS_OPTICAL, 2, 1,
       24, std::move(points));
   descriptor = DescriptorFor(point_sample);
   ASSERT_TRUE(demo::ValidateCameraSample(
@@ -288,21 +305,21 @@ TEST(DataPipelineTest, OversizedScreenshotShapesFailTransactionally) {
   const std::uint32_t overflow_width =
       std::numeric_limits<std::uint32_t>::max() / 3U + 1U;
   auto width_overflow = MakeStreamSample(
-      "rgb", mujoco_sim::v2::RGB8, mujoco_sim::v2::ROS_OPTICAL,
+      "rgb", mujoco_sim::v3::RGB8, mujoco_sim::v3::ROS_OPTICAL,
       overflow_width, 1, 2, std::vector<std::byte>(2));
   std::string error;
   EXPECT_FALSE(demo::SaveRgbScreenshot(output, width_overflow, &error));
   EXPECT_NE(error.find("invalid shape"), std::string::npos);
 
   auto png_limit = MakeStreamSample(
-      "rgb", mujoco_sim::v2::RGB8, mujoco_sim::v2::ROS_OPTICAL,
+      "rgb", mujoco_sim::v3::RGB8, mujoco_sim::v3::ROS_OPTICAL,
       static_cast<std::uint32_t>(PNG_UINT_31_MAX) + 1U, 1, 3,
       std::vector<std::byte>(3));
   EXPECT_FALSE(demo::SaveRgbScreenshot(output, png_limit, &error));
   EXPECT_NE(error.find("libpng limits"), std::string::npos);
 
   auto oversized_payload = MakeStreamSample(
-      "rgb", mujoco_sim::v2::RGB8, mujoco_sim::v2::ROS_OPTICAL, 1,
+      "rgb", mujoco_sim::v3::RGB8, mujoco_sim::v3::ROS_OPTICAL, 1,
       static_cast<std::uint32_t>(PNG_UINT_31_MAX), 3,
       std::vector<std::byte>(3));
   EXPECT_FALSE(demo::SaveRgbScreenshot(output, oversized_payload, &error));
@@ -325,8 +342,8 @@ TEST(DataPipelineTest, LidarDecodeDropsNanMissesAndIsTransactional) {
                       std::numeric_limits<float>::quiet_NaN()}) {
     AppendFloat32LittleEndian(value, &points);
   }
-  auto sample = MakeStreamSample("lidar", mujoco_sim::v2::XYZ32F,
-                                 mujoco_sim::v2::ROS_BODY, 2, 1, 24,
+  auto sample = MakeStreamSample("lidar", mujoco_sim::v3::XYZ32F,
+                                 mujoco_sim::v3::ROS_BODY, 2, 1, 24,
                                  std::move(points));
   auto descriptor = DescriptorFor(sample);
   demo::PointCloud cloud;
@@ -337,7 +354,7 @@ TEST(DataPipelineTest, LidarDecodeDropsNanMissesAndIsTransactional) {
   EXPECT_FLOAT_EQ(cloud[0].x, 1.0F);
   EXPECT_TRUE(cloud.is_dense);
 
-  descriptor.set_frame_convention(mujoco_sim::v2::ROS_OPTICAL);
+  descriptor.set_frame_convention(mujoco_sim::v3::ROS_OPTICAL);
   cloud[0].x = 42.0F;
   EXPECT_FALSE(
       demo::DecodeXyzPointCloud(sample, descriptor, &cloud, &error));
@@ -348,8 +365,8 @@ TEST(DataPipelineTest, DecodesNumericPayloadsAsLittleEndian) {
   std::vector<std::byte> segmentation = {
       std::byte{0x04}, std::byte{0x03}, std::byte{0x02}, std::byte{0x01}};
   auto segmentation_sample = MakeStreamSample(
-      "seg", mujoco_sim::v2::SEGMENTATION32U,
-      mujoco_sim::v2::ROS_OPTICAL, 1, 1, 4, std::move(segmentation));
+      "seg", mujoco_sim::v3::SEGMENTATION32U,
+      mujoco_sim::v3::ROS_OPTICAL, 1, 1, 4, std::move(segmentation));
   auto descriptor = DescriptorFor(segmentation_sample);
   demo::StreamValidationSummary summary;
   std::string error;
@@ -365,7 +382,7 @@ TEST(DataPipelineTest, DecodesNumericPayloadsAsLittleEndian) {
       std::byte{0x00}, std::byte{0x00}, std::byte{0x00}, std::byte{0x40},
       std::byte{0x00}, std::byte{0x00}, std::byte{0x40}, std::byte{0x40}};
   auto point_sample = MakeStreamSample(
-      "lidar", mujoco_sim::v2::XYZ32F, mujoco_sim::v2::ROS_BODY, 1, 1, 12,
+      "lidar", mujoco_sim::v3::XYZ32F, mujoco_sim::v3::ROS_BODY, 1, 1, 12,
       point);
   descriptor = DescriptorFor(point_sample);
   demo::PointCloud cloud;

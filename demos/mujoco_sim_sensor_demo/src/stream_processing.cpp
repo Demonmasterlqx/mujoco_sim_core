@@ -31,38 +31,38 @@ bool CheckedMultiply(std::uint64_t lhs, std::uint64_t rhs,
   return true;
 }
 
-std::size_t BytesPerPixel(mujoco_sim::v2::StreamFormat format) {
+std::size_t BytesPerPixel(mujoco_sim::v3::StreamFormat format) {
   switch (format) {
-    case mujoco_sim::v2::RGB8:
+    case mujoco_sim::v3::RGB8:
       return 3;
-    case mujoco_sim::v2::DEPTH32F:
-    case mujoco_sim::v2::SEGMENTATION32U:
+    case mujoco_sim::v3::DEPTH32F:
+    case mujoco_sim::v3::SEGMENTATION32U:
       return 4;
-    case mujoco_sim::v2::XYZ32F:
+    case mujoco_sim::v3::XYZ32F:
       return 12;
     default:
       return 0;
   }
 }
 
-mujoco_sim::v2::StreamFormat ExpectedFormat(CameraStreamKind kind) {
+mujoco_sim::v3::StreamFormat ExpectedFormat(CameraStreamKind kind) {
   switch (kind) {
     case CameraStreamKind::kRgb:
-      return mujoco_sim::v2::RGB8;
+      return mujoco_sim::v3::RGB8;
     case CameraStreamKind::kDepth:
-      return mujoco_sim::v2::DEPTH32F;
+      return mujoco_sim::v3::DEPTH32F;
     case CameraStreamKind::kSegmentation:
-      return mujoco_sim::v2::SEGMENTATION32U;
+      return mujoco_sim::v3::SEGMENTATION32U;
     case CameraStreamKind::kPointCloud:
-      return mujoco_sim::v2::XYZ32F;
+      return mujoco_sim::v3::XYZ32F;
   }
-  return mujoco_sim::v2::STREAM_FORMAT_UNSPECIFIED;
+  return mujoco_sim::v3::STREAM_FORMAT_UNSPECIFIED;
 }
 
 bool ValidateEnvelope(
     const mujoco_sim::adapter_sdk::OwnedStreamSample& sample,
-    const mujoco_sim::v2::StreamDescriptor& descriptor,
-    mujoco_sim::v2::StreamFormat expected_format,
+    const mujoco_sim::v3::StreamDescriptor& descriptor,
+    mujoco_sim::v3::StreamFormat expected_format,
     std::string* error_message) {
   const auto& header = sample.header;
   const std::size_t bytes_per_pixel = BytesPerPixel(expected_format);
@@ -89,9 +89,8 @@ bool ValidateEnvelope(
       header.payload_size() != sample.payload.size()) {
     return Fail("sensor stream payload shape is invalid", error_message);
   }
-  if (!header.header().has_simulation_time_s() ||
-      !std::isfinite(header.header().simulation_time_s()) ||
-      header.header().simulation_time_s() < 0.0 ||
+  if (!std::isfinite(header.simulation_time_s()) ||
+      header.simulation_time_s() < 0.0 ||
       header.stream_sequence() == 0) {
     return Fail("sensor stream metadata is incomplete", error_message);
   }
@@ -132,7 +131,7 @@ std::string TemporarySuffix() {
 
 bool ValidateCameraSample(
     const mujoco_sim::adapter_sdk::OwnedStreamSample& sample,
-    const mujoco_sim::v2::StreamDescriptor& descriptor,
+    const mujoco_sim::v3::StreamDescriptor& descriptor,
     CameraStreamKind expected_kind, StreamValidationSummary* summary,
     std::string* error_message) {
   if (summary == nullptr || error_message == nullptr) {
@@ -143,7 +142,7 @@ bool ValidateCameraSample(
   if (!ValidateEnvelope(sample, descriptor, expected_format, error_message)) {
     return false;
   }
-  if (descriptor.frame_convention() != mujoco_sim::v2::ROS_OPTICAL) {
+  if (descriptor.frame_convention() != mujoco_sim::v3::ROS_OPTICAL) {
     return Fail("camera stream must use the ROS optical frame convention",
                 error_message);
   }
@@ -215,17 +214,17 @@ bool ValidateCameraSample(
 
 bool DecodeXyzPointCloud(
     const mujoco_sim::adapter_sdk::OwnedStreamSample& sample,
-    const mujoco_sim::v2::StreamDescriptor& descriptor, PointCloud* cloud,
+    const mujoco_sim::v3::StreamDescriptor& descriptor, PointCloud* cloud,
     std::string* error_message) {
   if (cloud == nullptr || error_message == nullptr) {
     return Fail("cloud and error_message must not be null", error_message);
   }
   error_message->clear();
-  if (!ValidateEnvelope(sample, descriptor, mujoco_sim::v2::XYZ32F,
+  if (!ValidateEnvelope(sample, descriptor, mujoco_sim::v3::XYZ32F,
                         error_message)) {
     return false;
   }
-  if (descriptor.frame_convention() != mujoco_sim::v2::ROS_BODY) {
+  if (descriptor.frame_convention() != mujoco_sim::v3::ROS_BODY) {
     return Fail("LiDAR point cloud must use the ROS body frame convention",
                 error_message);
   }
@@ -265,7 +264,7 @@ bool SaveRgbScreenshot(
   if (output_path.empty() || output_path.filename().empty()) {
     return Fail("RGB screenshot path must name a file", error_message);
   }
-  if (sample.header.format() != mujoco_sim::v2::RGB8 ||
+  if (sample.header.format() != mujoco_sim::v3::RGB8 ||
       sample.header.width() == 0 || sample.header.height() == 0) {
     return Fail("RGB screenshot sample has an invalid shape", error_message);
   }

@@ -11,6 +11,8 @@ std::uint64_t AdapterRegistry::AllocateSession() noexcept {
 void AdapterRegistry::Clear() {
   controllers_.clear();
   observers_.clear();
+  controller_sessions_.clear();
+  observer_sessions_.clear();
   actuator_owners_.clear();
 }
 
@@ -25,6 +27,14 @@ const ControllerRecord* AdapterRegistry::FindController(
   return found == controllers_.end() ? nullptr : &found->second;
 }
 
+ControllerRecord* AdapterRegistry::FindControllerBySession(
+    std::uint64_t session_id) {
+  const auto session = controller_sessions_.find(session_id);
+  return session == controller_sessions_.end()
+             ? nullptr
+             : FindController(session->second);
+}
+
 ObserverRecord* AdapterRegistry::FindObserver(const std::string& id) {
   const auto found = observers_.find(id);
   return found == observers_.end() ? nullptr : &found->second;
@@ -36,6 +46,13 @@ const ObserverRecord* AdapterRegistry::FindObserver(
   return found == observers_.end() ? nullptr : &found->second;
 }
 
+ObserverRecord* AdapterRegistry::FindObserverBySession(
+    std::uint64_t session_id) {
+  const auto session = observer_sessions_.find(session_id);
+  return session == observer_sessions_.end() ? nullptr
+                                              : FindObserver(session->second);
+}
+
 bool AdapterRegistry::HasController(const std::string& id) const {
   return controllers_.contains(id);
 }
@@ -45,18 +62,34 @@ bool AdapterRegistry::HasObserver(const std::string& id) const {
 }
 
 void AdapterRegistry::InsertController(ControllerRecord controller) {
+  if (const auto existing = controllers_.find(controller.id);
+      existing != controllers_.end()) {
+    controller_sessions_.erase(existing->second.session_id);
+  }
+  controller_sessions_.insert_or_assign(controller.session_id, controller.id);
   controllers_.insert_or_assign(controller.id, std::move(controller));
 }
 
 void AdapterRegistry::InsertObserver(ObserverRecord observer) {
+  if (const auto existing = observers_.find(observer.id);
+      existing != observers_.end()) {
+    observer_sessions_.erase(existing->second.session_id);
+  }
+  observer_sessions_.insert_or_assign(observer.session_id, observer.id);
   observers_.insert_or_assign(observer.id, std::move(observer));
 }
 
 bool AdapterRegistry::EraseController(const std::string& id) {
+  const auto found = controllers_.find(id);
+  if (found == controllers_.end()) return false;
+  controller_sessions_.erase(found->second.session_id);
   return controllers_.erase(id) != 0;
 }
 
 bool AdapterRegistry::EraseObserver(const std::string& id) {
+  const auto found = observers_.find(id);
+  if (found == observers_.end()) return false;
+  observer_sessions_.erase(found->second.session_id);
   return observers_.erase(id) != 0;
 }
 

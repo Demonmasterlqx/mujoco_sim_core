@@ -1,7 +1,9 @@
 adapter:
   server_name: wbr
   adapter_id: wbr_lqr_controller
-  timeout_ms: 5000
+  commit_timeout_ms: 5000
+  session_timeout_ms: 5000
+  heartbeat_period_ms: 250
   service_timeout_ms: 10000
   max_ticks: 0
 

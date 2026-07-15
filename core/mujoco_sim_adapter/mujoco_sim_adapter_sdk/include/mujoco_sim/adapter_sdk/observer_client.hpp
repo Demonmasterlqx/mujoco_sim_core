@@ -4,10 +4,11 @@
 #include <cstdint>
 #include <memory>
 #include <optional>
+#include <span>
 #include <string>
 #include <vector>
 
-#include <mujoco_sim/v2/sync.pb.h>
+#include <mujoco_sim/adapter_sdk/adapter_domain.hpp>
 
 namespace mujoco_sim::adapter_sdk {
 
@@ -20,15 +21,15 @@ struct ObserverOptions {
   /// Observation resources requested in registration order.
   std::vector<std::string> observation_names;
   /// Server-side Observer timeout in milliseconds; must be positive.
-  std::uint32_t timeout_ms = 1000;
+  std::uint32_t session_timeout_ms = 1000;
   /// Discovery and RPC timeout in milliseconds; must be positive.
   std::uint32_t service_timeout_ms = 5000;
   /// Heartbeat period in milliseconds; must be positive and below timeout_ms.
-  std::uint32_t keepalive_period_ms = 250;
-  /// Optional step-based delivery cadence; when set, must be positive.
-  std::optional<std::uint32_t> every_n_steps = 1;
-  /// Optional simulation-time delivery cadence in seconds; must be positive.
-  std::optional<double> period_s;
+  std::uint32_t heartbeat_period_ms = 250;
+  /// Optional step-based cadence. Exactly one cadence must be selected.
+  std::optional<std::uint32_t> every_n_steps;
+  /// Default convenience cadence is an explicit 10 ms simulation period.
+  std::optional<double> period_s = 0.01;
   /// Bounded frame queue capacity; must be positive.
   std::size_t queue_capacity = 1;
 };
@@ -43,6 +44,27 @@ enum class ObservationWaitResult {
   kStopped,
   /// A terminal lifecycle or protocol error ended the wait.
   kError,
+};
+
+class ObservationLease {
+ public:
+  struct Data;
+  ObservationLease();
+  ~ObservationLease();
+  ObservationLease(const ObservationLease&) = delete;
+  ObservationLease& operator=(const ObservationLease&) = delete;
+  ObservationLease(ObservationLease&&) noexcept;
+  ObservationLease& operator=(ObservationLease&&) noexcept;
+
+  std::uint64_t sequence() const noexcept;
+  std::uint64_t tick_id() const noexcept;
+  double simulation_time_s() const noexcept;
+  std::span<const double> observations() const noexcept;
+  explicit operator bool() const noexcept;
+
+ private:
+  std::shared_ptr<const Data> data_;
+  friend class ObserverClient;
 };
 
 /// Single-session read-only Observer client.
@@ -69,7 +91,7 @@ class ObserverClient {
   /// Output is changed only when kReceived is returned.
   ObservationWaitResult WaitForObservation(
       std::chrono::milliseconds timeout,
-      mujoco_sim::v2::ObservationFrame* frame,
+      ObservationLease* frame,
       std::string* error_message);
   /// Cancels local waits and heartbeat without contacting the Server.
   void Stop();
@@ -83,7 +105,8 @@ class ObserverClient {
 
   /// Returns the last successful registration response.
   /// Call only after Start() has completed and do not race this access with it.
-  const mujoco_sim::v2::RegisterAdapterResponse& registration() const;
+  const AdapterRegistration& registration() const;
+  const ControllerLayout& layout() const;
 
  private:
   friend class ObserverClientTestPeer;

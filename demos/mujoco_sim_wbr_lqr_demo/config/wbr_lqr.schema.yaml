@@ -17,10 +17,21 @@ fields:
         default: wbr_lqr_controller
         non_empty: true
         cli: [--adapter-id]
-      timeout_ms:
+      commit_timeout_ms:
         type: uint32
         default: 5000
-        cli: [--timeout-ms]
+        min: 1
+        cli: [--commit-timeout-ms]
+      session_timeout_ms:
+        type: uint32
+        default: 5000
+        min: 300
+        cli: [--session-timeout-ms]
+      heartbeat_period_ms:
+        type: uint32
+        default: 250
+        min: 1
+        cli: [--heartbeat-period-ms]
       service_timeout_ms:
         type: uint32
         default: 10000

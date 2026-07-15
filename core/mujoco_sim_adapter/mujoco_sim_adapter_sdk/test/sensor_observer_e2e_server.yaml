@@ -6,6 +6,7 @@ max_ticks: 0
 tick_timeout_ms: 50
 activation_timeout_ms: 1000
 status_period_ms: 25
+allow_every_step_observer: true
 log_level: debug
 sensor_streams:
   - name: rgb

@@ -4,7 +4,7 @@
 #include <string>
 
 #include <mujoco_sim/protocol/topics.hpp>
-#include <mujoco_sim/v2/sync.pb.h>
+#include <mujoco_sim/v3/sync.pb.h>
 
 namespace mujoco_sim::adapter_sdk::internal {
 
@@ -16,20 +16,17 @@ struct StatusDecision {
 };
 
 inline bool HasExpectedStatusIdentity(
-    const mujoco_sim::v2::ServerStatus& status,
-    const std::string& server_name, std::uint64_t epoch) {
-  const auto& header = status.header();
-  return header.server_name() == server_name && header.epoch() == epoch &&
-         header.protocol_major() == mujoco_sim::protocol::kProtocolMajor &&
-         header.protocol_minor() == mujoco_sim::protocol::kProtocolMinor;
+    const mujoco_sim::v3::ServerStatus& status,
+    const std::string&, std::uint64_t epoch) {
+  return status.epoch() == epoch;
 }
 
 inline StatusDecision EvaluateServerState(
-    const mujoco_sim::v2::ServerStatus& status) {
-  if (status.state() == mujoco_sim::v2::STOPPED) {
+    const mujoco_sim::v3::ServerStatus& status) {
+  if (status.state() == mujoco_sim::v3::STOPPED) {
     return {StatusAction::kStopped, {}};
   }
-  if (status.state() == mujoco_sim::v2::ERROR_PAUSED) {
+  if (status.state() == mujoco_sim::v3::ERROR_PAUSED) {
     return {StatusAction::kError,
             status.message().empty() ? "server entered ERROR_PAUSED"
                                      : status.message()};
@@ -38,28 +35,28 @@ inline StatusDecision EvaluateServerState(
 }
 
 inline StatusDecision EvaluateAdapterEntry(
-    const mujoco_sim::v2::AdapterStatus& adapter,
+    const mujoco_sim::v3::AdapterStatus& adapter,
     std::uint64_t session_id, bool timed_out_is_terminal) {
   if (adapter.session_id() != session_id) {
     return {StatusAction::kError, "server replaced adapter session"};
   }
-  const bool terminal = adapter.state() == mujoco_sim::v2::ERROR ||
+  const bool terminal = adapter.state() == mujoco_sim::v3::ERROR ||
                         (timed_out_is_terminal &&
-                         adapter.state() == mujoco_sim::v2::TIMED_OUT);
+                         adapter.state() == mujoco_sim::v3::TIMED_OUT);
   if (!terminal) return {StatusAction::kContinue, {}};
 
   return {StatusAction::kError,
           adapter.message().empty()
               ? "server marked adapter as " +
-                    mujoco_sim::v2::ControllerState_Name(adapter.state())
+                    mujoco_sim::v3::ControllerState_Name(adapter.state())
               : adapter.message()};
 }
 
 inline StatusDecision EvaluateAdapterStatus(
-    const mujoco_sim::v2::ServerStatus& status,
+    const mujoco_sim::v3::ServerStatus& status,
     const std::string& server_name, std::uint64_t epoch,
     const std::string& adapter_id, std::uint64_t session_id,
-    mujoco_sim::v2::AdapterRole role, bool timed_out_is_terminal) {
+    mujoco_sim::v3::AdapterRole role, bool timed_out_is_terminal) {
   if (!HasExpectedStatusIdentity(status, server_name, epoch)) return {};
   const auto server_decision = EvaluateServerState(status);
   if (server_decision.action != StatusAction::kContinue) return server_decision;

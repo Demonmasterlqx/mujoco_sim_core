@@ -30,7 +30,7 @@ class SensorStreamClient::Impl : public std::enable_shared_from_this<Impl> {
                                  OwnedStreamSample* sample,
                                  std::string* error_message);
   void Stop();
-  std::optional<mujoco_sim::v2::StreamDescriptor> descriptor(
+  std::optional<mujoco_sim::v3::StreamDescriptor> descriptor(
       const std::string& stream_name) const;
   std::uint64_t dropped_samples(const std::string& stream_name) const;
   std::string stream_diagnostic(const std::string& stream_name) const;
@@ -42,7 +42,7 @@ class SensorStreamClient::Impl : public std::enable_shared_from_this<Impl> {
   enum class DeliveryMode { kUnset, kCallback, kWait };
   struct StreamState {
     std::mutex delivery_mutex;
-    mujoco_sim::v2::StreamDescriptor descriptor;
+    mujoco_sim::v3::StreamDescriptor descriptor;
     DeliveryMode mode = DeliveryMode::kUnset;
     StreamCallback callback;
     internal::BlockingMailbox<OwnedStreamSample> samples;
@@ -56,15 +56,15 @@ class SensorStreamClient::Impl : public std::enable_shared_from_this<Impl> {
   bool FinishStart(std::string* error_message);
   bool DiscoverStreams(std::string* error_message);
   bool ConfigureDiscoveredStreams(std::string* error_message);
-  bool ValidateDescriptor(const mujoco_sim::v2::StreamDescriptor& descriptor,
+  bool ValidateDescriptor(const mujoco_sim::v3::StreamDescriptor& descriptor,
                           std::string* error_message) const;
   bool IsExpectedFrame(
       const std::string& stream_name,
       const mujoco_sim::protocol::ParsedStreamFrame& frame,
       std::string* error_message) const;
-  bool CanAcceptStatusLocked(const mujoco_sim::v2::ServerStatus& status) const;
-  bool ApplyGlobalStatusLocked(const mujoco_sim::v2::ServerStatus& status);
-  bool ApplyStreamErrorsLocked(const mujoco_sim::v2::ServerStatus& status);
+  bool CanAcceptStatusLocked(const mujoco_sim::v3::ServerStatus& status) const;
+  bool ApplyGlobalStatusLocked(const mujoco_sim::v3::ServerStatus& status);
+  bool ApplyStreamErrorsLocked(const mujoco_sim::v3::ServerStatus& status);
   void HandleStreamBytes(const std::string& stream_name, const void* data,
                          std::size_t size);
   void HandleStatusBytes(const void* data, std::size_t size);
@@ -79,7 +79,7 @@ class SensorStreamClient::Impl : public std::enable_shared_from_this<Impl> {
   using CallbackLease = CallbackGate::Lease;
 
   SensorStreamOptions options_;
-  mujoco_sim::v2::GetSensorStreamsResponse discovery_;
+  mujoco_sim::v3::GetSensorStreamsResponse discovery_;
   std::shared_ptr<internal::SensorStreamTransport> transport_;
   std::unordered_map<std::string, std::unique_ptr<eCAL::CSubscriber>>
       subscribers_;

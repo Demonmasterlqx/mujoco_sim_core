@@ -9,6 +9,8 @@
 #include <stop_token>
 #include <string>
 #include <thread>
+#include <unordered_map>
+#include <unordered_set>
 #include <vector>
 
 #include <mujoco_sim/core/simulation_core.hpp>
@@ -54,6 +56,7 @@ class SimulationLoop {
   void Handle(GetSensorStreamsEvent event);
   void Handle(CommitEvent event);
   void Handle(HeartbeatEvent event);
+  void Handle(ControllerFaultEvent event);
   void ProcessTimers(std::chrono::steady_clock::time_point now);
   void ApplyEffects(mujoco_sim::core::EngineEffects effects);
   void ApplyCompletedStep(mujoco_sim::core::StepCompletedEvent event);
@@ -61,9 +64,14 @@ class SimulationLoop {
   void PublishTicks(
       const std::vector<mujoco_sim::core::IssuedTickHandle>& ticks,
       bool retransmission);
+  void InitializeTickRetries(
+      const std::vector<mujoco_sim::core::IssuedTickHandle>& ticks,
+      std::chrono::steady_clock::time_point now);
+  void PublishDueTickRetries(std::chrono::steady_clock::time_point now);
   void PublishObservations(
-      const std::vector<mujoco_sim::v2::ObservationFrame>& frames);
-  void PublishStatus();
+      const std::vector<mujoco_sim::core::ObservationFrame>& frames);
+  void PublishStatus(bool lifecycle, bool terminal = false);
+  bool TickSubscribersReady() const;
   void MaybeLogSummary(std::chrono::steady_clock::time_point now, bool final);
   void RecordMalformed(std::string_view operation, std::size_t bytes);
   void RecordQueueRejection(std::string_view operation);
@@ -89,12 +97,27 @@ class SimulationLoop {
 
   std::chrono::steady_clock::duration step_period_{};
   std::chrono::steady_clock::time_point next_tick_{};
-  std::chrono::steady_clock::time_point next_retransmission_{};
   std::chrono::steady_clock::time_point next_status_{};
+  std::chrono::steady_clock::time_point next_status_allowed_{};
   std::chrono::steady_clock::time_point next_viewer_sync_{};
-  mujoco_sim::v2::ServerState last_logged_state_ =
-      mujoco_sim::v2::SERVER_STATE_UNSPECIFIED;
+  std::chrono::steady_clock::time_point next_subscriber_sample_{};
+  mujoco_sim::core::ServerState last_logged_state_ =
+      mujoco_sim::core::SERVER_STATE_UNSPECIFIED;
   bool status_dirty_ = true;
+  struct TickRetryState {
+    TickRetrySchedule schedule;
+    std::uint64_t issue_generation = 0;
+  };
+  std::unordered_map<std::string, TickRetryState> tick_retries_;
+  struct SessionInfo {
+    std::string adapter_id;
+    mujoco_sim::core::AdapterRole role =
+        mujoco_sim::core::ADAPTER_ROLE_UNSPECIFIED;
+    std::uint32_t commit_timeout_ms = 0;
+  };
+  std::unordered_map<std::uint64_t, SessionInfo> sessions_;
+  std::unordered_set<std::string> active_controllers_;
+  std::unordered_map<std::uint64_t, std::string> encoded_ticks_;
 
   std::atomic<bool> stop_requested_{false};
   std::atomic<std::uint64_t> malformed_pending_{0};

@@ -26,7 +26,7 @@ void AppendString(const std::string& value, std::string* output) {
   output->append(value);
 }
 
-void AppendDescriptor(const mujoco_sim::v2::ResourceDescriptor& descriptor,
+void AppendDescriptor(const mujoco_sim::v3::ResourceDescriptor& descriptor,
                       std::string* output) {
   AppendString(descriptor.name(), output);
   AppendU32(static_cast<std::uint32_t>(descriptor.type()), output);
@@ -51,18 +51,18 @@ void AppendDescriptor(const mujoco_sim::v2::ResourceDescriptor& descriptor,
 }
 
 std::string CanonicalLayoutBytes(
-    const mujoco_sim::v2::ResourceLayout& layout) {
+    const mujoco_sim::v3::ResourceLayout& layout) {
   std::string output;
   output.push_back('\x01');
   output.push_back('O');
   AppendU32(static_cast<std::uint32_t>(layout.observations_size()), &output);
-  for (const auto& descriptor : layout.observations()) {
-    AppendDescriptor(descriptor, &output);
+  for (const auto& slot : layout.observations()) {
+    AppendDescriptor(slot.resource(), &output);
   }
   output.push_back('C');
   AppendU32(static_cast<std::uint32_t>(layout.commands_size()), &output);
-  for (const auto& descriptor : layout.commands()) {
-    AppendDescriptor(descriptor, &output);
+  for (const auto& slot : layout.commands()) {
+    AppendDescriptor(slot.resource(), &output);
   }
   return output;
 }
@@ -95,10 +95,10 @@ std::string FNV1a128(std::string_view input) {
   }
   std::string output;
   output.reserve(kLayoutHashSize);
-  for (std::size_t limb = state.size(); limb-- > 0;) {
-    for (int byte = 3; byte >= 0; --byte) {
+  for (std::size_t limb = 0; limb < state.size(); ++limb) {
+    for (unsigned int byte = 0; byte < 4; ++byte) {
       output.push_back(static_cast<char>(
-          (state[limb] >> (static_cast<unsigned int>(byte) * 8U)) & 0xffU));
+          (state[limb] >> (byte * 8U)) & 0xffU));
     }
   }
   return output;
@@ -106,7 +106,7 @@ std::string FNV1a128(std::string_view input) {
 
 }  // namespace
 
-std::string ComputeLayoutHash(const mujoco_sim::v2::ResourceLayout& layout) {
+std::string ComputeLayoutHash(const mujoco_sim::v3::ResourceLayout& layout) {
   return FNV1a128(CanonicalLayoutBytes(layout));
 }
 
@@ -122,10 +122,10 @@ bool ValidateLayoutHash(std::string_view layout_hash,
   return true;
 }
 
-bool ValidateLayoutHash(const mujoco_sim::v2::ResourceLayout& layout,
+bool ValidateLayoutHash(const mujoco_sim::v3::ResourceLayout& layout,
                         std::string* error_message) {
-  if (!ValidateLayoutHash(layout.layout_hash(), error_message)) return false;
-  if (layout.layout_hash() != ComputeLayoutHash(layout)) {
+  if (!ValidateLayoutHash(layout.layout_fingerprint(), error_message)) return false;
+  if (layout.layout_fingerprint() != ComputeLayoutHash(layout)) {
     if (error_message != nullptr) {
       *error_message = "layout_hash does not match the resource descriptors";
     }

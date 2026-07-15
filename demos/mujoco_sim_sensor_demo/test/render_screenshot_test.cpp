@@ -34,7 +34,7 @@ TEST(RenderScreenshotTest, EglHeadlessRenderProducesVerifiablePng) {
   profile.height = 120;
   profile.rate_hz = 10.0;
   profile.frame_id = "front_camera_optical";
-  profile.outputs = {{mujoco_sim::v2::RGB8, "test_rgb"}};
+  profile.outputs = {{mujoco_sim::v3::RGB8, "test_rgb"}};
   sensor::OffscreenRendererOptions options;
   options.backend = sensor::BackendPreference::kEglOnly;
   auto renderer = sensor::OffscreenRenderer::Create(*snapshot, profile,
@@ -42,12 +42,9 @@ TEST(RenderScreenshotTest, EglHeadlessRenderProducesVerifiablePng) {
   ASSERT_NE(renderer, nullptr) << error;
 
   sensor::CaptureMetadata metadata;
-  metadata.header.set_server_name("render_test");
-  metadata.header.set_epoch(1);
-  metadata.header.set_tick_id(1);
-  metadata.header.set_protocol_major(mujoco_sim::protocol::kProtocolMajor);
-  metadata.header.set_protocol_minor(mujoco_sim::protocol::kProtocolMinor);
-  metadata.header.set_simulation_time_s(0.0);
+  metadata.epoch = 1;
+  metadata.tick_id = 1;
+  metadata.simulation_time_s = 0.0;
   metadata.stream_sequence = 1;
   metadata.capture_id = 1;
   std::vector<sensor::RawFrame> frames;

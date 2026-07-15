@@ -191,7 +191,7 @@ TEST(ServerConfigTest, KeepsDefaultsForUnspecifiedCommandLineOptions) {
   EXPECT_TRUE(config.log_file.empty());
   EXPECT_EQ(config.log_file_max_size_mb, 10U);
   EXPECT_EQ(config.log_file_max_files, 5U);
-  EXPECT_EQ(config.log_summary_period_ms, 5000U);
+  EXPECT_EQ(config.log_summary_period_ms, 1000U);
 }
 
 TEST(ServerConfigTest, ReturnsGeneratedHelp) {
@@ -745,6 +745,55 @@ TEST(ServerRuntimeTest, PreservesSubMillisecondWakeDeadlines) {
             now - 1us);
 }
 
+TEST(ServerRuntimeTest, BoundsAndClampsPerControllerTickRetries) {
+  using namespace std::chrono_literals;
+  const auto start = std::chrono::steady_clock::time_point(10s);
+  auto schedule = mujoco_sim::server::MakeTickRetrySchedule(
+      start, start + 31ms, 5ms);
+  ASSERT_TRUE(schedule.has_value());
+  EXPECT_FALSE(mujoco_sim::server::AdvanceTickRetry(
+      &*schedule, start + 4ms, 3, 2.0, 20ms));
+  EXPECT_TRUE(mujoco_sim::server::AdvanceTickRetry(
+      &*schedule, start + 5ms, 3, 2.0, 20ms));
+  EXPECT_EQ(schedule->attempts, 1U);
+  EXPECT_EQ(schedule->next_retry, start + 15ms);
+  EXPECT_TRUE(mujoco_sim::server::AdvanceTickRetry(
+      &*schedule, start + 15ms, 3, 2.0, 20ms));
+  EXPECT_EQ(schedule->next_retry, start + 31ms);
+  EXPECT_FALSE(mujoco_sim::server::AdvanceTickRetry(
+      &*schedule, start + 31ms, 3, 2.0, 20ms));
+
+  schedule->deadline = start + 50ms;
+  EXPECT_TRUE(mujoco_sim::server::AdvanceTickRetry(
+      &*schedule, start + 31ms, 3, 2.0, 20ms));
+  EXPECT_EQ(schedule->attempts, 3U);
+  EXPECT_EQ(schedule->next_retry, start + 50ms);
+  EXPECT_FALSE(mujoco_sim::server::AdvanceTickRetry(
+      &*schedule, start + 40ms, 3, 2.0, 20ms));
+
+  EXPECT_FALSE(mujoco_sim::server::MakeTickRetrySchedule(
+      start, start + 4ms, 5ms));
+}
+
+TEST(ServerRuntimeTest, EnforcesObserverCadencePolicyWithoutClamping) {
+  std::string error;
+  EXPECT_FALSE(mujoco_sim::server::ValidateObserverCadenceRate(
+      std::nullopt, std::nullopt, 0.001, 500.0, false, &error));
+  EXPECT_FALSE(mujoco_sim::server::ValidateObserverCadenceRate(
+      1U, std::nullopt, 0.001, 500.0, false, &error));
+  EXPECT_NE(error.find("disabled"), std::string::npos);
+  EXPECT_TRUE(mujoco_sim::server::ValidateObserverCadenceRate(
+      1U, std::nullopt, 0.001, 1000.0, true, &error));
+  EXPECT_TRUE(mujoco_sim::server::ValidateObserverCadenceRate(
+      2U, std::nullopt, 0.001, 500.0, false, &error));
+  EXPECT_FALSE(mujoco_sim::server::ValidateObserverCadenceRate(
+      2U, std::nullopt, 0.001, 499.0, false, &error));
+  EXPECT_TRUE(mujoco_sim::server::ValidateObserverCadenceRate(
+      std::nullopt, 0.01, 0.001, 500.0, false, &error));
+  EXPECT_FALSE(mujoco_sim::server::ValidateObserverCadenceRate(
+      std::nullopt, 0.001, 0.001, 500.0, false, &error));
+}
+
 TEST(ServerRuntimeTest, CalculatesRatesAndSuccessfulBarrierLatency) {
   const auto rates = mujoco_sim::server::CalculateRuntimeRates(
       2.0, 10, 20, 1.0, 1.5, 4, 12.0, 5.0);
@@ -770,8 +819,15 @@ TEST(ServerRuntimeTest, AggregatesAndResetsDeterministicWindows) {
   EXPECT_TRUE(metrics.SummaryDue(start + 2s, 2s));
 
   metrics.RecordTickOpened(start + 100ms);
-  metrics.RecordTickPublishBatch(10, 2, 4, 1, 3, 8);
-  metrics.RecordTickCache(2, 7, 2, 4096, 1024);
+  metrics.RecordTickPublishBatch(10, 2, 4, 1, 3, 8, 8192);
+  metrics.RecordTickCache(2, 7, 2, 4096, 3, 1024, 17.5);
+  metrics.RecordObservations(5, 2048);
+  metrics.RecordHeartbeat(false);
+  metrics.RecordHeartbeat(true);
+  metrics.RecordStatus(false, false);
+  metrics.RecordStatus(true, false);
+  metrics.RecordStatus(false, true);
+  metrics.RecordSubscriberQueries(6);
   metrics.RecordLayoutHashMismatch();
   metrics.RecordBlockingWait(1.25);
   metrics.RecordBlockingWait(3.5);
@@ -781,7 +837,8 @@ TEST(ServerRuntimeTest, AggregatesAndResetsDeterministicWindows) {
                    0.0);
   EXPECT_DOUBLE_EQ(metrics.RecordCommit(false, true, false, start + 200ms),
                    0.0);
-  EXPECT_DOUBLE_EQ(metrics.RecordCommit(false, false, true, start + 400ms),
+  EXPECT_DOUBLE_EQ(metrics.RecordCommit(false, false, true, start + 400ms,
+                                        9.25),
                    300.0);
   metrics.RecordTimeout();
   metrics.RecordMalformedMessage();
@@ -799,10 +856,14 @@ TEST(ServerRuntimeTest, AggregatesAndResetsDeterministicWindows) {
   EXPECT_EQ(first.tick_send_rejected_with_subscribers, 1U);
   EXPECT_EQ(first.tick_no_subscribers, 3U);
   EXPECT_EQ(first.tick_retransmissions, 8U);
+  EXPECT_EQ(first.tick_bytes, 8192U);
+  EXPECT_DOUBLE_EQ(first.tick_encode_total_us, 17.5);
+  EXPECT_DOUBLE_EQ(first.tick_encode_max_us, 17.5);
   EXPECT_EQ(first.tick_serializations, 2U);
   EXPECT_EQ(first.tick_cache_hits, 7U);
   EXPECT_EQ(first.tick_cache_misses, 2U);
   EXPECT_EQ(first.tick_cached_bytes, 4096U);
+  EXPECT_EQ(first.tick_cache_entries, 3U);
   EXPECT_EQ(first.layout_bytes_avoided, 1024U);
   EXPECT_EQ(first.layout_hash_mismatches, 1U);
   EXPECT_EQ(first.blocking_wait_count, 2U);
@@ -811,10 +872,20 @@ TEST(ServerRuntimeTest, AggregatesAndResetsDeterministicWindows) {
   EXPECT_EQ(first.scheduler_wakeups, 2U);
   EXPECT_EQ(first.scheduler_late_wakeups, 1U);
   EXPECT_EQ(first.commits, 3U);
+  EXPECT_DOUBLE_EQ(first.commit_validate_total_us, 9.25);
+  EXPECT_DOUBLE_EQ(first.commit_validate_max_us, 9.25);
   EXPECT_EQ(first.duplicate_commits, 1U);
   EXPECT_EQ(first.rejected_commits, 1U);
   EXPECT_EQ(first.timeouts, 1U);
   EXPECT_EQ(first.malformed_messages, 2U);
+  EXPECT_EQ(first.observation_frames, 5U);
+  EXPECT_EQ(first.observation_bytes, 2048U);
+  EXPECT_EQ(first.controller_heartbeats, 1U);
+  EXPECT_EQ(first.observer_heartbeats, 1U);
+  EXPECT_EQ(first.status_periodic, 1U);
+  EXPECT_EQ(first.status_lifecycle, 1U);
+  EXPECT_EQ(first.status_terminal, 1U);
+  EXPECT_EQ(first.subscriber_count_queries, 6U);
   EXPECT_EQ(first.suppressed_warnings, 1U);
   EXPECT_EQ(first.completed_barriers, 1U);
   EXPECT_DOUBLE_EQ(first.rates.step_rate_hz, 2.5);
@@ -829,6 +900,10 @@ TEST(ServerRuntimeTest, AggregatesAndResetsDeterministicWindows) {
   EXPECT_EQ(second.completed_barriers, 0U);
   EXPECT_EQ(second.tick_serializations, 0U);
   EXPECT_EQ(second.tick_cache_hits, 0U);
+  EXPECT_EQ(second.tick_bytes, 0U);
+  EXPECT_EQ(second.tick_cache_entries, 0U);
+  EXPECT_EQ(second.observation_frames, 0U);
+  EXPECT_EQ(second.subscriber_count_queries, 0U);
   EXPECT_EQ(second.layout_hash_mismatches, 0U);
   EXPECT_EQ(second.blocking_wait_count, 0U);
   EXPECT_EQ(second.scheduler_wakeups, 0U);
@@ -1018,9 +1093,9 @@ TEST(ServerLoggingTest, RotatesWithinConfiguredTotalFileCount) {
 
 TEST(ServerTopicsTest, UsesDocumentedRegistryName) {
   EXPECT_EQ(mujoco_sim::protocol::RegistryServiceName("sim"),
-            "mujoco_sim.v2.sim.registry");
+            "mujoco_sim.v3.sim.registry");
   EXPECT_EQ(mujoco_sim::protocol::CommitTopicName("sim"),
-            "mujoco_sim/v2/sim/commit");
+            "mujoco_sim/v3/sim/commit");
 }
 
 }  // namespace

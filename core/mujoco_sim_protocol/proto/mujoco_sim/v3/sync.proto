@@ -1,10 +1,10 @@
 syntax = "proto3";
 
-package mujoco_sim.v2;
+package mujoco_sim.v3;
 
-// Protocol V2 compatibility contract:
+// Protocol V3 control-plane contract:
 // - Major versions must match exactly.
-// - Minor versions must match for session-establishing requests in V2.0.
+// - Minor versions must match for session-establishing requests in V3.0.
 // - Existing field numbers and enum values are never reused.
 // - Retransmitted Tick, Commit, and frame messages retain identity fields and
 //   payload bytes; unknown fields must be tolerated by compatible readers.
@@ -77,30 +77,11 @@ enum ServerState {
   STOPPED = 4;
 }
 
-enum CommitStatus {
-  COMMIT_STATUS_UNSPECIFIED = 0;
-  COMMIT_OK = 1;
-  COMMIT_ERROR = 2;
-}
-
-// Identity and timing envelope filled by the message producer.
-message Header {
-  // Target/source server identity; non-empty on addressed session traffic.
-  string server_name = 1;
-  // Nonzero registration session; zero is reserved for server-wide messages.
-  uint64 session_id = 2;
-  // Model generation, incremented after each successful model load.
-  uint64 epoch = 3;
-  // Barrier Tick; monotonic within an epoch and unchanged on retransmission.
-  uint64 tick_id = 4;
-  // Producer wall-clock timestamp in nanoseconds since the Unix epoch.
-  uint64 timestamp_unix_nanos = 5;
-  // Producer protocol major version; V2 peers require value 2.
-  uint32 protocol_major = 6;
-  // Negotiated protocol minor version; unchanged during a session.
-  uint32 protocol_minor = 7;
-  // MuJoCo simulation time in seconds when meaningful for the message stage.
-  optional double simulation_time_s = 8;
+enum FaultCode {
+  FAULT_CODE_UNSPECIFIED = 0;
+  CONTROLLER_ERROR = 1;
+  INVALID_OUTPUT = 2;
+  INTERNAL_CONTROLLER_ERROR = 3;
 }
 
 // Model-derived observation or command metadata filled by the server.
@@ -144,24 +125,21 @@ message ResourceDescriptor {
 }
 
 // Immutable ordered resource contract for one adapter session.
+message ResourceSlot {
+  ResourceDescriptor resource = 1;
+  uint32 scalar_offset = 2;
+}
+
 message ResourceLayout {
-  // Observations in the exact order emitted by the server.
-  repeated ResourceDescriptor observations = 1;
-  // Commands exclusively owned by the Controller session.
-  repeated ResourceDescriptor commands = 2;
-  // Deterministic hash of both ordered descriptor lists.
-  bytes layout_hash = 3;
+  repeated ResourceSlot observations = 1;
+  repeated ResourceSlot commands = 2;
+  bytes layout_fingerprint = 3;
+  uint32 observation_scalar_count = 4;
+  uint32 command_scalar_count = 5;
 }
 
 // Client query for a server's current model resource catalog.
-message GetAvailableResourcesRequest {
-  // Target server; empty permits the endpoint's configured server.
-  string server_name = 1;
-  // Client protocol major version.
-  uint32 protocol_major = 2;
-  // Client protocol minor version.
-  uint32 protocol_minor = 3;
-}
+message GetAvailableResourcesRequest {}
 
 // Server response containing resources for one model epoch.
 message GetAvailableResourcesResponse {
@@ -189,24 +167,16 @@ message ObservationDelivery {
 
 // Client request to create one provisional Controller or Observer session.
 message RegisterAdapterRequest {
-  // Exact target server identity; non-empty.
-  string server_name = 1;
-  // Stable client-chosen ID; non-empty and valid for use in topic names.
-  string adapter_id = 2;
+  string adapter_id = 1;
   // Requested role; CONTROLLER or OBSERVER.
-  AdapterRole role = 3;
-  // Client protocol major version; must match the server.
-  uint32 protocol_major = 4;
-  // Client protocol minor version negotiated for the new session.
-  uint32 protocol_minor = 5;
+  AdapterRole role = 2;
   // Requested sensor names; duplicates are invalid.
-  repeated string observation_names = 6;
+  repeated string observation_names = 3;
   // Requested exclusive actuator names; valid only for Controllers.
-  repeated string command_names = 7;
-  // Liveness deadline in milliseconds; zero selects the server default.
-  uint32 timeout_ms = 8;
-  // Observer-only delivery policy; unset means every completed step.
-  ObservationDelivery delivery = 9;
+  repeated string command_names = 4;
+  uint32 commit_timeout_ms = 5;
+  uint32 session_timeout_ms = 6;
+  ObservationDelivery delivery = 7;
 }
 
 // Server result of provisional registration.
@@ -230,16 +200,7 @@ message RegisterAdapterResponse {
 }
 
 // Client request to activate a matching provisional session.
-message ActivateAdapterRequest {
-  // Registered adapter ID.
-  string adapter_id = 1;
-  // Registered role.
-  AdapterRole role = 2;
-  // Exact nonzero session returned by registration.
-  uint64 session_id = 3;
-  // Exact epoch returned by registration.
-  uint64 epoch = 4;
-}
+message ActivateAdapterRequest { uint64 session_id = 1; uint64 epoch = 2; }
 
 // Server result of activation.
 message ActivateAdapterResponse {
@@ -252,16 +213,7 @@ message ActivateAdapterResponse {
 }
 
 // Client request to remove one exact adapter session.
-message UnregisterAdapterRequest {
-  // Registered adapter ID.
-  string adapter_id = 1;
-  // Registered role.
-  AdapterRole role = 2;
-  // Exact session to remove; identity mismatch causes no mutation.
-  uint64 session_id = 3;
-  // Exact model epoch; identity mismatch causes no mutation.
-  uint64 epoch = 4;
-}
+message UnregisterAdapterRequest { uint64 session_id = 1; uint64 epoch = 2; }
 
 // Server result of unregistering one session.
 message UnregisterAdapterResponse {
@@ -273,72 +225,19 @@ message UnregisterAdapterResponse {
   ControllerState state = 3;
 }
 
-// Named observation vector with layout-defined dimension and unit.
-message ObservationBlock {
-  // Resource name from the session layout.
-  string name = 1;
-  // Values in descriptor order; count equals descriptor dimension.
-  repeated double values = 2;
+message SessionHeartbeat {
+  uint64 session_id = 1;
+  uint64 epoch = 2;
+  uint64 last_seen = 3;
 }
 
-// Named actuator command vector supplied by a Controller.
-message ActuatorCommandBlock {
-  // Exclusively owned command resource name.
-  string name = 1;
-  // Finite command values; actuator commands currently have one scalar.
-  repeated double values = 2;
-}
-
-// Server-issued immutable input for one Controller and frozen Barrier Tick.
-message Tick {
-  // Server-filled identity; unchanged when this Tick is retransmitted.
-  Header header = 1;
-  // Recipient Controller ID.
-  string adapter_id = 2;
-  // Session layout hash used to reject stale layout assumptions.
-  bytes layout_hash = 3;
-  // Pre-step observations in immutable session layout order.
-  repeated ObservationBlock observations = 4;
-  // Recipient lifecycle projection at issue time.
-  ControllerState controller_state = 5;
-}
-
-// Server-issued post-step observation delivery for one Observer.
-message ObservationFrame {
-  // Server-filled identity for the post-step state.
-  Header header = 1;
-  // Recipient Observer ID.
-  string adapter_id = 2;
-  // Per-session delivery sequence, strictly increasing from one.
-  uint64 sequence = 3;
-  // Post-step observations in immutable session layout order.
-  repeated ObservationBlock observations = 4;
-}
-
-// Controller response to one issued Tick, or proof for timeout recovery.
-message AdapterCommit {
-  // Controller-filled identity copied from its Tick; stable on retransmission.
-  Header header = 1;
-  // Sending Controller ID.
-  string adapter_id = 2;
-  // COMMIT_OK applies commands; COMMIT_ERROR reports a local failure.
-  CommitStatus status = 3;
-  // Complete set of exclusively owned commands when status is COMMIT_OK.
-  repeated ActuatorCommandBlock commands = 4;
-  // Controller diagnostic, valid when status is COMMIT_ERROR.
-  string error_message = 5;
-}
-
-// Adapter keepalive accepted only for the exact active session identity.
-message AdapterHeartbeat {
-  // Client-filled session identity and latest acknowledged Tick.
-  Header header = 1;
-  // Sending adapter ID.
-  string adapter_id = 2;
-  // Sending adapter role.
-  AdapterRole role = 3;
-  // Observer's last consumed sequence; nondecreasing within the session.
-  uint64 last_observation_sequence = 4;
+message ControllerFault {
+  uint64 session_id = 1;
+  uint64 epoch = 2;
+  uint64 tick_id = 3;
+  bytes layout_fingerprint = 4;
+  FaultCode code = 5;
+  string message = 6;
 }
 
 // Server projection of one adapter session at status publication time.
@@ -426,14 +325,7 @@ message StreamDescriptor {
 }
 
 // Client query for configured sensor streams.
-message GetSensorStreamsRequest {
-  // Target server identity.
-  string server_name = 1;
-  // Client protocol major version.
-  uint32 protocol_major = 2;
-  // Client protocol minor version.
-  uint32 protocol_minor = 3;
-}
+message GetSensorStreamsRequest {}
 
 // Server response listing streams for one model epoch.
 message GetSensorStreamsResponse {
@@ -449,8 +341,7 @@ message GetSensorStreamsResponse {
 
 // Metadata preceding one stream payload.
 message StreamFrameHeader {
-  // Server identity and capture Tick; unchanged on retransmission.
-  Header header = 1;
+  uint64 epoch = 1;
   // Stream name matching its descriptor.
   string stream_name = 2;
   // Per-stream sequence, strictly increasing for published frames.
@@ -473,6 +364,8 @@ message StreamFrameHeader {
   uint64 payload_size = 11;
   // Frames dropped since the previous published sequence.
   uint64 dropped_since_previous = 12;
+  uint64 tick_id = 13;
+  double simulation_time_s = 14;
 }
 
 // Server projection of one stream runtime.
@@ -501,8 +394,7 @@ message StreamStatus {
 
 // Periodic server-wide lifecycle and health projection.
 message ServerStatus {
-  // Server-filled envelope; session_id is zero.
-  Header header = 1;
+  uint64 epoch = 1;
   // Current server lifecycle state.
   ServerState state = 2;
   // Server diagnostic; empty while healthy.
@@ -511,4 +403,6 @@ message ServerStatus {
   repeated AdapterStatus adapters = 4;
   // Current sensor stream runtimes.
   repeated StreamStatus streams = 5;
+  uint64 tick_id = 6;
+  double simulation_time_s = 7;
 }

@@ -1,4 +1,5 @@
 #include <algorithm>
+#include <array>
 #include <bit>
 #include <chrono>
 #include <cmath>
@@ -32,39 +33,33 @@ float ReadFloat32LittleEndian(const std::byte* source) {
   return std::bit_cast<float>(bits);
 }
 
-bool ValidateObservation(const mujoco_sim::v2::ObservationFrame& frame,
+bool ValidateObservation(
+    const mujoco_sim::adapter_sdk::ObservationLease& frame,
+    const mujoco_sim::adapter_sdk::ControllerLayout& layout,
                          std::uint64_t previous_sequence,
                          double previous_time) {
-  if (frame.sequence() <= previous_sequence || !frame.has_header() ||
-      !frame.header().has_simulation_time_s() ||
-      frame.header().simulation_time_s() <= previous_time) {
+  if (frame.sequence() <= previous_sequence ||
+      frame.simulation_time_s() <= previous_time) {
     std::cerr << "observer sequence or simulation time is not monotonic\n";
     return false;
   }
-  bool found_quaternion = false;
-  bool found_gyro = false;
-  for (const auto& observation : frame.observations()) {
-    if (observation.name() == "imu_quat") {
-      found_quaternion = observation.values_size() == 4;
-    } else if (observation.name() == "imu_gyro") {
-      found_gyro = observation.values_size() == 3;
-    }
-    for (double value : observation.values()) {
-      if (!std::isfinite(value)) {
-        std::cerr << "observer delivered a non-finite value\n";
-        return false;
-      }
-    }
-  }
-  if (!found_quaternion || !found_gyro) {
-    std::cerr << "observer frame is missing configured IMU blocks\n";
+  const auto quaternion = layout.Observation("imu_quat");
+  const auto gyro = layout.Observation("imu_gyro");
+  if (!quaternion || quaternion->count != 4 || !gyro || gyro->count != 3) {
+    std::cerr << "observer layout is missing configured IMU spans\n";
     return false;
+  }
+  for (double value : frame.observations()) {
+    if (!std::isfinite(value)) {
+      std::cerr << "observer delivered a non-finite value\n";
+      return false;
+    }
   }
   return true;
 }
 
 bool ValidateRgb(const mujoco_sim::adapter_sdk::OwnedStreamSample& sample) {
-  if (sample.header.format() != mujoco_sim::v2::RGB8 ||
+  if (sample.header.format() != mujoco_sim::v3::RGB8 ||
       sample.header.width() != 64 || sample.header.height() != 48 ||
       sample.payload.size() != 64U * 48U * 3U) {
     std::cerr << "RGB sample shape or format mismatch\n";
@@ -80,7 +75,7 @@ bool ValidateRgb(const mujoco_sim::adapter_sdk::OwnedStreamSample& sample) {
 }
 
 bool ValidateLidar(const mujoco_sim::adapter_sdk::OwnedStreamSample& sample) {
-  if (sample.header.format() != mujoco_sim::v2::XYZ32F ||
+  if (sample.header.format() != mujoco_sim::v3::XYZ32F ||
       sample.header.width() != 72 || sample.header.height() != 4 ||
       sample.payload.size() != 72U * 4U * 3U * sizeof(float)) {
     std::cerr << "LiDAR sample shape or format mismatch\n";
@@ -141,15 +136,13 @@ bool WaitForStreamSamples(mujoco_sim::adapter_sdk::SensorStreamClient* client,
       return false;
     }
     if (sample.header.stream_sequence() <= previous_sequence ||
-        !sample.header.has_header() ||
-        !sample.header.header().has_simulation_time_s() ||
-        sample.header.header().simulation_time_s() <= previous_time) {
+        sample.header.simulation_time_s() <= previous_time) {
       std::cerr << name << " sequence or simulation time is not monotonic\n";
       return false;
     }
     if (!(rgb ? ValidateRgb(sample) : ValidateLidar(sample))) return false;
     previous_sequence = sample.header.stream_sequence();
-    previous_time = sample.header.header().simulation_time_s();
+    previous_time = sample.header.simulation_time_s();
   }
   return true;
 }
@@ -170,7 +163,7 @@ bool WaitForPipelineTick(
   std::string error;
   bool observed = false;
   while (!observed && std::chrono::steady_clock::now() < deadline) {
-    mujoco_sim::v2::ObservationFrame frame;
+    mujoco_sim::adapter_sdk::ObservationLease frame;
     const auto remaining = std::chrono::duration_cast<std::chrono::milliseconds>(
         deadline - std::chrono::steady_clock::now());
     const auto result = observer->WaitForObservation(
@@ -180,20 +173,21 @@ bool WaitForPipelineTick(
       std::cerr << stage << " observation wait failed: " << error << '\n';
       return false;
     }
-    if (!ValidateObservation(frame, cursor->observation_sequence,
+    if (!ValidateObservation(frame, observer->layout(),
+                             cursor->observation_sequence,
                              cursor->observation_time)) {
       return false;
     }
     cursor->observation_sequence = frame.sequence();
-    cursor->observation_time = frame.header().simulation_time_s();
-    if (exact_tick && frame.header().tick_id() > expected_tick_id) {
+    cursor->observation_time = frame.simulation_time_s();
+    if (exact_tick && frame.tick_id() > expected_tick_id) {
       std::cerr << stage << " skipped expected observation tick "
                 << expected_tick_id << " and reached "
-                << frame.header().tick_id() << '\n';
+                << frame.tick_id() << '\n';
       return false;
     }
-    observed = exact_tick ? frame.header().tick_id() == expected_tick_id
-                          : frame.header().tick_id() >= expected_tick_id;
+    observed = exact_tick ? frame.tick_id() == expected_tick_id
+                          : frame.tick_id() >= expected_tick_id;
   }
   if (!observed) {
     std::cerr << stage << " did not produce a new observation frame\n";
@@ -211,16 +205,14 @@ bool WaitForPipelineTick(
       return false;
     }
     if (sample.header.stream_sequence() <= cursor->lidar_sequence ||
-        !sample.header.has_header() ||
-        !sample.header.header().has_simulation_time_s() ||
-        sample.header.header().simulation_time_s() <= cursor->lidar_time ||
+        sample.header.simulation_time_s() <= cursor->lidar_time ||
         !ValidateLidar(sample)) {
       std::cerr << stage << " LiDAR sequence or time is not monotonic\n";
       return false;
     }
     cursor->lidar_sequence = sample.header.stream_sequence();
-    cursor->lidar_time = sample.header.header().simulation_time_s();
-    const auto tick_id = sample.header.header().tick_id();
+    cursor->lidar_time = sample.header.simulation_time_s();
+    const auto tick_id = sample.header.tick_id();
     if (exact_tick && tick_id > expected_tick_id) {
       std::cerr << stage << " skipped expected LiDAR tick "
                 << expected_tick_id << " and reached " << tick_id << '\n';
@@ -261,7 +253,8 @@ mujoco_sim::adapter_sdk::AdapterOptions ControllerOptions(
   options.adapter_id = std::move(adapter_id);
   options.observation_names = {std::move(observation_name)};
   options.command_names = {std::move(command_name)};
-  options.timeout_ms = timeout_ms;
+  options.commit_timeout_ms = timeout_ms;
+  options.session_timeout_ms = std::max<std::uint32_t>(5000, timeout_ms * 2);
   options.service_timeout_ms = 5000;
   return options;
 }
@@ -273,28 +266,23 @@ bool StartController(mujoco_sim::adapter_sdk::SyncAdapterClient* controller,
 
 bool WaitForControllerTick(
     mujoco_sim::adapter_sdk::SyncAdapterClient* controller,
-    mujoco_sim::v2::ControllerState expected, mujoco_sim::v2::Tick* tick,
+    mujoco_sim::adapter_sdk::TickLease* tick,
     std::string* error) {
   const auto result = controller->WaitForTick(5s, tick, error);
-  if (result == mujoco_sim::adapter_sdk::TickWaitResult::kReceived &&
-      tick->controller_state() == expected) {
+  if (result == mujoco_sim::adapter_sdk::TickWaitResult::kReceived) {
     return true;
   }
   *error = "unexpected controller Tick result=" +
-           std::to_string(static_cast<int>(result)) + " state=" +
-           std::to_string(static_cast<int>(tick->controller_state())) +
-           " error=" + *error;
+           std::to_string(static_cast<int>(result)) + " error=" + *error;
   return false;
 }
 
 bool CommitCommand(mujoco_sim::adapter_sdk::SyncAdapterClient* controller,
-                   const mujoco_sim::v2::Tick& tick,
-                   const std::string& command_name, double value,
+                   const mujoco_sim::adapter_sdk::TickLease& tick,
+                   const std::string&, double value,
                    std::string* error) {
-  return controller->Commit(
-      tick, std::vector<mujoco_sim::adapter_sdk::CommandValue>{
-                {command_name, value}},
-      error);
+  const std::array commands{value};
+  return controller->Commit(tick, commands, error);
 }
 
 bool JoinTargetOnNextTick(
@@ -302,22 +290,19 @@ bool JoinTargetOnNextTick(
     mujoco_sim::adapter_sdk::SyncAdapterClient* target,
     mujoco_sim::adapter_sdk::ObserverClient* observer,
     mujoco_sim::adapter_sdk::SensorStreamClient* streams,
-    mujoco_sim::v2::Tick* pending_gate_tick,
-    mujoco_sim::v2::Tick* target_tick, PipelineCursor* cursor,
+    mujoco_sim::adapter_sdk::TickLease* pending_gate_tick,
+    mujoco_sim::adapter_sdk::TickLease* target_tick, PipelineCursor* cursor,
     const std::string& stage, std::string* error) {
   const std::uint64_t transition_tick =
-      pending_gate_tick->header().tick_id() + 1;
+      pending_gate_tick->tick_id() + 1;
   if (!CommitCommand(gate, *pending_gate_tick, "gate_motor", 0.0, error) ||
       !WaitForPipelineAtTick(observer, streams, transition_tick,
                              stage + " join transition", cursor) ||
-      !WaitForControllerTick(gate, mujoco_sim::v2::ACTIVE,
-                             pending_gate_tick, error) ||
-      !WaitForControllerTick(target, mujoco_sim::v2::ACTIVE, target_tick,
-                             error)) {
+      !WaitForControllerTick(gate, pending_gate_tick, error) ||
+      !WaitForControllerTick(target, target_tick, error)) {
     return false;
   }
-  if (pending_gate_tick->header().tick_id() !=
-      target_tick->header().tick_id()) {
+  if (pending_gate_tick->tick_id() != target_tick->tick_id()) {
     *error = stage + " controllers received different Tick IDs";
     return false;
   }
@@ -361,10 +346,11 @@ int main(int argc, char** argv) {
   observer_options.server_name = server_name;
   observer_options.observer_id = "sdk_sensor_observer";
   observer_options.observation_names = {"imu_quat", "imu_gyro"};
-  observer_options.timeout_ms = 2000;
+  observer_options.session_timeout_ms = 2000;
   observer_options.service_timeout_ms = 5000;
-  observer_options.keepalive_period_ms = 100;
+  observer_options.heartbeat_period_ms = 100;
   observer_options.every_n_steps = 1;
+  observer_options.period_s.reset();
   observer_options.queue_capacity = 16;
   mujoco_sim::adapter_sdk::ObserverClient observer(
       std::move(observer_options));
@@ -397,18 +383,17 @@ int main(int argc, char** argv) {
   mujoco_sim::adapter_sdk::SyncAdapterClient gate_controller(
       ControllerOptions(server_name, "sensor_gate_controller", 10000,
                         "gate_pos", "gate_motor"));
-  mujoco_sim::v2::Tick gate_tick;
+  mujoco_sim::adapter_sdk::TickLease gate_tick;
   if (valid &&
       (!StartController(&gate_controller, &error) ||
-       !WaitForControllerTick(&gate_controller, mujoco_sim::v2::ACTIVE,
-                              &gate_tick, &error))) {
+       !WaitForControllerTick(&gate_controller, &gate_tick, &error))) {
     std::cerr << "gate controller startup failed: " << error << '\n';
     valid = false;
   }
 
   mujoco_sim::adapter_sdk::SyncAdapterClient commit_controller(
       ControllerOptions(server_name, "sensor_commit_controller", 10000));
-  mujoco_sim::v2::Tick commit_tick;
+  mujoco_sim::adapter_sdk::TickLease commit_tick;
   if (valid &&
       (!StartController(&commit_controller, &error) ||
        !JoinTargetOnNextTick(&gate_controller, &commit_controller, &observer,
@@ -423,7 +408,7 @@ int main(int argc, char** argv) {
        !CommitCommand(&commit_controller, commit_tick, "hinge_motor", 0.1,
                       &error) ||
        !WaitForPipelineAtTick(&observer, &streams,
-                              commit_tick.header().tick_id() + 1,
+                              commit_tick.tick_id() + 1,
                               "commit completion", &cursor))) {
     std::cerr << "commit completion failed: " << error << '\n';
     valid = false;
@@ -432,16 +417,14 @@ int main(int argc, char** argv) {
                                      "commit controller")) {
     valid = false;
   }
-  if (valid && !WaitForControllerTick(&gate_controller,
-                                      mujoco_sim::v2::ACTIVE, &gate_tick,
-                                      &error)) {
+  if (valid && !WaitForControllerTick(&gate_controller, &gate_tick, &error)) {
     std::cerr << "gate Tick after commit failed: " << error << '\n';
     valid = false;
   }
 
   mujoco_sim::adapter_sdk::SyncAdapterClient unregister_controller(
       ControllerOptions(server_name, "sensor_unregister_controller", 10000));
-  mujoco_sim::v2::Tick unregister_tick;
+  mujoco_sim::adapter_sdk::TickLease unregister_tick;
   if (valid &&
       (!StartController(&unregister_controller, &error) ||
        !JoinTargetOnNextTick(
@@ -456,21 +439,19 @@ int main(int argc, char** argv) {
                       &error) ||
        !UnregisterAdapter(&unregister_controller, "active controller") ||
        !WaitForPipelineAtTick(&observer, &streams,
-                              unregister_tick.header().tick_id() + 1,
+                              unregister_tick.tick_id() + 1,
                               "unregister completion", &cursor))) {
     std::cerr << "unregister completion failed: " << error << '\n';
     valid = false;
   }
-  if (valid && !WaitForControllerTick(&gate_controller,
-                                      mujoco_sim::v2::ACTIVE, &gate_tick,
-                                      &error)) {
+  if (valid && !WaitForControllerTick(&gate_controller, &gate_tick, &error)) {
     std::cerr << "gate Tick after unregister failed: " << error << '\n';
     valid = false;
   }
 
   mujoco_sim::adapter_sdk::SyncAdapterClient timeout_controller(
       ControllerOptions(server_name, "sensor_timeout_controller", 250));
-  mujoco_sim::v2::Tick timeout_tick;
+  mujoco_sim::adapter_sdk::TickLease timeout_tick;
   if (valid &&
       (!StartController(&timeout_controller, &error) ||
        !JoinTargetOnNextTick(&gate_controller, &timeout_controller, &observer,
@@ -483,22 +464,21 @@ int main(int argc, char** argv) {
       (!CommitCommand(&gate_controller, gate_tick, "gate_motor", 0.0,
                       &error) ||
        !WaitForPipelineAtTick(&observer, &streams,
-                              timeout_tick.header().tick_id() + 1,
+                              timeout_tick.tick_id() + 1,
                               "timeout completion", &cursor))) {
     std::cerr << "timeout completion failed: " << error << '\n';
     valid = false;
   }
   if (valid &&
       (!UnregisterAdapter(&timeout_controller, "timeout controller") ||
-       !WaitForControllerTick(&gate_controller, mujoco_sim::v2::ACTIVE,
-                              &gate_tick, &error))) {
+       !WaitForControllerTick(&gate_controller, &gate_tick, &error))) {
     std::cerr << "timeout cleanup failed: " << error << '\n';
     valid = false;
   }
 
   mujoco_sim::adapter_sdk::SyncAdapterClient faulty_controller(
       ControllerOptions(server_name, "sensor_faulty_controller", 10000));
-  mujoco_sim::v2::Tick fault_tick;
+  mujoco_sim::adapter_sdk::TickLease fault_tick;
   if (valid &&
       (!StartController(&faulty_controller, &error) ||
        !JoinTargetOnNextTick(&gate_controller, &faulty_controller, &observer,
@@ -513,28 +493,15 @@ int main(int argc, char** argv) {
     valid = false;
   }
   if (valid) {
-    mujoco_sim::v2::AdapterCommit invalid;
-    *invalid.mutable_header() = fault_tick.header();
-    invalid.set_adapter_id(fault_tick.adapter_id());
-    invalid.set_status(mujoco_sim::v2::COMMIT_OK);
-    auto* command = invalid.add_commands();
-    command->set_name("hinge_motor");
-    command->add_values(std::numeric_limits<double>::quiet_NaN());
-    eCAL::CPublisher publisher(
-        mujoco_sim::protocol::CommitTopicName(server_name));
-    const auto discovery_deadline = std::chrono::steady_clock::now() + 2s;
-    while (publisher.GetSubscriberCount() == 0 &&
-           std::chrono::steady_clock::now() < discovery_deadline) {
-      std::this_thread::sleep_for(20ms);
-    }
-    if (publisher.GetSubscriberCount() == 0 ||
-        !publisher.Send(invalid.SerializeAsString())) {
-      std::cerr << "invalid command publish failed\n";
+    if (!faulty_controller.FailTick(
+            fault_tick, mujoco_sim::adapter_sdk::FaultCode::kInvalidOutput,
+            "invalid command output", &error)) {
+      std::cerr << "controller fault publish failed: " << error << '\n';
       valid = false;
     }
   }
   if (valid && !WaitForPipelineAtTick(
-                   &observer, &streams, fault_tick.header().tick_id() + 1,
+                   &observer, &streams, fault_tick.tick_id() + 1,
                    "local error completion", &cursor)) {
     valid = false;
   }

@@ -32,8 +32,8 @@ enum class ControllerEvent {
 };
 
 bool Apply(ControllerEvent event, ControllerRecord* controller) {
-  mujoco_sim::v2::AdapterCommit proof;
-  proof.mutable_header()->set_tick_id(4);
+  mujoco_sim::core::AdapterCommit proof;
+  proof.identity.tick_id = 4;
   switch (event) {
     case ControllerEvent::kActivate:
       return ControllerStateMachine::Activate(controller, 4);
@@ -135,19 +135,19 @@ TEST(ControllerStateMachineTest, AppliesControllerLifecycleTransitions) {
   EXPECT_TRUE(ControllerStateMachine::MarkTimedOut(
       &controller, 7, "barrier timeout"));
   EXPECT_EQ(controller.phase, ControllerPhase::kTimedOutAwaitingProof);
-  EXPECT_EQ(WireState(controller.phase), mujoco_sim::v2::TIMED_OUT);
+  EXPECT_EQ(WireState(controller.phase), mujoco_sim::core::TIMED_OUT);
   EXPECT_EQ(controller.timed_out_since_tick, 7U);
   EXPECT_EQ(controller.timeout_count, 1U);
   EXPECT_EQ(controller.message, "barrier timeout");
 
-  mujoco_sim::v2::AdapterCommit proof;
-  proof.mutable_header()->set_tick_id(7);
+  mujoco_sim::core::AdapterCommit proof;
+  proof.identity.tick_id = 7;
   EXPECT_TRUE(
       ControllerStateMachine::AcceptRecoveryProof(&controller, proof));
   EXPECT_EQ(controller.phase, ControllerPhase::kRecoveryPending);
   ASSERT_TRUE(controller.recovery_proof.has_value());
-  EXPECT_EQ(controller.recovery_proof->header().tick_id(), 7U);
-  EXPECT_EQ(WireState(controller.phase), mujoco_sim::v2::TIMED_OUT);
+  EXPECT_EQ(controller.recovery_proof->identity.tick_id, 7U);
+  EXPECT_EQ(WireState(controller.phase), mujoco_sim::core::TIMED_OUT);
 
   EXPECT_TRUE(ControllerStateMachine::ActivateRecovered(&controller, 8));
   EXPECT_EQ(controller.phase, ControllerPhase::kActive);

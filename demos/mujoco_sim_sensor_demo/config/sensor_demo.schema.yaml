@@ -38,7 +38,9 @@ fields:
         default: perimeter_controller
         non_empty: true
         cli: [--adapter-id]
-      timeout_ms: {type: uint32, default: 5000, min: 1}
+      commit_timeout_ms: {type: uint32, default: 5000, min: 1}
+      session_timeout_ms: {type: uint32, default: 5000, min: 1}
+      heartbeat_period_ms: {type: uint32, default: 500, min: 100}
       log_every_ticks: {type: uint64, default: 250}
       max_simulation_time_s:
         type: double
@@ -102,8 +104,8 @@ fields:
     type: object
     fields:
       adapter_id: {type: string, default: state_monitor, non_empty: true, cli: [--state-observer-id]}
-      timeout_ms: {type: uint32, default: 5000, min: 1}
-      keepalive_period_ms: {type: uint32, default: 500, min: 1}
+      session_timeout_ms: {type: uint32, default: 5000, min: 1}
+      heartbeat_period_ms: {type: uint32, default: 500, min: 100}
       every_n_steps: {type: uint32, default: 5, min: 1}
       queue_capacity: {type: uint32, default: 8, min: 1}
       log_every_frames: {type: uint64, default: 50}
@@ -149,8 +151,8 @@ fields:
     type: object
     fields:
       adapter_id: {type: string, default: mapper_imu, non_empty: true, cli: [--mapper-observer-id]}
-      timeout_ms: {type: uint32, default: 5000, min: 1}
-      keepalive_period_ms: {type: uint32, default: 500, min: 1}
+      session_timeout_ms: {type: uint32, default: 5000, min: 1}
+      heartbeat_period_ms: {type: uint32, default: 500, min: 100}
       every_n_steps: {type: uint32, default: 1, min: 1}
       observer_queue_capacity: {type: uint32, default: 256, min: 1}
       stream_queue_capacity: {type: uint32, default: 4, min: 1}

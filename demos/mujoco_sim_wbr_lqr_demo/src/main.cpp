@@ -64,7 +64,7 @@ int main(int argc, char** argv) {
   }
 
   mujoco_sim::wbr_lqr_demo::TickController controller(
-      client.registration().layout(), config.adapter.interfaces,
+      client.layout(), config.adapter.interfaces,
       config.pipeline, config.input_script);
   std::string handler_error;
   std::uint64_t handled_ticks = 0;
@@ -82,7 +82,7 @@ int main(int argc, char** argv) {
   while (run_result == 0 &&
          (config.adapter.max_ticks == 0 ||
           handled_ticks < config.adapter.max_ticks)) {
-    mujoco_sim::v2::Tick tick;
+    mujoco_sim::adapter_sdk::TickLease tick;
     const auto wait_result = client.WaitForTick(
         std::chrono::milliseconds(100), &tick, &error);
     if (wait_result == mujoco_sim::adapter_sdk::TickWaitResult::kTimeout) {
@@ -103,27 +103,22 @@ int main(int argc, char** argv) {
         run_result = 1;
         break;
       }
-      if (tick.controller_state() == mujoco_sim::v2::ACTIVE) {
-        ++handled_ticks;
-      }
+      ++handled_ticks;
       clamp_count += controller.last_clamp_count();
-      if (tick.controller_state() == mujoco_sim::v2::ACTIVE &&
-          std::any_of(commands.begin(), commands.end(),
-                      [](const auto& command) {
-                        return std::fabs(command.value) > 1e-8;
+      if (std::any_of(commands.begin(), commands.end(),
+                      [](double command) {
+                        return std::fabs(command) > 1e-8;
                       })) {
         ++nonzero_ticks;
       }
-      if (tick.controller_state() == mujoco_sim::v2::ACTIVE &&
-          config.log_every_ticks > 0 &&
+      if (config.log_every_ticks > 0 &&
           handled_ticks % config.log_every_ticks == 0 &&
           controller.last_output().has_value()) {
         std::cout << "wbr-lqr tick=" << handled_ticks
                   << " fsm=" << FsmName(controller.last_output()->fsm_state)
                   << " clamps=" << clamp_count << '\n';
       }
-      if (tick.controller_state() == mujoco_sim::v2::ACTIVE &&
-          controller.last_output().has_value()) {
+      if (controller.last_output().has_value()) {
         const auto& command = controller.last_output()->command;
         if (input.space && command.move) ++space_effects;
         if (input.e &&

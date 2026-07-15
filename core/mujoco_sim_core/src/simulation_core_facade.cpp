@@ -38,27 +38,27 @@ bool SimulationCore::UpdateSnapshot(SimulationSnapshot& snapshot,
 
 CoreResources SimulationCore::resources() const { return impl_->resources(); }
 
-mujoco_sim::v2::GetAvailableResourcesResponse
+mujoco_sim::core::GetAvailableResourcesResponse
 SimulationCore::GetAvailableResources(
-    const mujoco_sim::v2::GetAvailableResourcesRequest& request) const {
+    const mujoco_sim::core::GetAvailableResourcesRequest& request) const {
   return impl_->GetAvailableResources(request);
 }
 
-EngineResult<mujoco_sim::v2::RegisterAdapterResponse>
+EngineResult<mujoco_sim::core::RegisterAdapterResponse>
 SimulationCore::RegisterAdapter(
-    const mujoco_sim::v2::RegisterAdapterRequest& request) {
+    const mujoco_sim::core::RegisterAdapterRequest& request) {
   return impl_->RegisterAdapterWithEffects(request);
 }
 
-EngineResult<mujoco_sim::v2::ActivateAdapterResponse>
+EngineResult<mujoco_sim::core::ActivateAdapterResponse>
 SimulationCore::ActivateAdapter(
-    const mujoco_sim::v2::ActivateAdapterRequest& request) {
+    const mujoco_sim::core::ActivateAdapterRequest& request) {
   return impl_->ActivateAdapterWithEffects(request);
 }
 
-EngineResult<mujoco_sim::v2::UnregisterAdapterResponse>
+EngineResult<mujoco_sim::core::UnregisterAdapterResponse>
 SimulationCore::UnregisterAdapter(
-    const mujoco_sim::v2::UnregisterAdapterRequest& request) {
+    const mujoco_sim::core::UnregisterAdapterRequest& request) {
   return impl_->UnregisterAdapterWithEffects(request);
 }
 
@@ -77,12 +77,17 @@ EngineEffects SimulationCore::CompleteEmptyBarrier() {
 }
 
 EngineResult<CommitReceipt> SimulationCore::SubmitCommit(
-    const mujoco_sim::v2::AdapterCommit& commit) {
+    const mujoco_sim::core::AdapterCommit& commit) {
   return impl_->SubmitCommitWithEffects(commit);
 }
 
+EngineResult<CommitReceipt> SimulationCore::SubmitFault(
+    const ControllerFault& fault) {
+  return impl_->SubmitFaultWithEffects(fault);
+}
+
 EngineEffects SimulationCore::AcceptHeartbeat(
-    const mujoco_sim::v2::AdapterHeartbeat& heartbeat,
+    const mujoco_sim::core::AdapterHeartbeat& heartbeat,
     std::chrono::steady_clock::time_point now) {
   return impl_->AcceptHeartbeatWithEffects(heartbeat, now);
 }
@@ -100,7 +105,7 @@ EngineEffects SimulationCore::MarkStopped(const std::string& message) {
   return impl_->MarkStoppedWithEffects(message);
 }
 
-mujoco_sim::v2::ServerStatus SimulationCore::MakeStatus() const {
+mujoco_sim::core::ServerStatus SimulationCore::MakeStatus() const {
   return impl_->MakeStatus();
 }
 

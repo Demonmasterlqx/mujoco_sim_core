@@ -1,0 +1,1 @@
+{"iterations":10000,"tick_scalars":32,"command_scalars":8,"tick_bytes":336,"commit_bytes":144,"tick_encode_p95_us":1.132,"tick_decode_p95_us":0.852,"commit_encode_p95_us":0.341,"commit_decode_p95_us":0.521,"steady_state_allocations_per_message":0}

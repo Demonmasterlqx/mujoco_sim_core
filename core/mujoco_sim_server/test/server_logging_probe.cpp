@@ -7,7 +7,7 @@
 #include <ecal/pubsub/publisher.h>
 #include <ecal/service/client.h>
 #include <mujoco_sim/protocol/topics.hpp>
-#include <mujoco_sim/v2/sync.pb.h>
+#include <mujoco_sim/v3/sync.pb.h>
 
 namespace {
 
@@ -54,7 +54,7 @@ int main(int argc, char** argv) {
     eCAL::CPublisher commit(
         mujoco_sim::protocol::CommitTopicName(server_name));
     eCAL::CPublisher heartbeat(
-        mujoco_sim::protocol::AdapterHeartbeatTopicName(server_name));
+        mujoco_sim::protocol::SessionHeartbeatTopicName(server_name));
 
     const auto deadline = std::chrono::steady_clock::now() +
                           std::chrono::seconds(5);
@@ -66,12 +66,16 @@ int main(int argc, char** argv) {
       std::cerr << "registry service was not discovered\n";
       result = 1;
     } else {
+      const auto topic_deadline = std::chrono::steady_clock::now() +
+                                  std::chrono::seconds(2);
+      while ((commit.GetSubscriberCount() == 0 ||
+              heartbeat.GetSubscriberCount() == 0) &&
+             std::chrono::steady_clock::now() < topic_deadline) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(20));
+      }
       const std::string malformed(1, static_cast<char>(0xff));
-      mujoco_sim::v2::RegisterAdapterRequest rejected;
-      rejected.set_server_name(server_name);
-      rejected.set_role(mujoco_sim::v2::CONTROLLER);
-      rejected.set_protocol_major(mujoco_sim::protocol::kProtocolMajor);
-      rejected.set_protocol_minor(mujoco_sim::protocol::kProtocolMinor);
+      mujoco_sim::v3::RegisterAdapterRequest rejected;
+      rejected.set_role(mujoco_sim::v3::CONTROLLER);
       rejected.add_command_names("hinge_motor");
       const std::string rejected_bytes = rejected.SerializeAsString();
 

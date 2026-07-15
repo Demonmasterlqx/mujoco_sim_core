@@ -11,7 +11,7 @@
 #include <utility>
 #include <vector>
 
-#include <mujoco_sim/v2/sync.pb.h>
+#include <mujoco_sim/v3/sync.pb.h>
 
 namespace mujoco_sim::adapter_sdk {
 
@@ -30,7 +30,7 @@ struct SensorStreamOptions {
 /// Owning stream header and payload suitable for cross-callback retention.
 struct OwnedStreamSample {
   /// Parsed metadata copied from the wire frame.
-  mujoco_sim::v2::StreamFrameHeader header;
+  mujoco_sim::v3::StreamFrameHeader header;
   /// Owned raw payload bytes described by header.
   std::vector<std::byte> payload;
 };
@@ -47,7 +47,7 @@ class StreamSampleView {
   StreamSampleView& operator=(const StreamSampleView&) = delete;
 
   /// Returns the owned header valid for the lifetime of this view.
-  const mujoco_sim::v2::StreamFrameHeader& header() const { return header_; }
+  const mujoco_sim::v3::StreamFrameHeader& header() const { return header_; }
   /// Returns borrowed payload bytes valid only during the callback.
   std::span<const std::byte> payload() const { return payload_; }
 
@@ -57,11 +57,11 @@ class StreamSampleView {
  private:
   friend class SensorStreamClient;
 
-  StreamSampleView(mujoco_sim::v2::StreamFrameHeader header,
+  StreamSampleView(mujoco_sim::v3::StreamFrameHeader header,
                    std::span<const std::byte> payload)
       : header_(std::move(header)), payload_(payload) {}
 
-  mujoco_sim::v2::StreamFrameHeader header_;
+  mujoco_sim::v3::StreamFrameHeader header_;
   std::span<const std::byte> payload_;
 };
 
@@ -113,7 +113,7 @@ class SensorStreamClient {
   void Stop();
 
   /// Returns the validated descriptor for a requested stream.
-  std::optional<mujoco_sim::v2::StreamDescriptor> descriptor(
+  std::optional<mujoco_sim::v3::StreamDescriptor> descriptor(
       const std::string& stream_name) const;
   /// Returns transport gaps, Server drops, and local queue evictions.
   std::uint64_t dropped_samples(const std::string& stream_name) const;
@@ -122,7 +122,7 @@ class SensorStreamClient {
 
   /// Returns the successful stream discovery response.
   /// Call only after Start() has completed and do not race this access with it.
-  const mujoco_sim::v2::GetSensorStreamsResponse& discovery() const;
+  const mujoco_sim::v3::GetSensorStreamsResponse& discovery() const;
 
  private:
   friend class SensorStreamClientTestPeer;

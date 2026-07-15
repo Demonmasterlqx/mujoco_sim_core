@@ -9,6 +9,8 @@ option(MUJOCO_SIM_BUILD_SENSOR_STREAMS
   "Build asynchronous camera and LiDAR streams" ON)
 option(MUJOCO_SIM_RUN_BUILD_MATRIX_TESTS
   "Run nested optional-feature build matrix verification" OFF)
+option(MUJOCO_SIM_BUILD_PERFORMANCE_BENCHMARK
+  "Build the deterministic Controller/Observer/Sensor benchmark" OFF)
 
 find_package(eCAL REQUIRED)
 find_package(mujoco_sim_config CONFIG REQUIRED)
@@ -40,12 +42,16 @@ add_library(${PROJECT_NAME}_lib
 add_library(mujoco_sim::server ALIAS ${PROJECT_NAME}_lib)
 
 if(MUJOCO_SIM_BUILD_GUI)
-  target_sources(${PROJECT_NAME}_lib PRIVATE
-    src/lodepng_compat.cpp src/sim_viewer.cpp
+  set(MUJOCO_SIMULATE_SOURCES
     "${MUJOCO_SIMULATE_ROOT}/glfw_adapter.cc"
     "${MUJOCO_SIMULATE_ROOT}/glfw_dispatch.cc"
     "${MUJOCO_SIMULATE_ROOT}/platform_ui_adapter.cc"
     "${MUJOCO_SIMULATE_ROOT}/simulate.cc")
+  target_sources(${PROJECT_NAME}_lib PRIVATE
+    src/lodepng_compat.cpp src/sim_viewer.cpp
+    ${MUJOCO_SIMULATE_SOURCES})
+  set_source_files_properties(${MUJOCO_SIMULATE_SOURCES} PROPERTIES
+    COMPILE_OPTIONS "-w")
 else()
   target_sources(${PROJECT_NAME}_lib PRIVATE src/sim_viewer_stub.cpp)
 endif()
@@ -66,7 +72,7 @@ target_include_directories(${PROJECT_NAME}_lib PUBLIC
   "$<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>"
   "$<INSTALL_INTERFACE:${CMAKE_INSTALL_INCLUDEDIR}>"
   PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/src")
-target_include_directories(${PROJECT_NAME}_lib PRIVATE
+target_include_directories(${PROJECT_NAME}_lib SYSTEM PRIVATE
   "${MUJOCO_SIMULATE_ROOT}")
 
 target_link_libraries(${PROJECT_NAME}_lib
@@ -97,6 +103,16 @@ set_target_properties(mujoco-sim-server PROPERTIES
   BUILD_RPATH "$ORIGIN"
   INSTALL_RPATH "$ORIGIN/../lib;$ORIGIN/../../mujoco_sim_core/lib"
 )
+
+if(MUJOCO_SIM_BUILD_PERFORMANCE_BENCHMARK)
+  if(NOT MUJOCO_SIM_BUILD_SENSOR_STREAMS)
+    message(FATAL_ERROR "The Server performance benchmark requires sensors")
+  endif()
+  add_executable(server_performance_benchmark test/performance_benchmark.cpp)
+  target_include_directories(server_performance_benchmark PRIVATE src)
+  target_link_libraries(server_performance_benchmark PRIVATE
+    ${PROJECT_NAME}_lib)
+endif()
 
 install(TARGETS ${PROJECT_NAME}_lib mujoco-sim-server
   EXPORT ${PROJECT_NAME}Targets

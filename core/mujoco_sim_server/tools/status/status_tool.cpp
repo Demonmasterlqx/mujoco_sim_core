@@ -4,12 +4,8 @@
 #include <chrono>
 #include <condition_variable>
 #include <csignal>
-#include <ctime>
-#include <iomanip>
-#include <limits>
 #include <memory>
 #include <mutex>
-#include <sstream>
 #include <string>
 #include <thread>
 #include <utility>
@@ -59,13 +55,13 @@ class SignalHandlerGuard {
   Handler previous_terminate_ = SIG_DFL;
 };
 
-std::string ServerStateName(mujoco_sim::v2::ServerState state) {
-  const std::string name = mujoco_sim::v2::ServerState_Name(state);
+std::string ServerStateName(mujoco_sim::v3::ServerState state) {
+  const std::string name = mujoco_sim::v3::ServerState_Name(state);
   return name.empty() ? "UNKNOWN(" + std::to_string(state) + ")" : name;
 }
 
-std::string ControllerStateName(mujoco_sim::v2::ControllerState state) {
-  const std::string name = mujoco_sim::v2::ControllerState_Name(state);
+std::string ControllerStateName(mujoco_sim::v3::ControllerState state) {
+  const std::string name = mujoco_sim::v3::ControllerState_Name(state);
   return name.empty() ? "UNKNOWN(" + std::to_string(state) + ")" : name;
 }
 
@@ -73,25 +69,8 @@ std::string DisplayMessage(const std::string& message) {
   return message.empty() ? "-" : message;
 }
 
-std::string FormatTimestamp(std::uint64_t unix_nanos) {
-  if (unix_nanos == 0) return "-";
-  const auto seconds = unix_nanos / 1000000000ULL;
-  if (seconds >
-      static_cast<std::uint64_t>(std::numeric_limits<std::time_t>::max())) {
-    return std::to_string(unix_nanos);
-  }
-  const std::time_t time = static_cast<std::time_t>(seconds);
-  std::tm utc{};
-  if (gmtime_r(&time, &utc) == nullptr) return std::to_string(unix_nanos);
-  std::ostringstream output;
-  output << std::put_time(&utc, "%Y-%m-%dT%H:%M:%S") << '.'
-         << std::setw(9) << std::setfill('0')
-         << unix_nanos % 1000000000ULL << 'Z';
-  return output.str();
-}
-
-mujoco_sim::v2::ServerStatus NormalizeStatus(
-    const mujoco_sim::v2::ServerStatus& input) {
+mujoco_sim::v3::ServerStatus NormalizeStatus(
+    const mujoco_sim::v3::ServerStatus& input) {
   auto output = input;
   std::sort(output.mutable_adapters()->begin(),
             output.mutable_adapters()->end(),
@@ -106,8 +85,8 @@ mujoco_sim::v2::ServerStatus NormalizeStatus(
   return output;
 }
 
-mujoco_sim::v2::GetAvailableResourcesResponse NormalizeResources(
-    const mujoco_sim::v2::GetAvailableResourcesResponse& input) {
+mujoco_sim::v3::GetAvailableResourcesResponse NormalizeResources(
+    const mujoco_sim::v3::GetAvailableResourcesResponse& input) {
   auto output = input;
   const auto by_name = [](const auto& lhs, const auto& rhs) {
     return lhs.name() < rhs.name();
@@ -148,21 +127,18 @@ bool SameProcess(const PublisherIdentity& publisher,
 }
 
 struct ResourceQueryResult {
-  std::optional<mujoco_sim::v2::GetAvailableResourcesResponse> response;
+  std::optional<mujoco_sim::v3::GetAvailableResourcesResponse> response;
   std::string error;
 };
 
 ResourceQueryResult QueryResources(eCAL::CServiceClient* client,
-                                   const std::string& server_name,
+                                   const std::string&,
                                    const PublisherIdentity& publisher,
                                    std::uint64_t epoch) {
   if (client == nullptr || !client->IsConnected()) {
     return {std::nullopt, "registry service is unavailable"};
   }
-  mujoco_sim::v2::GetAvailableResourcesRequest request;
-  request.set_server_name(server_name);
-  request.set_protocol_major(mujoco_sim::protocol::kProtocolMajor);
-  request.set_protocol_minor(mujoco_sim::protocol::kProtocolMinor);
+  mujoco_sim::v3::GetAvailableResourcesRequest request;
   std::string bytes;
   if (!request.SerializeToString(&bytes)) {
     return {std::nullopt, "failed to serialize resource request"};
@@ -171,7 +147,7 @@ ResourceQueryResult QueryResources(eCAL::CServiceClient* client,
   eCAL::ServiceResponseVecT responses;
   client->CallWithResponse(mujoco_sim::protocol::kGetAvailableResourcesMethod,
                            bytes, responses, kResourceCallTimeoutMs);
-  std::vector<mujoco_sim::v2::GetAvailableResourcesResponse> valid;
+  std::vector<mujoco_sim::v3::GetAvailableResourcesResponse> valid;
   std::string matching_error;
   for (const auto& response : responses) {
     if (!SameProcess(publisher, response.server_id)) continue;
@@ -186,14 +162,14 @@ ResourceQueryResult QueryResources(eCAL::CServiceClient* client,
                        std::to_string(response.ret_state);
       continue;
     }
-    mujoco_sim::v2::GetAvailableResourcesResponse parsed;
+    mujoco_sim::v3::GetAvailableResourcesResponse parsed;
     if (!parsed.ParseFromString(response.response)) {
       matching_error = "failed to parse resource response";
       continue;
     }
-    if (parsed.code() != mujoco_sim::v2::OK) {
+    if (parsed.code() != mujoco_sim::v3::OK) {
       matching_error = parsed.message().empty()
-                           ? mujoco_sim::v2::ErrorCode_Name(parsed.code())
+                           ? mujoco_sim::v3::ErrorCode_Name(parsed.code())
                            : parsed.message();
       continue;
     }
@@ -238,7 +214,7 @@ class StatusMonitor {
                        const eCAL::SReceiveCallbackData& data) {
             const auto state = weak_state.lock();
             if (!state) return;
-            mujoco_sim::v2::ServerStatus status;
+            mujoco_sim::v3::ServerStatus status;
             if (!ParseStatusPayload(data.buffer, data.buffer_size,
                                     state->options.server_name, &status)) {
               return;
@@ -309,6 +285,7 @@ class StatusMonitor {
     }
 
     StatusReport report;
+    report.server_name = state_->options.server_name;
     std::uint64_t last_sequence;
     {
       std::lock_guard lock(state_->mutex);
@@ -412,7 +389,7 @@ class StatusMonitor {
     StatusTracker tracker;
     std::mutex mutex;
     std::condition_variable condition;
-    std::optional<mujoco_sim::v2::GetAvailableResourcesResponse> resources;
+    std::optional<mujoco_sim::v3::GetAvailableResourcesResponse> resources;
     std::string resource_error = "resource query pending";
     std::uint64_t resource_generation = 0;
     std::uint32_t resource_attempts = 0;
@@ -424,6 +401,7 @@ class StatusMonitor {
 
   StatusReport MakeReportLocked() const {
     StatusReport report;
+    report.server_name = state_->options.server_name;
     report.status = state_->tracker.latest()->status;
     report.resources = state_->resources;
     if (!report.resources) report.resource_error = state_->resource_error;
@@ -452,7 +430,7 @@ class StatusMonitor {
           continue;
         }
         publisher = state_->tracker.latest()->publisher;
-        epoch = state_->tracker.latest()->status.header().epoch();
+        epoch = state_->tracker.latest()->status.epoch();
         generation = state_->resource_generation;
         state_->resource_query_requested = false;
       }
@@ -465,7 +443,7 @@ class StatusMonitor {
             state_->tracker.latest() &&
             state_->resource_generation == generation &&
             state_->tracker.latest()->publisher == publisher &&
-            state_->tracker.latest()->status.header().epoch() == epoch;
+            state_->tracker.latest()->status.epoch() == epoch;
         if (!current) {
           next_attempt = std::chrono::steady_clock::now();
           continue;
@@ -544,16 +522,9 @@ StatusTracker::StatusTracker(std::string server_name,
 
 StatusUpdate StatusTracker::Accept(
     const PublisherIdentity& publisher, std::int64_t send_clock,
-    const mujoco_sim::v2::ServerStatus& status,
+    const mujoco_sim::v3::ServerStatus& status,
     std::chrono::steady_clock::time_point received_at) {
   StatusUpdate update;
-  if (status.header().server_name() != server_name_ ||
-      status.header().protocol_major() !=
-          mujoco_sim::protocol::kProtocolMajor ||
-      status.header().protocol_minor() !=
-          mujoco_sim::protocol::kProtocolMinor) {
-    return update;
-  }
   if (latest_ && latest_->publisher != publisher) {
     if (!stale(received_at)) {
       update.publisher_conflict = true;
@@ -564,7 +535,7 @@ StatusUpdate StatusTracker::Accept(
              send_clock <= latest_->send_clock) {
     return update;
   }
-  if (latest_ && latest_->status.header().epoch() != status.header().epoch()) {
+  if (latest_ && latest_->status.epoch() != status.epoch()) {
     update.epoch_changed = true;
   }
   latest_ = ReceivedStatus{status, publisher, send_clock, received_at,
@@ -578,20 +549,15 @@ bool StatusTracker::stale(std::chrono::steady_clock::time_point now) const {
 }
 
 bool ParseStatusPayload(const void* data, std::size_t size,
-                        const std::string& server_name,
-                        mujoco_sim::v2::ServerStatus* status) {
+                        const std::string&,
+                        mujoco_sim::v3::ServerStatus* status) {
   if (data == nullptr || status == nullptr || size == 0 ||
       size > kMaximumStatusPayloadSize ||
       size > static_cast<std::size_t>(std::numeric_limits<int>::max())) {
     return false;
   }
-  mujoco_sim::v2::ServerStatus parsed;
-  if (!parsed.ParseFromArray(data, static_cast<int>(size)) ||
-      parsed.header().server_name() != server_name ||
-      parsed.header().protocol_major() !=
-          mujoco_sim::protocol::kProtocolMajor ||
-      parsed.header().protocol_minor() !=
-          mujoco_sim::protocol::kProtocolMinor) {
+  mujoco_sim::v3::ServerStatus parsed;
+  if (!parsed.ParseFromArray(data, static_cast<int>(size))) {
     return false;
   }
   *status = std::move(parsed);
@@ -601,14 +567,13 @@ bool ParseStatusPayload(const void* data, std::size_t size,
 std::string FormatHuman(const StatusReport& report) {
   const auto status = NormalizeStatus(report.status);
   std::ostringstream output;
-  output << "Server: " << status.header().server_name() << '\n'
+  output << "Server: " << report.server_name << '\n'
          << "State: " << ServerStateName(status.state()) << '\n'
-         << "Epoch: " << status.header().epoch() << '\n'
-         << "Tick: " << status.header().tick_id() << '\n'
-         << "Protocol: " << status.header().protocol_major() << '.'
-         << status.header().protocol_minor() << '\n'
-         << "Updated: "
-         << FormatTimestamp(status.header().timestamp_unix_nanos()) << '\n'
+         << "Epoch: " << status.epoch() << '\n'
+         << "Tick: " << status.tick_id() << '\n'
+         << "Protocol: " << mujoco_sim::protocol::kProtocolMajor << '.'
+         << mujoco_sim::protocol::kProtocolMinor << '\n'
+         << "Simulation time: " << status.simulation_time_s() << " s\n"
          << "Message: " << DisplayMessage(status.message()) << '\n';
   if (!report.resources) {
     output << "Resources: unavailable ("
@@ -634,7 +599,7 @@ std::string FormatHuman(const StatusReport& report) {
             "\tSequence\tState since\tTimeouts\tBarrier\tMessage\n";
   for (const auto& adapter : status.adapters()) {
     output << adapter.adapter_id() << '\t'
-           << mujoco_sim::v2::AdapterRole_Name(adapter.role()) << '\t'
+           << mujoco_sim::v3::AdapterRole_Name(adapter.role()) << '\t'
            << ControllerStateName(adapter.state()) << '\t'
            << adapter.session_id() << '\t'
            << (adapter.has_last_delivery_tick_id()
@@ -645,12 +610,12 @@ std::string FormatHuman(const StatusReport& report) {
                    ? std::to_string(adapter.last_commit_tick_id())
                    : "-")
            << '\t'
-           << (adapter.role() == mujoco_sim::v2::OBSERVER
+           << (adapter.role() == mujoco_sim::v3::OBSERVER
                    ? std::to_string(adapter.last_observation_sequence())
                    : "-")
            << '\t' << adapter.state_since_tick_id() << '\t'
            << adapter.timeout_count() << '\t'
-           << (adapter.role() == mujoco_sim::v2::CONTROLLER
+           << (adapter.role() == mujoco_sim::v3::CONTROLLER
                    ? (adapter.required_for_barrier() ? "yes" : "no")
                    : "-")
            << '\t' << DisplayMessage(adapter.message()) << '\n';
@@ -660,7 +625,7 @@ std::string FormatHuman(const StatusReport& report) {
             "\tErrors\tBlocked ms\tMessage\n";
   for (const auto& stream : status.streams()) {
     output << stream.name() << '\t'
-           << mujoco_sim::v2::StreamState_Name(stream.state()) << '\t'
+           << mujoco_sim::v3::StreamState_Name(stream.state()) << '\t'
            << stream.subscriber_count() << '\t' << stream.captures() << '\t'
            << stream.published() << '\t' << stream.dropped() << '\t'
            << stream.publish_errors() << '\t' << stream.blocked_time_ms()
@@ -671,6 +636,12 @@ std::string FormatHuman(const StatusReport& report) {
 
 bool FormatJson(const StatusReport& report, std::string* output,
                 std::string* error_message) {
+  google::protobuf::StringValue server_name;
+  server_name.set_value(report.server_name);
+  std::string server_name_json;
+  if (!MessageToJson(server_name, &server_name_json, error_message)) {
+    return false;
+  }
   std::string status_json;
   const auto status = NormalizeStatus(report.status);
   if (!MessageToJson(status, &status_json, error_message)) return false;
@@ -689,7 +660,8 @@ bool FormatJson(const StatusReport& report, std::string* output,
   } else {
     error_json = "null";
   }
-  *output = "{\"status\":" + status_json + ",\"resources\":" +
+  *output = "{\"server_name\":" + server_name_json +
+            ",\"status\":" + status_json + ",\"resources\":" +
             resources_json + ",\"resource_error\":" + error_json + "}";
   return true;
 }

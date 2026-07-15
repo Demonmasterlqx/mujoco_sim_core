@@ -13,6 +13,7 @@ option(MUJOCO_SIM_BUILD_DOCS
   "Build warning-clean Adapter SDK API documentation with Doxygen" OFF)
 
 add_library(${PROJECT_NAME}
+  src/adapter_domain.cpp
   src/ecal_runtime.cpp
   src/internal/adapter_transport.cpp
   src/observer_client.cpp
@@ -176,6 +177,19 @@ if(BUILD_TESTING)
       "${CMAKE_CURRENT_SOURCE_DIR}/test/sensor_observer_e2e_server.yaml"
   )
   set_tests_properties(sensor_observer_e2e PROPERTIES TIMEOUT 50)
+
+  add_executable(message_rate_e2e_probe test/message_rate_e2e_probe.cpp)
+  target_link_libraries(message_rate_e2e_probe PRIVATE ${PROJECT_NAME})
+  add_test(
+    NAME message_rate_e2e
+    COMMAND bash
+      "${CMAKE_CURRENT_SOURCE_DIR}/test/message_rate_e2e.sh"
+      "$<TARGET_FILE:mujoco_sim::mujoco-sim-server>"
+      "$<TARGET_FILE:message_rate_e2e_probe>"
+      "${CMAKE_CURRENT_SOURCE_DIR}/../../mujoco_sim_core/test/testdata/simple_actuator.xml"
+      "${CMAKE_CURRENT_SOURCE_DIR}/test/message_rate_e2e_server.yaml"
+  )
+  set_tests_properties(message_rate_e2e PROPERTIES TIMEOUT 45)
 endif()
 
 if(MUJOCO_SIM_ENABLE_QUALITY_GATES)
@@ -197,7 +211,7 @@ endif()
 
 if(MUJOCO_SIM_BUILD_DOCS)
   find_package(Doxygen REQUIRED)
-  set(DOXYGEN_EXTRACT_ALL NO)
+  set(DOXYGEN_EXTRACT_ALL YES)
   set(DOXYGEN_EXTRACT_PRIVATE NO)
   set(DOXYGEN_WARN_IF_UNDOCUMENTED YES)
   set(DOXYGEN_WARN_AS_ERROR FAIL_ON_WARNINGS)

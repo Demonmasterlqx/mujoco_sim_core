@@ -24,6 +24,9 @@ generated::SampleConfig ToGenerated(const SampleOptions& options) {
   generated::SampleConfig output;
   output.max_ticks = options.max_ticks;
   output.command_value = options.command_value;
+  output.commit_timeout_ms = options.adapter.commit_timeout_ms;
+  output.session_timeout_ms = options.adapter.session_timeout_ms;
+  output.heartbeat_period_ms = options.adapter.heartbeat_period_ms;
   output.service_timeout_ms = options.adapter.service_timeout_ms;
   return output;
 }
@@ -34,7 +37,9 @@ SampleOptions ToPublic(generated::SampleConfig config) {
   output.adapter.adapter_id = std::move(config.adapter_id);
   output.adapter.observation_names = std::move(config.observation_names);
   output.adapter.command_names = std::move(config.command_names);
-  output.adapter.timeout_ms = config.timeout_ms;
+  output.adapter.commit_timeout_ms = config.commit_timeout_ms;
+  output.adapter.session_timeout_ms = config.session_timeout_ms;
+  output.adapter.heartbeat_period_ms = config.heartbeat_period_ms;
   output.adapter.service_timeout_ms = config.service_timeout_ms;
   output.max_ticks = config.max_ticks;
   output.command_value = config.command_value;
@@ -56,14 +61,9 @@ std::vector<std::string> ParseNameList(const std::string& value) {
   return names;
 }
 
-std::vector<mujoco_sim::adapter_sdk::CommandValue> ConstantCommandsForLayout(
-    const mujoco_sim::v2::ResourceLayout& layout, double value) {
-  std::vector<mujoco_sim::adapter_sdk::CommandValue> commands;
-  commands.reserve(static_cast<std::size_t>(layout.commands_size()));
-  for (const auto& command : layout.commands()) {
-    commands.push_back({command.name(), value});
-  }
-  return commands;
+std::vector<double> ConstantCommandsForLayout(
+    const mujoco_sim::adapter_sdk::ControllerLayout& layout, double value) {
+  return std::vector<double>(layout.command_scalar_count(), value);
 }
 
 bool ParseCommandLine(int argc, char** argv, SampleOptions* options,

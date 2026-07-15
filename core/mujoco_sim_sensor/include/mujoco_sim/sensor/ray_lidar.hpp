@@ -22,7 +22,7 @@ class RayLidar {
   RayLidar& operator=(const RayLidar&) = delete;
 
   const RayLidarProfile& profile() const noexcept;
-  const mujoco_sim::v2::StreamDescriptor& descriptor() const noexcept;
+  const mujoco_sim::v3::StreamDescriptor& descriptor() const noexcept;
 
   bool Capture(const mujoco_sim::core::SimulationSnapshot& snapshot,
                const CaptureMetadata& metadata,

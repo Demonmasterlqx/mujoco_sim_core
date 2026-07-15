@@ -4,35 +4,37 @@
 #include <cstdint>
 #include <memory>
 #include <string>
+#include <string_view>
 
-#include <mujoco_sim/v2/sync.pb.h>
+#include <mujoco_sim/v3/sync.pb.h>
 
 namespace mujoco_sim::adapter_sdk::internal {
 
 class AdapterTransport {
  public:
   virtual ~AdapterTransport() = default;
-  virtual bool Register(const mujoco_sim::v2::RegisterAdapterRequest& request,
-                        mujoco_sim::v2::RegisterAdapterResponse* response,
+  virtual bool Register(const mujoco_sim::v3::RegisterAdapterRequest& request,
+                        mujoco_sim::v3::RegisterAdapterResponse* response,
                         std::string* error_message) = 0;
-  virtual bool Activate(const mujoco_sim::v2::ActivateAdapterRequest& request,
-                        mujoco_sim::v2::ActivateAdapterResponse* response,
+  virtual bool Activate(const mujoco_sim::v3::ActivateAdapterRequest& request,
+                        mujoco_sim::v3::ActivateAdapterResponse* response,
                         std::string* error_message) = 0;
   virtual bool Unregister(
-      const mujoco_sim::v2::UnregisterAdapterRequest& request,
-      mujoco_sim::v2::UnregisterAdapterResponse* response,
+      const mujoco_sim::v3::UnregisterAdapterRequest& request,
+      mujoco_sim::v3::UnregisterAdapterResponse* response,
       std::string* error_message) = 0;
-  virtual bool PublishCommit(const mujoco_sim::v2::AdapterCommit& commit) = 0;
+  virtual bool PublishCommit(std::string_view encoded_commit) = 0;
+  virtual bool PublishFault(const mujoco_sim::v3::ControllerFault& fault) = 0;
   virtual void PublishHeartbeat(
-      const mujoco_sim::v2::AdapterHeartbeat& heartbeat) = 0;
+      const mujoco_sim::v3::SessionHeartbeat& heartbeat) = 0;
 };
 
 class SensorStreamTransport {
  public:
   virtual ~SensorStreamTransport() = default;
   virtual bool Discover(
-      const mujoco_sim::v2::GetSensorStreamsRequest& request,
-      mujoco_sim::v2::GetSensorStreamsResponse* response,
+      const mujoco_sim::v3::GetSensorStreamsRequest& request,
+      mujoco_sim::v3::GetSensorStreamsResponse* response,
       std::string* error_message) = 0;
 };
 

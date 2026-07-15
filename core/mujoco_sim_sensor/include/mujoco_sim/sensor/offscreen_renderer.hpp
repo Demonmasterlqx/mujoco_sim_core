@@ -51,7 +51,7 @@ class OffscreenRenderer {
   OffscreenRenderer& operator=(const OffscreenRenderer&) = delete;
 
   const CameraProfile& profile() const noexcept;
-  const std::vector<mujoco_sim::v2::StreamDescriptor>& descriptors()
+  const std::vector<mujoco_sim::v3::StreamDescriptor>& descriptors()
       const noexcept;
   OffscreenBackend backend() const noexcept;
 

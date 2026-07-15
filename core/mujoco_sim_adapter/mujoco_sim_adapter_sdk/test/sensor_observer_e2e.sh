@@ -27,14 +27,16 @@ server_pid="$!"
 
 if ! timeout 40s "${probe_bin}" "${instance_name}"; then
   echo "observer/stream E2E probe failed" >&2
-  sed -n '1,260p' "${work_dir}/server.err" >&2 || true
+  grep -E "event=(adapter_|tick_published|commit_|topic_payload|server_state)" \
+    "${work_dir}/server.err" >&2 || true
+  tail -n 300 "${work_dir}/server.err" >&2 || true
   exit 1
 fi
 
 for event in adapter_registered adapter_activated adapter_unregistered; do
   if ! grep -Fq "event=${event}" "${work_dir}/server.err"; then
     echo "server log is missing event=${event}" >&2
-    sed -n '1,260p' "${work_dir}/server.err" >&2 || true
+    tail -n 300 "${work_dir}/server.err" >&2 || true
     exit 1
   fi
 done
@@ -42,18 +44,18 @@ for event in adapter_timed_out adapter_unregistered \
              adapter_local_error; do
   if ! grep -Fq "event=${event}" "${work_dir}/server.err"; then
     echo "server log is missing event=${event}" >&2
-    sed -n '1,260p' "${work_dir}/server.err" >&2 || true
+    tail -n 300 "${work_dir}/server.err" >&2 || true
     exit 1
   fi
 done
 if ! grep -Fq "role=OBSERVER" "${work_dir}/server.err"; then
   echo "server did not log an Observer lifecycle" >&2
-  sed -n '1,260p' "${work_dir}/server.err" >&2 || true
+  tail -n 300 "${work_dir}/server.err" >&2 || true
   exit 1
 fi
 if ! kill -0 "${server_pid}" 2>/dev/null; then
   echo "sensor or Observer activity stopped the server" >&2
-  sed -n '1,260p' "${work_dir}/server.err" >&2 || true
+  tail -n 300 "${work_dir}/server.err" >&2 || true
   exit 1
 fi
 

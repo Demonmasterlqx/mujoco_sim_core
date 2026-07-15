@@ -1,6 +1,6 @@
 # Adapter lifecycle
 
-`SimulationCore` stores explicit internal phases. Protocol V2
+`SimulationCore` stores explicit internal phases. Protocol V3
 `ControllerState` values are projections only; production code changes a phase
 through `ControllerStateMachine` or `ObserverStateMachine`.
 
@@ -23,8 +23,8 @@ stateDiagram-v2
 ```
 
 `TimedOutAwaitingProof` and `RecoveryPending` both project to `TIMED_OUT`.
-Recovery proof validates the exact server, session, epoch, protocol version,
-issued Tick range, Commit status, and full command shape. It stores an immutable
+Recovery proof validates the exact session, epoch, issued Tick, layout
+fingerprint, and full dense command shape. It stores an immutable
 copy for duplicate verification but never joins the open Barrier and never
 applies its command values. Only opening the next Tick changes
 `RecoveryPending` to `Active`.

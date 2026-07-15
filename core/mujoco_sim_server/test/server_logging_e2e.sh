@@ -18,7 +18,7 @@ cleanup() {
 trap cleanup EXIT
 
 "${server_bin}" --headless --server-name "${instance_name}" \
-  --model "${model_path}" --max-ticks 5000 \
+  --model "${model_path}" --max-ticks 10000 \
   --log-summary-period-ms 100 --log-file "${work_dir}/file/server.log" \
   >"${work_dir}/server.out" 2>"${work_dir}/server.err" &
 server_pid="$!"
@@ -48,8 +48,8 @@ for log in "${work_dir}/server.err" "${work_dir}/file/server.log"; do
   grep -Fq "event=server_started" "${log}"
   grep -Fq "event=service_request_malformed method=RegisterAdapter" "${log}"
   grep -Fq "event=adapter_request_rejected operation=register" "${log}"
-  grep -Fq "event=topic_payload_malformed message_type=AdapterCommit" "${log}"
-  grep -Fq "event=topic_payload_malformed message_type=AdapterHeartbeat" "${log}"
+  grep -Fq "event=topic_payload_malformed message_type=Commit" "${log}"
+  grep -Fq "event=topic_payload_malformed message_type=SessionHeartbeat" "${log}"
   grep -Fq "event=tick_summary" "${log}"
   grep -Eq "malformed_messages=[1-9][0-9]*" "${log}"
   grep -Fq "event=server_stopped reason=max_ticks exit_code=0" "${log}"

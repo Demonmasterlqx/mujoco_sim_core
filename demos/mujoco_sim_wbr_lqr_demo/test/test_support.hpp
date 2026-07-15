@@ -7,19 +7,20 @@
 #include <vector>
 
 #include <control/msgs.hpp>
-#include <mujoco_sim/v2/sync.pb.h>
 #include <mujoco_sim/wbr_lqr_demo/interface_mapping.hpp>
-#include <mujoco_sim/protocol/layout_hash.hpp>
 
 namespace mujoco_sim::wbr_lqr_demo::test {
 
-inline std::uint32_t ObservationDimension(std::string_view name) {
-  if (name == "imu_quat") {
-    return 4;
-  }
-  if (name == "imu_accel" || name == "imu_gyro") {
-    return 3;
-  }
+struct DenseTick {
+  std::vector<double> observations;
+  double simulation_time_s = 0.0;
+};
+
+inline std::size_t ObservationDimension(const InterfaceConfig& config,
+                                        std::string_view name) {
+  if (name == config.imu.quaternion) return 4;
+  if (name == config.imu.linear_acceleration ||
+      name == config.imu.angular_velocity) return 3;
   return 1;
 }
 
@@ -27,94 +28,65 @@ inline bool IsWheelActuator(std::string_view name) {
   return name == "lwheel_actuator" || name == "rwheel_actuator";
 }
 
-inline mujoco_sim::v2::ResourceLayout MakeValidLayout(
-    bool reverse_observations = false, bool reverse_commands = false) {
-  auto observations = WbrObservationNames();
-  auto commands = WbrCommandNames();
-  if (reverse_observations) {
-    std::reverse(observations.begin(), observations.end());
+inline mujoco_sim::adapter_sdk::ControllerLayout MakeValidLayout(
+    bool reverse_observations = false, bool reverse_commands = false,
+    const InterfaceConfig& config = MakeUpstreamWbrInterfaceConfig()) {
+  auto observation_names = WbrObservationNames(config);
+  auto command_names = WbrCommandNames(config);
+  if (reverse_observations) std::reverse(observation_names.begin(), observation_names.end());
+  if (reverse_commands) std::reverse(command_names.begin(), command_names.end());
+  std::vector<mujoco_sim::adapter_sdk::ResourceInfo> observations;
+  std::vector<mujoco_sim::adapter_sdk::ResourceInfo> commands;
+  std::size_t offset = 0;
+  for (const auto& name : observation_names) {
+    const auto count = ObservationDimension(config, name);
+    observations.push_back({name, {offset, count}});
+    offset += count;
   }
-  if (reverse_commands) {
-    std::reverse(commands.begin(), commands.end());
+  std::size_t command_offset = 0;
+  for (const auto& name : command_names) {
+    double limit = 20.0;
+    if (IsWheelActuator(name)) limit = 5.2;
+    commands.push_back({name, {command_offset++, 1}, true, -limit, limit});
   }
-
-  mujoco_sim::v2::ResourceLayout layout;
-  for (const auto& name : observations) {
-    auto* descriptor = layout.add_observations();
-    descriptor->set_name(name);
-    descriptor->set_type(mujoco_sim::v2::OBSERVATION_SENSOR);
-    descriptor->set_dimension(ObservationDimension(name));
-  }
-  for (const auto& name : commands) {
-    auto* descriptor = layout.add_commands();
-    descriptor->set_name(name);
-    descriptor->set_type(mujoco_sim::v2::COMMAND_ACTUATOR);
-    descriptor->set_dimension(1);
-    descriptor->set_has_ctrl_range(true);
-    const double limit = IsWheelActuator(name) ? 5.2 : 20.0;
-    descriptor->set_ctrl_min(-limit);
-    descriptor->set_ctrl_max(limit);
-  }
-  layout.set_layout_hash(mujoco_sim::protocol::ComputeLayoutHash(layout));
-  return layout;
+  return {std::move(observations), std::move(commands), offset,
+          command_offset};
 }
 
 inline std::vector<double> DefaultValues(std::string_view name) {
-  if (name == "imu_quat") {
-    return {1.0, 0.0, 0.0, 0.0};
-  }
-  if (name == "imu_accel") {
-    return {0.0, 0.0, 9.81};
-  }
-  if (name == "imu_gyro") {
-    return {0.0, 0.0, 0.0};
-  }
-
+  if (name == "imu_quat") return {1.0, 0.0, 0.0, 0.0};
+  if (name == "imu_accel") return {0.0, 0.0, 9.81};
+  if (name == "imu_gyro") return {0.0, 0.0, 0.0};
   constexpr std::array<std::string_view, 6> motors{
       "ljoint1", "ljoint4", "lwheel", "rjoint1", "rjoint4", "rwheel"};
   constexpr std::array<double, 6> positions{-0.75, -2.25, 0.0,
                                              0.75, 2.25, 0.0};
   for (std::size_t i = 0; i < motors.size(); ++i) {
     const std::string prefix(motors[i]);
-    if (name == prefix + "_pos") {
-      return {positions[i]};
-    }
-    if (name == prefix + "_vel" || name == prefix + "_tor") {
-      return {0.0};
-    }
+    if (name == prefix + "_pos") return {positions[i]};
+    if (name == prefix + "_vel" || name == prefix + "_tor") return {0.0};
   }
   return {};
 }
 
-inline mujoco_sim::v2::Tick MakeValidTick(
-    const mujoco_sim::v2::ResourceLayout& layout, std::uint64_t tick_id = 0,
-    bool reverse_blocks = true) {
-  mujoco_sim::v2::Tick tick;
-  tick.mutable_header()->set_tick_id(tick_id);
-  tick.set_layout_hash(layout.layout_hash());
-
-  auto names = WbrObservationNames();
-  if (reverse_blocks) {
-    std::reverse(names.begin(), names.end());
-  }
-  for (const auto& name : names) {
-    auto* block = tick.add_observations();
-    block->set_name(name);
-    for (const double value : DefaultValues(name)) {
-      block->add_values(value);
-    }
-  }
-  return tick;
+inline void SetObservation(const mujoco_sim::adapter_sdk::ControllerLayout& layout,
+                           std::string_view name, std::span<const double> values,
+                           std::vector<double>* output) {
+  const auto span = layout.Observation(name);
+  if (!span || span->count != values.size()) return;
+  std::copy(values.begin(), values.end(), output->begin() + span->offset);
 }
 
-inline mujoco_sim::v2::ObservationBlock* FindBlock(
-    mujoco_sim::v2::Tick* tick, std::string_view name) {
-  for (auto& block : *tick->mutable_observations()) {
-    if (block.name() == name) {
-      return &block;
-    }
+inline DenseTick MakeValidTick(
+    const mujoco_sim::adapter_sdk::ControllerLayout& layout,
+    double simulation_time_s = 0.0) {
+  DenseTick tick{{}, simulation_time_s};
+  tick.observations.resize(layout.observation_scalar_count());
+  for (const auto& resource : layout.observations()) {
+    const auto values = DefaultValues(resource.name);
+    SetObservation(layout, resource.name, values, &tick.observations);
   }
-  return nullptr;
+  return tick;
 }
 
 inline control::msg_raw_state_t MakeHomeObservation() {
@@ -123,10 +95,8 @@ inline control::msg_raw_state_t MakeHomeObservation() {
   raw.accel[2] = 9.81F;
   raw.motors[0].q = -0.75F;
   raw.motors[1].q = -2.25F;
-  raw.motors[2].q = 0.0F;
   raw.motors[3].q = 0.75F;
   raw.motors[4].q = 2.25F;
-  raw.motors[5].q = 0.0F;
   return raw;
 }
 

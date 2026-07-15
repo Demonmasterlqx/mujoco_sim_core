@@ -226,11 +226,11 @@ TEST(AppConfigTest, CrossFieldFailureIsTransactional) {
   EXPECT_EQ(config.server_name, "sentinel");
 
   generated_config = generated::SensorDemoConfig{};
-  generated_config.mapper.keepalive_period_ms =
-      generated_config.mapper.timeout_ms;
+  generated_config.mapper.heartbeat_period_ms =
+      generated_config.mapper.session_timeout_ms;
   EXPECT_FALSE(
       demo::BuildAppConfig(generated_config, &config, &message));
-  EXPECT_NE(message.find("keepalive_period_ms"), std::string::npos);
+  EXPECT_NE(message.find("heartbeat_period_ms"), std::string::npos);
   EXPECT_EQ(config.server_name, "sentinel");
 }
 

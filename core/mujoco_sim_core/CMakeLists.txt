@@ -4,8 +4,6 @@ project(mujoco_sim_core VERSION 0.1.0 LANGUAGES CXX)
 include(GNUInstallDirs)
 include(CMakePackageConfigHelpers)
 
-find_package(mujoco_sim_protocol CONFIG REQUIRED)
-
 option(MUJOCO_SIM_USE_BUNDLED_MUJOCO
   "Use the MuJoCo distribution bundled in this repository" ON)
 option(MUJOCO_SIM_BUILD_PERFORMANCE_BENCHMARK
@@ -62,7 +60,6 @@ target_include_directories(${PROJECT_NAME}
     "$<INSTALL_INTERFACE:${CMAKE_INSTALL_INCLUDEDIR}>"
 )
 target_link_libraries(${PROJECT_NAME}
-  PUBLIC mujoco_sim::protocol
   PRIVATE mujoco::mujoco
 )
 set_target_properties(${PROJECT_NAME} PROPERTIES
@@ -152,7 +149,7 @@ endif()
 
 if(MUJOCO_SIM_BUILD_DOCS)
   find_package(Doxygen REQUIRED)
-  set(DOXYGEN_EXTRACT_ALL NO)
+  set(DOXYGEN_EXTRACT_ALL YES)
   set(DOXYGEN_EXTRACT_PRIVATE NO)
   set(DOXYGEN_WARN_IF_UNDOCUMENTED YES)
   set(DOXYGEN_WARN_AS_ERROR FAIL_ON_WARNINGS)

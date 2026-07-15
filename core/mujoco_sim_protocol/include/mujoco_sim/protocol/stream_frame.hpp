@@ -6,7 +6,7 @@
 #include <string>
 #include <string_view>
 
-#include <mujoco_sim/v2/sync.pb.h>
+#include <mujoco_sim/v3/sync.pb.h>
 
 namespace mujoco_sim::protocol {
 
@@ -18,11 +18,11 @@ inline constexpr std::uint64_t kMaximumStreamPayloadBytes =
     512ULL * 1024ULL * 1024ULL;
 
 struct ParsedStreamFrame {
-  mujoco_sim::v2::StreamFrameHeader header;
+  mujoco_sim::v3::StreamFrameHeader header;
   std::span<const std::byte> payload;
 };
 
-bool SerializeStreamFrame(const mujoco_sim::v2::StreamFrameHeader& header,
+bool SerializeStreamFrame(const mujoco_sim::v3::StreamFrameHeader& header,
                           std::span<const std::byte> payload,
                           std::string* output,
                           std::string* error_message);

@@ -3,7 +3,8 @@
 #include <cstdint>
 #include <string>
 
-#include <mujoco_sim/v2/sync.pb.h>
+#include <mujoco_sim/core/domain.hpp>
+
 
 namespace mujoco_sim::core::internal {
 
@@ -25,8 +26,8 @@ enum class ObserverPhase {
   kError,
 };
 
-mujoco_sim::v2::ControllerState WireState(ControllerPhase phase) noexcept;
-mujoco_sim::v2::ControllerState WireState(ObserverPhase phase) noexcept;
+mujoco_sim::core::ControllerState WireState(ControllerPhase phase) noexcept;
+mujoco_sim::core::ControllerState WireState(ObserverPhase phase) noexcept;
 
 class ControllerStateMachine {
  public:
@@ -38,7 +39,7 @@ class ControllerStateMachine {
   static bool Activate(ControllerRecord* controller, std::uint64_t tick_id);
   static bool AcceptRecoveryProof(
       ControllerRecord* controller,
-      const mujoco_sim::v2::AdapterCommit& commit);
+      const mujoco_sim::core::AdapterCommit& commit);
   static bool ActivateRecovered(ControllerRecord* controller,
                                 std::uint64_t tick_id);
   static bool MarkTimedOut(ControllerRecord* controller,

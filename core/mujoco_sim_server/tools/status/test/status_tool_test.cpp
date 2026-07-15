@@ -46,67 +46,63 @@ CommandLineResult ParseArgs(const std::vector<std::string>& arguments,
                           message);
 }
 
-mujoco_sim::v2::ServerStatus MakeStatus(
-    const std::string& server_name = "default", std::uint64_t epoch = 1) {
-  mujoco_sim::v2::ServerStatus status;
-  auto* header = status.mutable_header();
-  header->set_server_name(server_name);
-  header->set_protocol_major(mujoco_sim::protocol::kProtocolMajor);
-  header->set_protocol_minor(mujoco_sim::protocol::kProtocolMinor);
-  header->set_epoch(epoch);
-  header->set_tick_id(2);
-  header->set_timestamp_unix_nanos(1700000000123456789ULL);
-  status.set_state(mujoco_sim::v2::RUNNING);
+mujoco_sim::v3::ServerStatus MakeStatus(
+    const std::string& = "default", std::uint64_t epoch = 1) {
+  mujoco_sim::v3::ServerStatus status;
+  status.set_epoch(epoch);
+  status.set_tick_id(2);
+  status.set_state(mujoco_sim::v3::RUNNING);
   return status;
 }
 
 StatusReport MakeReport() {
   StatusReport report;
+  report.server_name = "default";
   report.status = MakeStatus();
   report.status.set_message("healthy");
   auto* zeta = report.status.add_adapters();
   zeta->set_adapter_id("zeta");
-  zeta->set_role(mujoco_sim::v2::CONTROLLER);
+  zeta->set_role(mujoco_sim::v3::CONTROLLER);
   zeta->set_session_id(9);
   zeta->set_last_delivery_tick_id(8);
-  zeta->set_state(mujoco_sim::v2::ACTIVE);
+  zeta->set_state(mujoco_sim::v3::ACTIVE);
   zeta->set_last_commit_tick_id(8);
   zeta->set_state_since_tick_id(3);
   zeta->set_required_for_barrier(true);
   auto* alpha = report.status.add_adapters();
   alpha->set_adapter_id("alpha");
-  alpha->set_role(mujoco_sim::v2::CONTROLLER);
+  alpha->set_role(mujoco_sim::v3::CONTROLLER);
   alpha->set_session_id(7);
-  alpha->set_state(mujoco_sim::v2::TIMED_OUT);
+  alpha->set_state(mujoco_sim::v3::TIMED_OUT);
   alpha->set_message("controller timed out");
   alpha->set_state_since_tick_id(5);
   alpha->set_timeout_count(2);
   alpha->set_required_for_barrier(false);
   auto* error = report.status.add_adapters();
   error->set_adapter_id("error");
-  error->set_role(mujoco_sim::v2::CONTROLLER);
+  error->set_role(mujoco_sim::v3::CONTROLLER);
   error->set_session_id(8);
-  error->set_state(mujoco_sim::v2::ERROR);
+  error->set_state(mujoco_sim::v3::ERROR);
   error->set_message("invalid command");
   error->set_last_commit_tick_id(6);
   error->set_state_since_tick_id(7);
   error->set_required_for_barrier(false);
   auto* observer = report.status.add_adapters();
   observer->set_adapter_id("observer");
-  observer->set_role(mujoco_sim::v2::OBSERVER);
+  observer->set_role(mujoco_sim::v3::OBSERVER);
   observer->set_session_id(10);
-  observer->set_state(mujoco_sim::v2::ACTIVE);
+  observer->set_state(mujoco_sim::v3::ACTIVE);
   observer->set_last_delivery_tick_id(8);
   observer->set_last_observation_sequence(4);
   auto* stream = report.status.add_streams();
   stream->set_name("front_rgb");
-  stream->set_state(mujoco_sim::v2::STREAM_RUNNING);
+  stream->set_state(mujoco_sim::v3::STREAM_RUNNING);
   stream->set_subscriber_count(1);
   stream->set_captures(5);
   stream->set_published(4);
   stream->set_dropped(1);
   report.resources.emplace();
-  report.resources->set_code(mujoco_sim::v2::OK);
+  report.resources->set_code(mujoco_sim::v3::OK);
   report.resources->set_epoch(1);
   auto* z_sensor = report.resources->add_observations();
   z_sensor->set_name("z_sensor");
@@ -253,20 +249,15 @@ TEST(StatusPayloadTest, RejectsInvalidPayloadsAndHeaders) {
   const auto input = MakeStatus();
   std::string bytes;
   ASSERT_TRUE(input.SerializeToString(&bytes));
-  mujoco_sim::v2::ServerStatus parsed;
+  mujoco_sim::v3::ServerStatus parsed;
   EXPECT_TRUE(ParseStatusPayload(bytes.data(), bytes.size(), "default",
                                  &parsed));
-  EXPECT_FALSE(
+  EXPECT_TRUE(
       ParseStatusPayload(bytes.data(), bytes.size(), "other", &parsed));
   EXPECT_FALSE(ParseStatusPayload(nullptr, bytes.size(), "default", &parsed));
   const std::string malformed = "not protobuf";
   EXPECT_FALSE(ParseStatusPayload(malformed.data(), malformed.size(),
                                   "default", &parsed));
-  auto wrong_protocol = MakeStatus();
-  wrong_protocol.mutable_header()->set_protocol_major(99);
-  ASSERT_TRUE(wrong_protocol.SerializeToString(&bytes));
-  EXPECT_FALSE(ParseStatusPayload(bytes.data(), bytes.size(), "default",
-                                  &parsed));
 }
 
 TEST(StatusFormattingTest, ProducesSortedHumanOutput) {
@@ -297,8 +288,7 @@ TEST(StatusFormattingTest, ProducesSortedHumanOutput) {
 
 TEST(StatusFormattingTest, PreservesUint64AndEscapesJson) {
   auto report = MakeReport();
-  report.status.mutable_header()->set_tick_id(
-      std::numeric_limits<std::uint64_t>::max());
+  report.status.set_tick_id(std::numeric_limits<std::uint64_t>::max());
   report.status.set_message("quote \" slash \\ newline\n");
   std::string json;
   std::string error;
@@ -306,10 +296,10 @@ TEST(StatusFormattingTest, PreservesUint64AndEscapesJson) {
   google::protobuf::Struct root;
   ASSERT_TRUE(google::protobuf::util::JsonStringToMessage(json, &root).ok());
   const auto& fields = root.fields();
-  EXPECT_EQ(fields.size(), 3);
+  EXPECT_EQ(fields.size(), 4);
+  EXPECT_EQ(fields.at("server_name").string_value(), "default");
   const auto& status = fields.at("status").struct_value().fields();
-  const auto& header = status.at("header").struct_value().fields();
-  EXPECT_EQ(header.at("tick_id").string_value(), "18446744073709551615");
+  EXPECT_EQ(status.at("tick_id").string_value(), "18446744073709551615");
   EXPECT_EQ(status.at("message").string_value(),
             "quote \" slash \\ newline\n");
   EXPECT_EQ(status.count("controllers"), 0);
@@ -380,7 +370,7 @@ TEST(StatusFormattingTest, WritesUnavailableResourcesAsNdjson) {
     google::protobuf::Struct root;
     ASSERT_TRUE(
         google::protobuf::util::JsonStringToMessage(line, &root).ok());
-    EXPECT_EQ(root.fields().size(), 3);
+    EXPECT_EQ(root.fields().size(), 4);
     EXPECT_EQ(root.fields().at("resources").kind_case(),
               google::protobuf::Value::kNullValue);
     EXPECT_EQ(root.fields().at("resource_error").string_value(),

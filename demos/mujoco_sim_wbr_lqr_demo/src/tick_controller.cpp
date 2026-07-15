@@ -1,5 +1,7 @@
 #include <mujoco_sim/wbr_lqr_demo/tick_controller.hpp>
 
+#include <algorithm>
+#include <cstdint>
 #include <utility>
 
 namespace mujoco_sim::wbr_lqr_demo {
@@ -11,19 +13,21 @@ mujoco_sim::adapter_sdk::AdapterOptions MakeAdapterOptions(
   options.adapter_id = config.adapter_id;
   options.observation_names = WbrObservationNames(config.interfaces);
   options.command_names = WbrCommandNames(config.interfaces);
-  options.timeout_ms = config.timeout_ms;
+  options.commit_timeout_ms = config.commit_timeout_ms;
+  options.session_timeout_ms = config.session_timeout_ms;
+  options.heartbeat_period_ms = config.heartbeat_period_ms;
   options.service_timeout_ms = config.service_timeout_ms;
   return options;
 }
 
 TickController::TickController(
-    const mujoco_sim::v2::ResourceLayout& registered_layout,
+    const mujoco_sim::adapter_sdk::ControllerLayout& registered_layout,
     PipelineConfig pipeline_config, InputScript input_script)
     : TickController(registered_layout, MakeUpstreamWbrInterfaceConfig(),
                      std::move(pipeline_config), std::move(input_script)) {}
 
 TickController::TickController(
-    const mujoco_sim::v2::ResourceLayout& registered_layout,
+    const mujoco_sim::adapter_sdk::ControllerLayout& registered_layout,
     InterfaceConfig interface_config, PipelineConfig pipeline_config,
     InputScript input_script)
     : decoder_(interface_config, registered_layout),
@@ -31,15 +35,31 @@ TickController::TickController(
       pipeline_(std::move(pipeline_config)),
       input_script_(std::move(input_script)) {}
 
-std::vector<mujoco_sim::adapter_sdk::CommandValue>
-TickController::HandleTick(const mujoco_sim::v2::Tick& tick) {
+std::vector<double> TickController::HandleTick(
+    const mujoco_sim::adapter_sdk::TickLease& tick) {
   return HandleTick(tick, input_script_.InputAt(pipeline_.tick_count()));
 }
 
-std::vector<mujoco_sim::adapter_sdk::CommandValue>
-TickController::HandleTick(const mujoco_sim::v2::Tick& tick,
+std::vector<double> TickController::HandleTick(
+    const mujoco_sim::adapter_sdk::TickLease& tick,
                            const control::input_snapshot_t& input) {
   const control::msg_raw_state_t raw = decoder_.Decode(tick);
+  last_input_ = input;
+  last_output_ = pipeline_.Step(raw, input);
+  return command_mapper_.Map(last_output_->raw_torque);
+}
+
+std::vector<double> TickController::HandleTick(
+    std::span<const double> observations, double simulation_time_s) {
+  return HandleTick(observations, simulation_time_s,
+                    input_script_.InputAt(pipeline_.tick_count()));
+}
+
+std::vector<double> TickController::HandleTick(
+    std::span<const double> observations, double simulation_time_s,
+    const control::input_snapshot_t& input) {
+  const control::msg_raw_state_t raw =
+      decoder_.Decode(observations, simulation_time_s);
   last_input_ = input;
   last_output_ = pipeline_.Step(raw, input);
   return command_mapper_.Map(last_output_->raw_torque);

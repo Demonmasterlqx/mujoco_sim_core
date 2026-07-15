@@ -25,6 +25,7 @@ TEST(ServerTerminalStateEcalTest, StoppedServerWakesAllClientRoles) {
   config.headless = true;
   config.log_level = "off";
   config.status_period_ms = 10;
+  config.status_min_interval_ms = 10;
   server::ServerConfig::SensorStream stream;
   stream.name = "lidar";
   stream.kind = "lidar_pointcloud";
@@ -56,7 +57,7 @@ TEST(ServerTerminalStateEcalTest, StoppedServerWakesAllClientRoles) {
   observer_options.observer_id = "observer";
   observer_options.observation_names = {"imu_quat", "imu_gyro"};
   observer_options.service_timeout_ms = 5000;
-  observer_options.keepalive_period_ms = 20;
+  observer_options.heartbeat_period_ms = 100;
   ObserverClient observer(observer_options);
   ASSERT_TRUE(observer.Start(&error)) << error;
   ASSERT_TRUE(observer.Activate(&error)) << error;
@@ -68,13 +69,13 @@ TEST(ServerTerminalStateEcalTest, StoppedServerWakesAllClientRoles) {
   SensorStreamClient streams(stream_options);
   ASSERT_TRUE(streams.Start(&error)) << error;
 
-  mujoco_sim::v2::Tick tick;
+  TickLease tick;
   std::string tick_error;
   auto tick_wait = std::async(std::launch::async, [&] {
     return controller.WaitForTick(std::chrono::milliseconds::max(), &tick,
                                   &tick_error);
   });
-  mujoco_sim::v2::ObservationFrame observation;
+  ObservationLease observation;
   std::string observation_error;
   auto observation_wait = std::async(std::launch::async, [&] {
     return observer.WaitForObservation(std::chrono::milliseconds::max(),

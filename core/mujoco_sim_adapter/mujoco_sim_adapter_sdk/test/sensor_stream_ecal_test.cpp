@@ -19,7 +19,7 @@
 #include <mujoco_sim/adapter_sdk/sensor_stream_client.hpp>
 #include <mujoco_sim/protocol/stream_frame.hpp>
 #include <mujoco_sim/protocol/topics.hpp>
-#include <mujoco_sim/v2/sync.pb.h>
+#include <mujoco_sim/v3/sync.pb.h>
 
 namespace {
 
@@ -63,25 +63,24 @@ TEST(SensorStreamEcalTest, SameTickStreamErrorWakesWaiterAcrossTransport) {
       [&server_name](const eCAL::SServiceMethodInformation&,
                      const std::string& request_bytes,
                      std::string& response_bytes) {
-        mujoco_sim::v2::GetSensorStreamsRequest request;
-        mujoco_sim::v2::GetSensorStreamsResponse response;
-        if (!request.ParseFromString(request_bytes) ||
-            request.server_name() != server_name) {
-          response.set_code(mujoco_sim::v2::INVALID_ARGUMENT);
+        mujoco_sim::v3::GetSensorStreamsRequest request;
+        mujoco_sim::v3::GetSensorStreamsResponse response;
+        if (!request.ParseFromString(request_bytes)) {
+          response.set_code(mujoco_sim::v3::INVALID_ARGUMENT);
           response.set_message("invalid test discovery request");
         } else {
-          response.set_code(mujoco_sim::v2::OK);
+          response.set_code(mujoco_sim::v3::OK);
           response.set_epoch(kEpoch);
           auto* descriptor = response.add_streams();
           descriptor->set_name("rgb");
           descriptor->set_topic(mujoco_sim::protocol::SensorStreamTopicName(
               server_name, "rgb"));
-          descriptor->set_format(mujoco_sim::v2::RGB8);
+          descriptor->set_format(mujoco_sim::v3::RGB8);
           descriptor->set_width(1);
           descriptor->set_height(1);
           descriptor->set_row_stride_bytes(3);
           descriptor->set_frame_id("camera");
-          descriptor->set_frame_convention(mujoco_sim::v2::ROS_OPTICAL);
+          descriptor->set_frame_convention(mujoco_sim::v3::ROS_OPTICAL);
           descriptor->set_source_name("test_camera");
           descriptor->set_rate_hz(30.0);
           descriptor->set_maximum_payload_bytes(3);
@@ -111,20 +110,16 @@ TEST(SensorStreamEcalTest, SameTickStreamErrorWakesWaiterAcrossTransport) {
     return client.WaitForSample("rgb", 5s, &sample, &error);
   });
 
-  mujoco_sim::v2::ServerStatus status;
-  auto* header = status.mutable_header();
-  header->set_server_name(server_name);
-  header->set_epoch(kEpoch);
-  header->set_tick_id(123);
-  header->set_protocol_major(mujoco_sim::protocol::kProtocolMajor);
-  header->set_protocol_minor(mujoco_sim::protocol::kProtocolMinor);
+  mujoco_sim::v3::ServerStatus status;
+  status.set_epoch(kEpoch);
+  status.set_tick_id(123);
   auto* stream = status.add_streams();
   stream->set_name("rgb");
-  stream->set_state(mujoco_sim::v2::STREAM_RUNNING);
+  stream->set_state(mujoco_sim::v3::STREAM_RUNNING);
   ASSERT_TRUE(status_publisher.Send(status.SerializeAsString()));
   EXPECT_EQ(waiting.wait_for(100ms), std::future_status::timeout);
 
-  stream->set_state(mujoco_sim::v2::STREAM_ERROR);
+  stream->set_state(mujoco_sim::v3::STREAM_ERROR);
   stream->set_message("injected renderer failure");
   const auto error_deadline = std::chrono::steady_clock::now() + 3s;
   while (waiting.wait_for(0ms) != std::future_status::ready &&
@@ -159,23 +154,22 @@ TEST(SensorStreamEcalTest, DestructionWaitsForRealInflightCallback) {
       [&server_name, &topic](const eCAL::SServiceMethodInformation&,
                              const std::string& request_bytes,
                              std::string& response_bytes) {
-        mujoco_sim::v2::GetSensorStreamsRequest request;
-        mujoco_sim::v2::GetSensorStreamsResponse response;
-        if (!request.ParseFromString(request_bytes) ||
-            request.server_name() != server_name) {
-          response.set_code(mujoco_sim::v2::INVALID_ARGUMENT);
+        mujoco_sim::v3::GetSensorStreamsRequest request;
+        mujoco_sim::v3::GetSensorStreamsResponse response;
+        if (!request.ParseFromString(request_bytes)) {
+          response.set_code(mujoco_sim::v3::INVALID_ARGUMENT);
         } else {
-          response.set_code(mujoco_sim::v2::OK);
+          response.set_code(mujoco_sim::v3::OK);
           response.set_epoch(kEpoch);
           auto* descriptor = response.add_streams();
           descriptor->set_name("rgb");
           descriptor->set_topic(topic);
-          descriptor->set_format(mujoco_sim::v2::RGB8);
+          descriptor->set_format(mujoco_sim::v3::RGB8);
           descriptor->set_width(1);
           descriptor->set_height(1);
           descriptor->set_row_stride_bytes(3);
           descriptor->set_frame_id("camera");
-          descriptor->set_frame_convention(mujoco_sim::v2::ROS_OPTICAL);
+          descriptor->set_frame_convention(mujoco_sim::v3::ROS_OPTICAL);
           descriptor->set_source_name("test_camera");
           descriptor->set_rate_hz(30.0);
           descriptor->set_maximum_payload_bytes(3);
@@ -216,23 +210,18 @@ TEST(SensorStreamEcalTest, DestructionWaitsForRealInflightCallback) {
   }
   ASSERT_GT(frame_publisher.GetSubscriberCount(), 0U);
 
-  mujoco_sim::v2::StreamFrameHeader header;
-  header.mutable_header()->set_server_name(server_name);
-  header.mutable_header()->set_epoch(kEpoch);
-  header.mutable_header()->set_tick_id(1);
-  header.mutable_header()->set_protocol_major(
-      mujoco_sim::protocol::kProtocolMajor);
-  header.mutable_header()->set_protocol_minor(
-      mujoco_sim::protocol::kProtocolMinor);
+  mujoco_sim::v3::StreamFrameHeader header;
+  header.set_epoch(kEpoch);
+  header.set_tick_id(1);
   header.set_stream_name("rgb");
   header.set_stream_sequence(1);
   header.set_capture_id(1);
-  header.set_format(mujoco_sim::v2::RGB8);
+  header.set_format(mujoco_sim::v3::RGB8);
   header.set_width(1);
   header.set_height(1);
   header.set_row_stride_bytes(3);
   header.set_frame_id("camera");
-  header.set_frame_convention(mujoco_sim::v2::ROS_OPTICAL);
+  header.set_frame_convention(mujoco_sim::v3::ROS_OPTICAL);
   header.set_payload_size(3);
   const std::vector<std::byte> payload = {
       std::byte{1}, std::byte{2}, std::byte{3}};

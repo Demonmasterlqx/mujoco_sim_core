@@ -29,19 +29,19 @@ class SensorStreamClientTestPeer {
 
   static bool ValidateDescriptor(
       SensorStreamClient* client,
-      const mujoco_sim::v2::StreamDescriptor& descriptor,
+      const mujoco_sim::v3::StreamDescriptor& descriptor,
       std::string* error) {
     return client->impl_->ValidateDescriptor(descriptor, error);
   }
 
   static void Configure(
       SensorStreamClient* client,
-      const std::vector<mujoco_sim::v2::StreamDescriptor>& descriptors) {
+      const std::vector<mujoco_sim::v3::StreamDescriptor>& descriptors) {
     client->impl_->stop_requested_ = false;
     {
       std::lock_guard lock(client->impl_->mutex_);
       client->impl_->discovery_.Clear();
-      client->impl_->discovery_.set_code(mujoco_sim::v2::OK);
+      client->impl_->discovery_.set_code(mujoco_sim::v3::OK);
       client->impl_->discovery_.set_epoch(9);
       client->impl_->streams_.clear();
       client->impl_->last_status_tick_id_.reset();
@@ -63,7 +63,7 @@ class SensorStreamClientTestPeer {
 
   static void HandleFrame(
       SensorStreamClient* client, const std::string& stream_name,
-      const mujoco_sim::v2::StreamFrameHeader& header,
+      const mujoco_sim::v3::StreamFrameHeader& header,
       std::span<const std::byte> payload) {
     mujoco_sim::protocol::ParsedStreamFrame frame{header, payload};
     std::string error;
@@ -82,7 +82,7 @@ class SensorStreamClientTestPeer {
 
   static void HandleStatus(
       SensorStreamClient* client,
-      const mujoco_sim::v2::ServerStatus& status) {
+      const mujoco_sim::v3::ServerStatus& status) {
     const std::string bytes = status.SerializeAsString();
     client->impl_->HandleStatusBytes(bytes.data(), bytes.size());
   }
@@ -103,7 +103,7 @@ class SensorStreamClientTestPeer {
 
   static std::function<bool()> MakePendingStatusCallback(
       SensorStreamClient* client,
-      const mujoco_sim::v2::ServerStatus& status) {
+      const mujoco_sim::v3::ServerStatus& status) {
     const auto state = client->impl_->callback_state_;
     const std::string bytes = status.SerializeAsString();
     return [state, bytes] {
@@ -179,59 +179,48 @@ mujoco_sim::adapter_sdk::SensorStreamOptions MakeOptions(
   return options;
 }
 
-mujoco_sim::v2::StreamDescriptor MakeDescriptor(
+mujoco_sim::v3::StreamDescriptor MakeDescriptor(
     const std::string& name = "rgb") {
-  mujoco_sim::v2::StreamDescriptor descriptor;
+  mujoco_sim::v3::StreamDescriptor descriptor;
   descriptor.set_name(name);
   descriptor.set_topic(
       mujoco_sim::protocol::SensorStreamTopicName("default", name));
-  descriptor.set_format(mujoco_sim::v2::RGB8);
+  descriptor.set_format(mujoco_sim::v3::RGB8);
   descriptor.set_width(2);
   descriptor.set_height(2);
   descriptor.set_row_stride_bytes(6);
   descriptor.set_frame_id("camera");
-  descriptor.set_frame_convention(mujoco_sim::v2::ROS_OPTICAL);
+  descriptor.set_frame_convention(mujoco_sim::v3::ROS_OPTICAL);
   descriptor.set_source_name("main_camera");
   descriptor.set_rate_hz(30.0);
   descriptor.set_maximum_payload_bytes(12);
   return descriptor;
 }
 
-mujoco_sim::v2::StreamFrameHeader MakeHeader(std::uint64_t sequence) {
-  mujoco_sim::v2::StreamFrameHeader header;
-  header.mutable_header()->set_server_name("default");
-  header.mutable_header()->set_epoch(9);
-  header.mutable_header()->set_tick_id(50 + sequence);
-  header.mutable_header()->set_protocol_major(
-      mujoco_sim::protocol::kProtocolMajor);
-  header.mutable_header()->set_protocol_minor(
-      mujoco_sim::protocol::kProtocolMinor);
+mujoco_sim::v3::StreamFrameHeader MakeHeader(std::uint64_t sequence) {
+  mujoco_sim::v3::StreamFrameHeader header;
+  header.set_epoch(9);
+  header.set_tick_id(50 + sequence);
   header.set_stream_name("rgb");
   header.set_stream_sequence(sequence);
   header.set_capture_id(1000 + sequence);
-  header.set_format(mujoco_sim::v2::RGB8);
+  header.set_format(mujoco_sim::v3::RGB8);
   header.set_width(2);
   header.set_height(2);
   header.set_row_stride_bytes(6);
   header.set_frame_id("camera");
-  header.set_frame_convention(mujoco_sim::v2::ROS_OPTICAL);
+  header.set_frame_convention(mujoco_sim::v3::ROS_OPTICAL);
   header.set_payload_size(12);
   return header;
 }
 
-mujoco_sim::v2::ServerStatus MakeStatus(
+mujoco_sim::v3::ServerStatus MakeStatus(
     std::uint64_t tick_id, const std::string& stream_name,
-    mujoco_sim::v2::StreamState state, std::string message = {}) {
-  mujoco_sim::v2::ServerStatus status;
-  status.mutable_header()->set_server_name("default");
-  status.mutable_header()->set_epoch(9);
-  status.mutable_header()->set_tick_id(tick_id);
-  status.mutable_header()->set_timestamp_unix_nanos(1000 + tick_id);
-  status.mutable_header()->set_protocol_major(
-      mujoco_sim::protocol::kProtocolMajor);
-  status.mutable_header()->set_protocol_minor(
-      mujoco_sim::protocol::kProtocolMinor);
-  status.set_state(mujoco_sim::v2::RUNNING);
+    mujoco_sim::v3::StreamState state, std::string message = {}) {
+  mujoco_sim::v3::ServerStatus status;
+  status.set_epoch(9);
+  status.set_tick_id(tick_id);
+  status.set_state(mujoco_sim::v3::RUNNING);
   auto* stream = status.add_streams();
   stream->set_name(stream_name);
   stream->set_state(state);
@@ -247,7 +236,7 @@ std::vector<std::byte> MakePayload(std::uint8_t first = 1) {
   return payload;
 }
 
-std::string Serialize(const mujoco_sim::v2::StreamFrameHeader& header,
+std::string Serialize(const mujoco_sim::v3::StreamFrameHeader& header,
                       std::span<const std::byte> payload) {
   std::string bytes;
   std::string error;
@@ -418,7 +407,7 @@ TEST(SensorStreamClientTest, MatchingStreamErrorWakesWaiterWithReason) {
       SensorStreamClientTestPeer::WaitInProgress(&client, "rgb"));
 
   SensorStreamClientTestPeer::HandleStatus(
-      &client, MakeStatus(20, "rgb", mujoco_sim::v2::STREAM_ERROR,
+      &client, MakeStatus(20, "rgb", mujoco_sim::v3::STREAM_ERROR,
                           "renderer failed"));
 
   ASSERT_EQ(waiting.wait_for(1s), std::future_status::ready);
@@ -440,8 +429,8 @@ TEST(SensorStreamClientTest, ServerTerminalStatesWakeInfiniteWait) {
   });
   std::this_thread::sleep_for(20ms);
   auto stopped_status = MakeStatus(
-      20, "rgb", mujoco_sim::v2::STREAM_ERROR, "ignored stream error");
-  stopped_status.set_state(mujoco_sim::v2::STOPPED);
+      20, "rgb", mujoco_sim::v3::STREAM_ERROR, "ignored stream error");
+  stopped_status.set_state(mujoco_sim::v3::STOPPED);
   SensorStreamClientTestPeer::HandleStatus(&stopped_client, stopped_status);
   ASSERT_EQ(stopped_wait.wait_for(1s), std::future_status::ready);
   EXPECT_EQ(stopped_wait.get(), SampleWaitResult::kStopped);
@@ -458,8 +447,8 @@ TEST(SensorStreamClientTest, ServerTerminalStatesWakeInfiniteWait) {
   });
   std::this_thread::sleep_for(20ms);
   auto error_status =
-      MakeStatus(20, "rgb", mujoco_sim::v2::STREAM_RUNNING);
-  error_status.set_state(mujoco_sim::v2::ERROR_PAUSED);
+      MakeStatus(20, "rgb", mujoco_sim::v3::STREAM_RUNNING);
+  error_status.set_state(mujoco_sim::v3::ERROR_PAUSED);
   error_status.set_message("fatal simulation error");
   SensorStreamClientTestPeer::HandleStatus(&error_client, error_status);
   ASSERT_EQ(error_wait.wait_for(1s), std::future_status::ready);
@@ -489,10 +478,10 @@ TEST(SensorStreamClientTest, SameTickRunningThenErrorWakesWaiter) {
       SensorStreamClientTestPeer::WaitInProgress(&client, "rgb"));
 
   SensorStreamClientTestPeer::HandleStatus(
-      &client, MakeStatus(20, "rgb", mujoco_sim::v2::STREAM_RUNNING));
+      &client, MakeStatus(20, "rgb", mujoco_sim::v3::STREAM_RUNNING));
   EXPECT_EQ(waiting.wait_for(0ms), std::future_status::timeout);
   SensorStreamClientTestPeer::HandleStatus(
-      &client, MakeStatus(20, "rgb", mujoco_sim::v2::STREAM_ERROR,
+      &client, MakeStatus(20, "rgb", mujoco_sim::v3::STREAM_ERROR,
                           "same-tick renderer failure"));
 
   ASSERT_EQ(waiting.wait_for(1s), std::future_status::ready);
@@ -513,7 +502,7 @@ TEST(SensorStreamClientTest, CallbackModeExposesServerStreamError) {
   Deliver(&client, 1, &payload);
   ASSERT_EQ(callback_count, 1U);
   SensorStreamClientTestPeer::HandleStatus(
-      &client, MakeStatus(20, "rgb", mujoco_sim::v2::STREAM_ERROR,
+      &client, MakeStatus(20, "rgb", mujoco_sim::v3::STREAM_ERROR,
                           "camera disconnected"));
   EXPECT_EQ(client.stream_diagnostic("rgb"), "camera disconnected");
 
@@ -526,24 +515,10 @@ TEST(SensorStreamClientTest, StrictlyFiltersStatusIdentityAndMalformedBytes) {
   SensorStreamClientTestPeer::Configure(&client, {MakeDescriptor()});
 
   SensorStreamClientTestPeer::HandleStatusBytes(&client, "not protobuf");
-  auto wrong_server =
-      MakeStatus(100, "rgb", mujoco_sim::v2::STREAM_ERROR, "wrong server");
-  wrong_server.mutable_header()->set_server_name("other");
-  SensorStreamClientTestPeer::HandleStatus(&client, wrong_server);
   auto wrong_epoch =
-      MakeStatus(101, "rgb", mujoco_sim::v2::STREAM_ERROR, "wrong epoch");
-  wrong_epoch.mutable_header()->set_epoch(10);
+      MakeStatus(101, "rgb", mujoco_sim::v3::STREAM_ERROR, "wrong epoch");
+  wrong_epoch.set_epoch(10);
   SensorStreamClientTestPeer::HandleStatus(&client, wrong_epoch);
-  auto wrong_major =
-      MakeStatus(102, "rgb", mujoco_sim::v2::STREAM_ERROR, "wrong major");
-  wrong_major.mutable_header()->set_protocol_major(
-      mujoco_sim::protocol::kProtocolMajor + 1);
-  SensorStreamClientTestPeer::HandleStatus(&client, wrong_major);
-  auto wrong_minor =
-      MakeStatus(103, "rgb", mujoco_sim::v2::STREAM_ERROR, "wrong minor");
-  wrong_minor.mutable_header()->set_protocol_minor(
-      mujoco_sim::protocol::kProtocolMinor + 1);
-  SensorStreamClientTestPeer::HandleStatus(&client, wrong_minor);
 
   EXPECT_TRUE(client.stream_diagnostic("rgb").empty());
   OwnedStreamSample output;
@@ -553,7 +528,7 @@ TEST(SensorStreamClientTest, StrictlyFiltersStatusIdentityAndMalformedBytes) {
 
   SensorStreamClientTestPeer::HandleStatus(
       &client,
-      MakeStatus(5, "rgb", mujoco_sim::v2::STREAM_ERROR, "valid error"));
+      MakeStatus(5, "rgb", mujoco_sim::v3::STREAM_ERROR, "valid error"));
   EXPECT_EQ(client.WaitForSample("rgb", 0ms, &output, &error),
             SampleWaitResult::kError);
   EXPECT_EQ(error, "valid error");
@@ -563,12 +538,12 @@ TEST(SensorStreamClientTest, IgnoresOutOfOrderAndUnrequestedStreamStatus) {
   SensorStreamClient client(MakeOptions());
   SensorStreamClientTestPeer::Configure(&client, {MakeDescriptor()});
   SensorStreamClientTestPeer::HandleStatus(
-      &client, MakeStatus(20, "rgb", mujoco_sim::v2::STREAM_RUNNING));
+      &client, MakeStatus(20, "rgb", mujoco_sim::v3::STREAM_RUNNING));
   SensorStreamClientTestPeer::HandleStatus(
-      &client, MakeStatus(19, "rgb", mujoco_sim::v2::STREAM_ERROR,
+      &client, MakeStatus(19, "rgb", mujoco_sim::v3::STREAM_ERROR,
                           "stale error"));
   SensorStreamClientTestPeer::HandleStatus(
-      &client, MakeStatus(21, "depth", mujoco_sim::v2::STREAM_ERROR,
+      &client, MakeStatus(21, "depth", mujoco_sim::v3::STREAM_ERROR,
                           "other stream failed"));
 
   EXPECT_TRUE(client.stream_diagnostic("rgb").empty());
@@ -578,10 +553,10 @@ TEST(SensorStreamClientTest, IgnoresOutOfOrderAndUnrequestedStreamStatus) {
             SampleWaitResult::kTimeout);
 
   SensorStreamClientTestPeer::HandleStatus(
-      &client, MakeStatus(22, "rgb", mujoco_sim::v2::STREAM_ERROR,
+      &client, MakeStatus(22, "rgb", mujoco_sim::v3::STREAM_ERROR,
                           "current error"));
   SensorStreamClientTestPeer::HandleStatus(
-      &client, MakeStatus(21, "rgb", mujoco_sim::v2::STREAM_ERROR,
+      &client, MakeStatus(21, "rgb", mujoco_sim::v3::STREAM_ERROR,
                           "late stale error"));
   EXPECT_EQ(client.stream_diagnostic("rgb"), "current error");
 }
@@ -591,7 +566,7 @@ TEST(SensorStreamClientTest, StopSuppressesRacingStatusError) {
   SensorStreamClientTestPeer::Configure(&client, {MakeDescriptor()});
   client.Stop();
   SensorStreamClientTestPeer::HandleStatus(
-      &client, MakeStatus(20, "rgb", mujoco_sim::v2::STREAM_ERROR,
+      &client, MakeStatus(20, "rgb", mujoco_sim::v3::STREAM_ERROR,
                           "late server error"));
 
   EXPECT_TRUE(client.stream_diagnostic("rgb").empty());
@@ -623,7 +598,7 @@ TEST(SensorStreamClientTest, StreamErrorIsIsolatedToMatchingRequestedStream) {
       SensorStreamClientTestPeer::WaitInProgress(&client, "rgb"));
 
   SensorStreamClientTestPeer::HandleStatus(
-      &client, MakeStatus(20, "depth", mujoco_sim::v2::STREAM_ERROR,
+      &client, MakeStatus(20, "depth", mujoco_sim::v3::STREAM_ERROR,
                           "depth renderer failed"));
   auto payload = MakePayload();
   Deliver(&client, 1, &payload);
@@ -677,7 +652,7 @@ TEST(SensorStreamClientTest, ExposesDiscoveredDescriptorAndDiagnostics) {
   SensorStreamClientTestPeer::Configure(&client, {MakeDescriptor()});
   const auto descriptor = client.descriptor("rgb");
   ASSERT_TRUE(descriptor.has_value());
-  EXPECT_EQ(descriptor->format(), mujoco_sim::v2::RGB8);
+  EXPECT_EQ(descriptor->format(), mujoco_sim::v3::RGB8);
   EXPECT_EQ(client.discovery().epoch(), 9U);
   EXPECT_FALSE(client.descriptor("missing").has_value());
 }
@@ -750,7 +725,7 @@ TEST(SensorStreamClientTest, DelayedCallbackCannotReachDestroyedClient) {
     auto client = std::make_unique<SensorStreamClient>(MakeOptions());
     SensorStreamClientTestPeer::Configure(client.get(), {MakeDescriptor()});
     delayed = SensorStreamClientTestPeer::MakePendingStatusCallback(
-        client.get(), MakeStatus(20, "rgb", mujoco_sim::v2::STREAM_ERROR,
+        client.get(), MakeStatus(20, "rgb", mujoco_sim::v3::STREAM_ERROR,
                                  "status callback reached client"));
     EXPECT_TRUE(delayed());
     EXPECT_EQ(client->stream_diagnostic("rgb"),

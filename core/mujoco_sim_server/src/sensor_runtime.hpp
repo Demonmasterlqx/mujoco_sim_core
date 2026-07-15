@@ -5,10 +5,11 @@
 #include <memory>
 #include <stop_token>
 #include <string>
+#include <utility>
 
 #include <mujoco_sim/core/simulation_core.hpp>
 #include <mujoco_sim/server/server_config.hpp>
-#include <mujoco_sim/v2/sync.pb.h>
+#include <mujoco_sim/v3/sync.pb.h>
 
 namespace mujoco_sim::server {
 
@@ -19,12 +20,24 @@ struct SensorRuntimePublisher {
 };
 
 struct SensorRuntimeTestHooks {
+  SensorRuntimeTestHooks(
+      std::function<SensorRuntimePublisher(const std::string&)> publisher = {},
+      std::function<void(const std::string&)> capture = {},
+      std::function<void(const std::string&)> blocking_wait = {},
+      std::function<void(mujoco_sim::v3::StreamFrameHeader*)> serialize = {},
+      std::function<void(const std::string&)> initialize = {})
+      : make_publisher(std::move(publisher)),
+        before_capture(std::move(capture)),
+        on_blocking_wait_started(std::move(blocking_wait)),
+        before_serialize(std::move(serialize)),
+        before_initialize(std::move(initialize)) {}
+
   std::function<SensorRuntimePublisher(const std::string& topic)>
       make_publisher;
   std::function<void(const std::string& source_name)> before_capture;
   std::function<void(const std::string& source_name)>
       on_blocking_wait_started;
-  std::function<void(mujoco_sim::v2::StreamFrameHeader*)>
+  std::function<void(mujoco_sim::v3::StreamFrameHeader*)>
       before_serialize;
   std::function<void(const std::string& source_name)> before_initialize;
 };
@@ -45,9 +58,9 @@ class SensorRuntime {
   void RequestStop();
   void Stop();
 
-  mujoco_sim::v2::GetSensorStreamsResponse GetCatalog(
-      const mujoco_sim::v2::GetSensorStreamsRequest& request) const;
-  void AppendStatus(mujoco_sim::v2::ServerStatus* status) const;
+  mujoco_sim::v3::GetSensorStreamsResponse GetCatalog(
+      const mujoco_sim::v3::GetSensorStreamsRequest& request) const;
+  void AppendStatus(mujoco_sim::v3::ServerStatus* status) const;
 
  private:
   struct Impl;

@@ -15,13 +15,11 @@ namespace mujoco_sim::adapter_sdk {
 namespace {
 
 bool HasExpectedStreamIdentity(
-    const mujoco_sim::v2::StreamFrameHeader& header,
+    const mujoco_sim::v3::StreamFrameHeader& header,
     const SensorStreamOptions& options, std::uint64_t epoch,
     std::string* error_message) {
-  const auto& common = header.header();
-  if (common.server_name() == options.server_name && common.epoch() == epoch &&
-      common.protocol_major() == mujoco_sim::protocol::kProtocolMajor &&
-      common.protocol_minor() == mujoco_sim::protocol::kProtocolMinor) {
+  (void)options;
+  if (header.epoch() == epoch) {
     return true;
   }
   *error_message = "sensor stream frame identity mismatch";
@@ -29,8 +27,8 @@ bool HasExpectedStreamIdentity(
 }
 
 bool HasExpectedStreamShape(
-    const mujoco_sim::v2::StreamFrameHeader& header,
-    const mujoco_sim::v2::StreamDescriptor& descriptor,
+    const mujoco_sim::v3::StreamFrameHeader& header,
+    const mujoco_sim::v3::StreamDescriptor& descriptor,
     const std::string& stream_name, std::string* error_message) {
   if (header.stream_name() != stream_name ||
       header.stream_name() != descriptor.name()) {
@@ -55,8 +53,8 @@ bool HasExpectedStreamShape(
 }
 
 bool HasExpectedStreamPayload(
-    const mujoco_sim::v2::StreamFrameHeader& header,
-    const mujoco_sim::v2::StreamDescriptor& descriptor,
+    const mujoco_sim::v3::StreamFrameHeader& header,
+    const mujoco_sim::v3::StreamDescriptor& descriptor,
     std::size_t payload_size, std::string* error_message) {
   const std::uint64_t expected =
       static_cast<std::uint64_t>(descriptor.row_stride_bytes()) *
@@ -122,7 +120,7 @@ void SensorStreamClient::Impl::HandleStatusBytes(const void* data,
       size > static_cast<std::size_t>(std::numeric_limits<int>::max())) {
     return;
   }
-  mujoco_sim::v2::ServerStatus status;
+  mujoco_sim::v3::ServerStatus status;
   if (!status.ParseFromArray(data, static_cast<int>(size))) {
     return;
   }
@@ -131,9 +129,9 @@ void SensorStreamClient::Impl::HandleStatusBytes(const void* data,
   {
     std::lock_guard lock(mutex_);
     if (!CanAcceptStatusLocked(status)) return;
-    last_status_tick_id_ = status.header().tick_id();
+    last_status_tick_id_ = status.tick_id();
     terminal_error_recorded = ApplyGlobalStatusLocked(status);
-    if (status.state() != mujoco_sim::v2::STOPPED) {
+    if (status.state() != mujoco_sim::v3::STOPPED) {
       terminal_error_recorded =
           ApplyStreamErrorsLocked(status) || terminal_error_recorded;
     }
@@ -144,27 +142,23 @@ void SensorStreamClient::Impl::HandleStatusBytes(const void* data,
 }
 
 bool SensorStreamClient::Impl::CanAcceptStatusLocked(
-    const mujoco_sim::v2::ServerStatus& status) const {
-  const auto& header = status.header();
+    const mujoco_sim::v3::ServerStatus& status) const {
   const bool expected =
       phase_ == Phase::kActive && !stop_requested_ &&
-      header.server_name() == options_.server_name &&
-      header.epoch() == discovery_.epoch() &&
-      header.protocol_major() == mujoco_sim::protocol::kProtocolMajor &&
-      header.protocol_minor() == mujoco_sim::protocol::kProtocolMinor;
+      status.epoch() == discovery_.epoch();
   return expected &&
          (!last_status_tick_id_.has_value() ||
-          header.tick_id() >= *last_status_tick_id_);
+          status.tick_id() >= *last_status_tick_id_);
 }
 
 bool SensorStreamClient::Impl::ApplyGlobalStatusLocked(
-    const mujoco_sim::v2::ServerStatus& status) {
-  if (status.state() == mujoco_sim::v2::STOPPED) {
+    const mujoco_sim::v3::ServerStatus& status) {
+  if (status.state() == mujoco_sim::v3::STOPPED) {
     phase_ = Phase::kStopped;
     stop_requested_ = true;
     return true;
   }
-  if (status.state() != mujoco_sim::v2::ERROR_PAUSED) return false;
+  if (status.state() != mujoco_sim::v3::ERROR_PAUSED) return false;
 
   const std::string error = status.message().empty()
                                 ? "server entered ERROR_PAUSED"
@@ -181,12 +175,12 @@ bool SensorStreamClient::Impl::ApplyGlobalStatusLocked(
 }
 
 bool SensorStreamClient::Impl::ApplyStreamErrorsLocked(
-    const mujoco_sim::v2::ServerStatus& status) {
+    const mujoco_sim::v3::ServerStatus& status) {
   bool changed = false;
   for (const auto& stream_status : status.streams()) {
     const auto found = streams_.find(stream_status.name());
     if (found == streams_.end() ||
-        stream_status.state() != mujoco_sim::v2::STREAM_ERROR ||
+        stream_status.state() != mujoco_sim::v3::STREAM_ERROR ||
         !found->second->terminal_error.empty()) {
       continue;
     }
@@ -321,7 +315,7 @@ SampleWaitResult SensorStreamClient::WaitForSample(
 
 void SensorStreamClient::Stop() { impl_->Stop(); }
 
-std::optional<mujoco_sim::v2::StreamDescriptor>
+std::optional<mujoco_sim::v3::StreamDescriptor>
 SensorStreamClient::descriptor(const std::string& stream_name) const {
   return impl_->descriptor(stream_name);
 }
@@ -336,7 +330,7 @@ std::string SensorStreamClient::stream_diagnostic(
   return impl_->stream_diagnostic(stream_name);
 }
 
-const mujoco_sim::v2::GetSensorStreamsResponse&
+const mujoco_sim::v3::GetSensorStreamsResponse&
 SensorStreamClient::discovery() const {
   return impl_->discovery_;
 }

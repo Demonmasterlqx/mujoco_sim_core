@@ -14,9 +14,10 @@ using namespace std::chrono_literals;
 
 CommitEvent Commit(std::uint64_t tick_id, std::size_t payload_bytes = 0) {
   CommitEvent event;
-  event.message.mutable_header()->set_tick_id(tick_id);
+  event.message.identity.tick_id = tick_id;
   if (payload_bytes > 0) {
-    event.message.set_adapter_id(std::string(payload_bytes, 'a'));
+    event.message.commands.resize(
+        (payload_bytes + sizeof(double) - 1) / sizeof(double));
   }
   return event;
 }
@@ -30,7 +31,7 @@ TEST(ServerEventQueueTest, PreservesFifoOrderAndBatchLimit) {
   const auto first = queue.WaitUntil(std::chrono::steady_clock::now());
   ASSERT_EQ(first.size(), ServerEventQueue::kMaxBatchSize);
   for (std::size_t i = 0; i < first.size(); ++i) {
-    EXPECT_EQ(std::get<CommitEvent>(first[i]).message.header().tick_id(), i);
+    EXPECT_EQ(std::get<CommitEvent>(first[i]).message.identity.tick_id, i);
   }
   EXPECT_EQ(queue.size(), 2U);
 }
@@ -69,7 +70,7 @@ TEST(ServerEventQueueTest, CloseRejectsInputAndCompletesQueuedRpc) {
   queue.Close("test shutdown");
 
   ASSERT_EQ(response.wait_for(1s), std::future_status::ready);
-  EXPECT_EQ(response.get().code(), mujoco_sim::v2::INTERNAL_ERROR);
+  EXPECT_EQ(response.get().code(), mujoco_sim::v3::INTERNAL_ERROR);
   EXPECT_TRUE(queue.closed());
   EXPECT_FALSE(queue.TryPush(Commit(1)));
   EXPECT_EQ(queue.payload_bytes(), 0U);

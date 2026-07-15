@@ -4,7 +4,8 @@
 #include <future>
 #include <variant>
 
-#include <mujoco_sim/v2/sync.pb.h>
+#include <mujoco_sim/core/domain.hpp>
+#include <mujoco_sim/v3/sync.pb.h>
 
 namespace mujoco_sim::server {
 
@@ -17,33 +18,38 @@ struct RpcEvent {
 };
 
 using GetAvailableResourcesEvent =
-    RpcEvent<mujoco_sim::v2::GetAvailableResourcesRequest,
-             mujoco_sim::v2::GetAvailableResourcesResponse>;
+    RpcEvent<mujoco_sim::v3::GetAvailableResourcesRequest,
+             mujoco_sim::v3::GetAvailableResourcesResponse>;
 using RegisterAdapterEvent =
-    RpcEvent<mujoco_sim::v2::RegisterAdapterRequest,
-             mujoco_sim::v2::RegisterAdapterResponse>;
+    RpcEvent<mujoco_sim::v3::RegisterAdapterRequest,
+             mujoco_sim::v3::RegisterAdapterResponse>;
 using ActivateAdapterEvent =
-    RpcEvent<mujoco_sim::v2::ActivateAdapterRequest,
-             mujoco_sim::v2::ActivateAdapterResponse>;
+    RpcEvent<mujoco_sim::v3::ActivateAdapterRequest,
+             mujoco_sim::v3::ActivateAdapterResponse>;
 using UnregisterAdapterEvent =
-    RpcEvent<mujoco_sim::v2::UnregisterAdapterRequest,
-             mujoco_sim::v2::UnregisterAdapterResponse>;
+    RpcEvent<mujoco_sim::v3::UnregisterAdapterRequest,
+             mujoco_sim::v3::UnregisterAdapterResponse>;
 using GetSensorStreamsEvent =
-    RpcEvent<mujoco_sim::v2::GetSensorStreamsRequest,
-             mujoco_sim::v2::GetSensorStreamsResponse>;
+    RpcEvent<mujoco_sim::v3::GetSensorStreamsRequest,
+             mujoco_sim::v3::GetSensorStreamsResponse>;
 
 struct CommitEvent {
-  mujoco_sim::v2::AdapterCommit message;
+  mujoco_sim::core::AdapterCommit message;
 };
 
 struct HeartbeatEvent {
-  mujoco_sim::v2::AdapterHeartbeat message;
+  mujoco_sim::core::AdapterHeartbeat message;
+};
+
+struct ControllerFaultEvent {
+  mujoco_sim::core::ControllerFault message;
 };
 
 using ServerEvent =
     std::variant<GetAvailableResourcesEvent, RegisterAdapterEvent,
                  ActivateAdapterEvent, UnregisterAdapterEvent,
-                 GetSensorStreamsEvent, CommitEvent, HeartbeatEvent>;
+                 GetSensorStreamsEvent, CommitEvent, HeartbeatEvent,
+                 ControllerFaultEvent>;
 
 std::size_t EventPayloadBytes(const ServerEvent& event);
 void CancelRpcEvent(ServerEvent* event, const char* reason);

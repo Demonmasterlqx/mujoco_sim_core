@@ -13,8 +13,8 @@
 namespace mujoco_sim::core::internal {
 namespace {
 
-using mujoco_sim::v2::COMMAND_ACTUATOR;
-using mujoco_sim::v2::OBSERVATION_SENSOR;
+using mujoco_sim::core::COMMAND_ACTUATOR;
+using mujoco_sim::core::OBSERVATION_SENSOR;
 
 enum class SensorQuantity { kPosition, kVelocity, kForce };
 
@@ -298,13 +298,13 @@ std::string SensorFrameId(const mjModel* model, int sensor_id) {
 
 }  // namespace
 
-const mujoco_sim::v2::ResourceDescriptor* ResourceCatalog::FindObservation(
+const mujoco_sim::core::ResourceDescriptor* ResourceCatalog::FindObservation(
     const std::string& name) const {
   const auto found = observations_by_name_.find(name);
   return found == observations_by_name_.end() ? nullptr : &found->second;
 }
 
-const mujoco_sim::v2::ResourceDescriptor* ResourceCatalog::FindCommand(
+const mujoco_sim::core::ResourceDescriptor* ResourceCatalog::FindCommand(
     const std::string& name) const {
   const auto found = commands_by_name_.find(name);
   return found == commands_by_name_.end() ? nullptr : &found->second;
@@ -318,7 +318,7 @@ ResourceCatalog ResourceCatalog::Build(const mjModel& model) {
       continue;
     }
 
-    mujoco_sim::v2::ResourceDescriptor descriptor;
+    mujoco_sim::core::ResourceDescriptor descriptor;
     descriptor.set_name(name);
     descriptor.set_type(OBSERVATION_SENSOR);
     descriptor.set_dimension(
@@ -355,7 +355,7 @@ ResourceCatalog ResourceCatalog::Build(const mjModel& model) {
       continue;
     }
 
-    mujoco_sim::v2::ResourceDescriptor descriptor;
+    mujoco_sim::core::ResourceDescriptor descriptor;
     descriptor.set_name(name);
     descriptor.set_type(COMMAND_ACTUATOR);
     descriptor.set_dimension(1);

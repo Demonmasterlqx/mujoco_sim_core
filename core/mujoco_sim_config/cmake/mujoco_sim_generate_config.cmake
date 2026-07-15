@@ -124,6 +124,9 @@ function(mujoco_sim_generate_config)
     "${generated_header}" "${generated_source}"
     PROPERTIES GENERATED TRUE
   )
+  set_source_files_properties("${generated_source}" PROPERTIES
+    COMPILE_OPTIONS "-w"
+  )
 
   if(MUJOCO_CONFIG_OWNER_TARGET)
     target_sources("${MUJOCO_CONFIG_OWNER_TARGET}" PRIVATE

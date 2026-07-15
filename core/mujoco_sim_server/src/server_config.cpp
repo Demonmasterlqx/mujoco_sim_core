@@ -9,7 +9,7 @@
 #include <vector>
 
 #include <mujoco_sim/protocol/identifier.hpp>
-#include <mujoco_sim/v2/sync.pb.h>
+#include <mujoco_sim/v3/sync.pb.h>
 #if MUJOCO_SIM_HAS_SENSOR_STREAMS
 #include <mujoco_sim/sensor/source_profile.hpp>
 #endif
@@ -149,11 +149,11 @@ std::string ToPublicFifoOverflow(
   return value == Overflow::kDropNewest ? "drop_newest" : "drop_oldest";
 }
 
-mujoco_sim::v2::StreamFormat StreamFormatForKind(const std::string& kind) {
-  if (kind == "rgb") return mujoco_sim::v2::RGB8;
-  if (kind == "depth") return mujoco_sim::v2::DEPTH32F;
-  if (kind == "segmentation") return mujoco_sim::v2::SEGMENTATION32U;
-  return mujoco_sim::v2::XYZ32F;
+mujoco_sim::v3::StreamFormat StreamFormatForKind(const std::string& kind) {
+  if (kind == "rgb") return mujoco_sim::v3::RGB8;
+  if (kind == "depth") return mujoco_sim::v3::DEPTH32F;
+  if (kind == "segmentation") return mujoco_sim::v3::SEGMENTATION32U;
+  return mujoco_sim::v3::XYZ32F;
 }
 
 generated::ServerConfig ToGenerated(const ServerConfig& config) {
@@ -163,10 +163,25 @@ generated::ServerConfig ToGenerated(const ServerConfig& config) {
   output.initial_keyframe = config.initial_keyframe;
   output.max_ticks = config.max_ticks;
   output.tick_timeout_ms = config.tick_timeout_ms;
+  output.session_timeout_ms = config.session_timeout_ms;
+  output.controller_heartbeat_period_ms =
+      config.controller_heartbeat_period_ms;
+  output.observer_heartbeat_period_ms = config.observer_heartbeat_period_ms;
+  output.tick_retry_initial_ms = config.tick_retry_initial_ms;
+  output.tick_retry_backoff_multiplier = config.tick_retry_backoff_multiplier;
+  output.tick_retry_max_delay_ms = config.tick_retry_max_delay_ms;
+  output.tick_retry_max_attempts = config.tick_retry_max_attempts;
   output.activation_timeout_ms = config.activation_timeout_ms;
   output.allow_timed_out_adapter_replacement =
       config.allow_timed_out_adapter_replacement;
   output.status_period_ms = config.status_period_ms;
+  output.status_min_interval_ms = config.status_min_interval_ms;
+  output.observer_max_rate_hz = config.observer_max_rate_hz;
+  output.allow_every_step_observer = config.allow_every_step_observer;
+  output.transport_subscriber_sample_period_ms =
+      config.transport_subscriber_sample_period_ms;
+  output.sensor_subscriber_sample_period_ms =
+      config.sensor_subscriber_sample_period_ms;
   output.headless = config.headless;
   output.log_level = ToGeneratedLogLevel(config.log_level);
   output.log_file = config.log_file;
@@ -206,10 +221,25 @@ ServerConfig ToPublic(generated::ServerConfig config) {
   output.initial_keyframe = std::move(config.initial_keyframe);
   output.max_ticks = config.max_ticks;
   output.tick_timeout_ms = config.tick_timeout_ms;
+  output.session_timeout_ms = config.session_timeout_ms;
+  output.controller_heartbeat_period_ms =
+      config.controller_heartbeat_period_ms;
+  output.observer_heartbeat_period_ms = config.observer_heartbeat_period_ms;
+  output.tick_retry_initial_ms = config.tick_retry_initial_ms;
+  output.tick_retry_backoff_multiplier = config.tick_retry_backoff_multiplier;
+  output.tick_retry_max_delay_ms = config.tick_retry_max_delay_ms;
+  output.tick_retry_max_attempts = config.tick_retry_max_attempts;
   output.activation_timeout_ms = config.activation_timeout_ms;
   output.allow_timed_out_adapter_replacement =
       config.allow_timed_out_adapter_replacement;
   output.status_period_ms = config.status_period_ms;
+  output.status_min_interval_ms = config.status_min_interval_ms;
+  output.observer_max_rate_hz = config.observer_max_rate_hz;
+  output.allow_every_step_observer = config.allow_every_step_observer;
+  output.transport_subscriber_sample_period_ms =
+      config.transport_subscriber_sample_period_ms;
+  output.sensor_subscriber_sample_period_ms =
+      config.sensor_subscriber_sample_period_ms;
   output.headless = config.headless;
   output.log_level = ToPublicLogLevel(config.log_level);
   output.log_file = std::move(config.log_file).string();
@@ -412,6 +442,37 @@ bool ValidateLogging(const ServerConfig& config, std::string* error_message) {
   }
   if (config.activation_timeout_ms == 0) {
     *error_message = "activation_timeout_ms must be >= 1";
+    return false;
+  }
+  if (config.session_timeout_ms == 0 ||
+      config.controller_heartbeat_period_ms == 0 ||
+      config.observer_heartbeat_period_ms == 0 ||
+      config.controller_heartbeat_period_ms > config.session_timeout_ms / 3 ||
+      config.observer_heartbeat_period_ms > config.session_timeout_ms / 3) {
+    *error_message =
+        "heartbeat periods must be positive and no greater than one third "
+        "of session_timeout_ms";
+    return false;
+  }
+  if (config.tick_retry_initial_ms == 0 ||
+      config.tick_retry_max_delay_ms < config.tick_retry_initial_ms ||
+      !std::isfinite(config.tick_retry_backoff_multiplier) ||
+      config.tick_retry_backoff_multiplier < 1.0 ||
+      config.tick_retry_max_delay_ms > config.tick_timeout_ms) {
+    *error_message = "Tick retry configuration is invalid";
+    return false;
+  }
+  if (config.status_period_ms == 0 || config.status_min_interval_ms == 0 ||
+      config.status_min_interval_ms > config.status_period_ms) {
+    *error_message =
+        "status_min_interval_ms must be in [1, status_period_ms]";
+    return false;
+  }
+  if (!std::isfinite(config.observer_max_rate_hz) ||
+      config.observer_max_rate_hz <= 0.0 ||
+      config.transport_subscriber_sample_period_ms == 0 ||
+      config.sensor_subscriber_sample_period_ms == 0) {
+    *error_message = "message-rate configuration is invalid";
     return false;
   }
   return ValidateSensorStreams(config, error_message);

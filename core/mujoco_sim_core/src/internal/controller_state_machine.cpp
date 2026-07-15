@@ -4,33 +4,33 @@
 
 namespace mujoco_sim::core::internal {
 
-mujoco_sim::v2::ControllerState WireState(ControllerPhase phase) noexcept {
+mujoco_sim::core::ControllerState WireState(ControllerPhase phase) noexcept {
   switch (phase) {
     case ControllerPhase::kProvisional:
-      return mujoco_sim::v2::PROVISIONAL;
+      return mujoco_sim::core::PROVISIONAL;
     case ControllerPhase::kActive:
-      return mujoco_sim::v2::ACTIVE;
+      return mujoco_sim::core::ACTIVE;
     case ControllerPhase::kTimedOutAwaitingProof:
     case ControllerPhase::kRecoveryPending:
-      return mujoco_sim::v2::TIMED_OUT;
+      return mujoco_sim::core::TIMED_OUT;
     case ControllerPhase::kError:
-      return mujoco_sim::v2::ERROR;
+      return mujoco_sim::core::ERROR;
   }
-  return mujoco_sim::v2::CONTROLLER_STATE_UNSPECIFIED;
+  return mujoco_sim::core::CONTROLLER_STATE_UNSPECIFIED;
 }
 
-mujoco_sim::v2::ControllerState WireState(ObserverPhase phase) noexcept {
+mujoco_sim::core::ControllerState WireState(ObserverPhase phase) noexcept {
   switch (phase) {
     case ObserverPhase::kProvisional:
-      return mujoco_sim::v2::PROVISIONAL;
+      return mujoco_sim::core::PROVISIONAL;
     case ObserverPhase::kActive:
-      return mujoco_sim::v2::ACTIVE;
+      return mujoco_sim::core::ACTIVE;
     case ObserverPhase::kTimedOut:
-      return mujoco_sim::v2::TIMED_OUT;
+      return mujoco_sim::core::TIMED_OUT;
     case ObserverPhase::kError:
-      return mujoco_sim::v2::ERROR;
+      return mujoco_sim::core::ERROR;
   }
-  return mujoco_sim::v2::CONTROLLER_STATE_UNSPECIFIED;
+  return mujoco_sim::core::CONTROLLER_STATE_UNSPECIFIED;
 }
 
 bool ControllerStateMachine::CanActivate(ControllerPhase phase) noexcept {
@@ -59,13 +59,14 @@ bool ControllerStateMachine::Activate(ControllerRecord* controller,
   if (!CanActivate(controller->phase)) return false;
   controller->phase = ControllerPhase::kActive;
   controller->state_since_tick = tick_id;
+  controller->last_presence_at = std::chrono::steady_clock::now();
   controller->message.clear();
   return true;
 }
 
 bool ControllerStateMachine::AcceptRecoveryProof(
     ControllerRecord* controller,
-    const mujoco_sim::v2::AdapterCommit& commit) {
+    const mujoco_sim::core::AdapterCommit& commit) {
   if (!AcceptsRecoveryCommit(controller->phase)) return false;
   controller->phase = ControllerPhase::kRecoveryPending;
   controller->recovery_proof = commit;
@@ -79,6 +80,7 @@ bool ControllerStateMachine::ActivateRecovered(ControllerRecord* controller,
   if (controller->phase != ControllerPhase::kRecoveryPending) return false;
   controller->phase = ControllerPhase::kActive;
   controller->state_since_tick = tick_id;
+  controller->last_presence_at = std::chrono::steady_clock::now();
   controller->message.clear();
   return true;
 }

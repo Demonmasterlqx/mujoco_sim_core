@@ -2,7 +2,7 @@
 <package format="3">
   <name>mujoco_sim_sample_adapter</name>
   <version>0.1.0</version>
-  <description>Sample controller adapter for the V2 MuJoCo simulator SDK.</description>
+  <description>Sample controller adapter for the V3 MuJoCo simulator SDK.</description>
   <maintainer email="pnx@example.com">pnx</maintainer>
   <license>Apache-2.0</license>
 

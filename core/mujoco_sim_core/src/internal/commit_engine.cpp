@@ -1,75 +1,61 @@
 #include "simulation_core_impl.hpp"
 
 #include <cmath>
-#include <map>
-#include <set>
+#include <bit>
 #include <string>
 #include <utility>
 #include <vector>
 
-#include <mujoco_sim/protocol/topics.hpp>
 
 namespace mujoco_sim::core {
 namespace {
 
-using mujoco_sim::v2::ACTIVE;
-using mujoco_sim::v2::ERROR;
-using mujoco_sim::v2::ERROR_PAUSED;
-using mujoco_sim::v2::FAILED_PRECONDITION;
-using mujoco_sim::v2::INVALID_ARGUMENT;
-using mujoco_sim::v2::INVALID_COMMAND;
-using mujoco_sim::v2::INVALID_EPOCH;
-using mujoco_sim::v2::INVALID_SESSION;
-using mujoco_sim::v2::INVALID_TICK;
-using mujoco_sim::v2::NOT_FOUND;
-using mujoco_sim::v2::TIMED_OUT;
-using mujoco_sim::v2::VERSION_MISMATCH;
+using mujoco_sim::core::ACTIVE;
+using mujoco_sim::core::ERROR;
+using mujoco_sim::core::ERROR_PAUSED;
+using mujoco_sim::core::FAILED_PRECONDITION;
+using mujoco_sim::core::INVALID_ARGUMENT;
+using mujoco_sim::core::INVALID_COMMAND;
+using mujoco_sim::core::INVALID_EPOCH;
+using mujoco_sim::core::INVALID_SESSION;
+using mujoco_sim::core::INVALID_TICK;
+using mujoco_sim::core::TIMED_OUT;
+using mujoco_sim::core::VERSION_MISMATCH;
 using internal::ControllerStateMachine;
 
-bool SameCommandPayload(
-    const google::protobuf::RepeatedPtrField<
-        mujoco_sim::v2::ActuatorCommandBlock>& lhs,
-    const google::protobuf::RepeatedPtrField<
-        mujoco_sim::v2::ActuatorCommandBlock>& rhs) {
+bool SameCommandPayload(const std::vector<double>& lhs,
+                        const std::vector<double>& rhs) {
   if (lhs.size() != rhs.size()) return false;
-  std::map<std::string, std::vector<double>> lhs_by_name;
-  for (const auto& command : lhs) {
-    lhs_by_name.emplace(command.name(),
-                        std::vector<double>(command.values().begin(),
-                                            command.values().end()));
+  for (std::size_t index = 0; index < lhs.size(); ++index) {
+    if (std::bit_cast<std::uint64_t>(lhs[index]) !=
+        std::bit_cast<std::uint64_t>(rhs[index])) {
+      return false;
+    }
   }
-  std::map<std::string, std::vector<double>> rhs_by_name;
-  for (const auto& command : rhs) {
-    rhs_by_name.emplace(command.name(),
-                        std::vector<double>(command.values().begin(),
-                                            command.values().end()));
-  }
-  return lhs_by_name == rhs_by_name;
+  return true;
 }
 
-bool SameCommitPayload(const mujoco_sim::v2::AdapterCommit& lhs,
-                       const mujoco_sim::v2::AdapterCommit& rhs) {
-  return lhs.status() == rhs.status() &&
-         lhs.error_message() == rhs.error_message() &&
-         SameCommandPayload(lhs.commands(), rhs.commands());
+bool SameCommitPayload(const mujoco_sim::core::AdapterCommit& lhs,
+                       const mujoco_sim::core::AdapterCommit& rhs) {
+  return SameCommandPayload(lhs.commands, rhs.commands);
 }
 
 
 }  // namespace
 
 EngineResult<CommitReceipt> SimulationCore::Impl::DoSubmitCommit(
-    const mujoco_sim::v2::AdapterCommit& commit) {
+    const mujoco_sim::core::AdapterCommit& commit) {
   EngineResult<CommitReceipt> result;
   if (server_state_ == ERROR_PAUSED) {
     result.response.code = FAILED_PRECONDITION;
     result.response.message = "server is error-paused";
     return result;
   }
-  Controller* controller =
-      adapter_registry_->FindController(commit.adapter_id());
+  Controller* controller = adapter_registry_->FindControllerBySession(
+      commit.identity.session.session_id);
   if (controller == nullptr) {
-    result.response.code = NOT_FOUND;
-    result.response.message = "controller is not registered";
+    result.response.code = INVALID_SESSION;
+    result.response.message = "controller session is not registered";
     return result;
   }
   if (!ValidateCommitEnvelope(*controller, commit, &result)) return result;
@@ -80,27 +66,48 @@ EngineResult<CommitReceipt> SimulationCore::Impl::DoSubmitCommit(
   return HandleActiveCommit(controller, commit);
 }
 
+EngineResult<CommitReceipt> SimulationCore::Impl::DoSubmitFault(
+    const ControllerFault& fault) {
+  EngineResult<CommitReceipt> result;
+  Controller* controller = adapter_registry_->FindControllerBySession(
+      fault.identity.session.session_id);
+  if (controller == nullptr) {
+    result.response.code = INVALID_SESSION;
+    result.response.message = "controller session is not registered";
+    return result;
+  }
+  if (fault.identity.session.epoch != epoch_) {
+    result.response.code = INVALID_EPOCH;
+    result.response.message = "epoch mismatch";
+    return result;
+  }
+  if (fault.identity.tick_id != current_tick_id_ ||
+      fault.identity.layout != controller->layout.fingerprint) {
+    result.response.code = INVALID_TICK;
+    result.response.message = "fault identity mismatch";
+    return result;
+  }
+  result.effects.step_completed = EnterControllerError(controller, fault.message);
+  result.response.code = INVALID_COMMAND;
+  result.response.message = controller->message;
+  RecordCommitChange(&result, AdapterChangeKind::kLocalError, *controller,
+                     ACTIVE, ERROR);
+  return result;
+}
+
 bool SimulationCore::Impl::ValidateCommitEnvelope(
     const Controller& controller,
-    const mujoco_sim::v2::AdapterCommit& commit,
+    const mujoco_sim::core::AdapterCommit& commit,
     EngineResult<CommitReceipt>* result) const {
-  const auto& header = commit.header();
-  if (header.server_name() != options_.server_name) {
-    result->response.code = INVALID_ARGUMENT;
-    result->response.message = "server name mismatch";
-  } else if (header.session_id() != controller.session_id) {
+  if (commit.identity.session.session_id != controller.session_id) {
     result->response.code = INVALID_SESSION;
     result->response.message = "session mismatch";
-  } else if (header.epoch() != epoch_) {
+  } else if (commit.identity.session.epoch != epoch_) {
     result->response.code = INVALID_EPOCH;
     result->response.message = "epoch mismatch";
-  } else if (header.protocol_major() !=
-             mujoco_sim::protocol::kProtocolMajor) {
-    result->response.code = VERSION_MISMATCH;
-    result->response.message = "protocol major mismatch";
-  } else if (header.protocol_minor() != controller.protocol_minor) {
-    result->response.code = VERSION_MISMATCH;
-    result->response.message = "protocol minor mismatch";
+  } else if (commit.identity.layout != controller.layout.fingerprint) {
+    result->response.code = INVALID_ARGUMENT;
+    result->response.message = "layout fingerprint mismatch";
   } else {
     return true;
   }
@@ -108,12 +115,13 @@ bool SimulationCore::Impl::ValidateCommitEnvelope(
 }
 
 EngineResult<CommitReceipt> SimulationCore::Impl::HandleRecoveryCommit(
-    Controller* controller, const mujoco_sim::v2::AdapterCommit& commit) {
+    Controller* controller, const mujoco_sim::core::AdapterCommit& commit) {
   EngineResult<CommitReceipt> result;
-  const std::uint64_t tick_id = commit.header().tick_id();
+  const std::uint64_t tick_id = commit.identity.tick_id;
   if (controller->recovery_proof &&
-      tick_id == controller->recovery_proof->header().tick_id()) {
+      tick_id == controller->recovery_proof->identity.tick_id) {
     if (SameCommitPayload(commit, *controller->recovery_proof)) {
+      controller->last_presence_at = std::chrono::steady_clock::now();
       result.response.duplicate = true;
       result.response.message = "duplicate recovery commit ignored";
       return result;
@@ -129,16 +137,10 @@ EngineResult<CommitReceipt> SimulationCore::Impl::HandleRecoveryCommit(
   if (tick_id < controller->timed_out_since_tick ||
       !controller->last_tick_sent || tick_id > *controller->last_tick_sent ||
       (controller->recovery_proof &&
-       tick_id <= controller->recovery_proof->header().tick_id())) {
+       tick_id <= controller->recovery_proof->identity.tick_id)) {
     result.response.code = INVALID_TICK;
     result.response.message =
         "commit does not match a new Tick issued for recovery";
-    return result;
-  }
-  if (commit.status() != mujoco_sim::v2::COMMIT_OK) {
-    result.response.code = INVALID_COMMAND;
-    result.response.message =
-        "timed-out controller did not report a valid commit";
     return result;
   }
   if (!ValidateCommands(*controller, commit, &result.response.message)) {
@@ -146,22 +148,23 @@ EngineResult<CommitReceipt> SimulationCore::Impl::HandleRecoveryCommit(
     return result;
   }
   ControllerStateMachine::AcceptRecoveryProof(controller, commit);
+  controller->last_presence_at = std::chrono::steady_clock::now();
   result.response.message = controller->message;
   RecordCommitChange(&result, AdapterChangeKind::kRecoveryPending,
                      *controller, TIMED_OUT, TIMED_OUT);
-  result.effects.status_changed = true;
+  result.effects.status_urgency = EngineEffects::StatusUrgency::kLifecycle;
   return result;
 }
 
 EngineResult<CommitReceipt> SimulationCore::Impl::HandleActiveCommit(
-    Controller* controller, const mujoco_sim::v2::AdapterCommit& commit) {
+    Controller* controller, const mujoco_sim::core::AdapterCommit& commit) {
   if (!ControllerStateMachine::AcceptsBarrierCommit(controller->phase)) {
     CommitReceipt receipt;
     receipt.code = FAILED_PRECONDITION;
     receipt.message = "controller is not active";
     return {std::move(receipt), {}};
   }
-  if (commit.header().tick_id() < current_tick_id_) {
+  if (commit.identity.tick_id < current_tick_id_) {
     return HandleStaleCommit(controller, commit);
   }
   if (auto error = ValidateCurrentCommitContext(*controller, commit)) {
@@ -176,10 +179,9 @@ EngineResult<CommitReceipt> SimulationCore::Impl::HandleActiveCommit(
 }
 
 EngineResult<CommitReceipt> SimulationCore::Impl::HandleStaleCommit(
-    Controller* controller, const mujoco_sim::v2::AdapterCommit& commit) {
+    Controller* controller, const mujoco_sim::core::AdapterCommit& commit) {
   if (!controller->last_commit ||
-      commit.header().tick_id() !=
-          controller->last_commit->header().tick_id()) {
+      commit.identity.tick_id != controller->last_commit->identity.tick_id) {
     CommitReceipt receipt;
     receipt.code = INVALID_TICK;
     receipt.message = "stale commit cannot be verified";
@@ -189,6 +191,7 @@ EngineResult<CommitReceipt> SimulationCore::Impl::HandleStaleCommit(
     return RejectActiveCommit(
         controller, "stale duplicate commit payload mismatch");
   }
+  controller->last_presence_at = std::chrono::steady_clock::now();
   CommitReceipt receipt;
   receipt.duplicate = true;
   receipt.message = "stale duplicate commit ignored";
@@ -198,9 +201,9 @@ EngineResult<CommitReceipt> SimulationCore::Impl::HandleStaleCommit(
 std::optional<CommitReceipt>
 SimulationCore::Impl::ValidateCurrentCommitContext(
     const Controller& controller,
-    const mujoco_sim::v2::AdapterCommit& commit) const {
+    const mujoco_sim::core::AdapterCommit& commit) const {
   CommitReceipt error;
-  if (commit.header().tick_id() > current_tick_id_) {
+  if (commit.identity.tick_id > current_tick_id_) {
     error.code = INVALID_TICK;
     error.message = "tick mismatch";
   } else if (!tick_open_) {
@@ -209,10 +212,11 @@ SimulationCore::Impl::ValidateCurrentCommitContext(
   } else if (!barrier_coordinator_->IsRequired(controller.id)) {
     error.code = FAILED_PRECONDITION;
     error.message = "controller joins the barrier on the next Tick";
-  } else if (!ValidateCommonHeader(commit.header(), controller,
-                                   &error.message)) {
-    error.code = error.message == "tick mismatch" ? INVALID_TICK
-                                                   : INVALID_ARGUMENT;
+  } else if (commit.identity.session.session_id != controller.session_id ||
+             commit.identity.session.epoch != epoch_ ||
+             commit.identity.tick_id != current_tick_id_) {
+    error.code = INVALID_TICK;
+    error.message = "tick identity mismatch";
   } else {
     return std::nullopt;
   }
@@ -220,11 +224,12 @@ SimulationCore::Impl::ValidateCurrentCommitContext(
 }
 
 EngineResult<CommitReceipt> SimulationCore::Impl::HandlePendingCommit(
-    Controller* controller, const mujoco_sim::v2::AdapterCommit& commit,
-    const mujoco_sim::v2::AdapterCommit& pending) {
+    Controller* controller, const mujoco_sim::core::AdapterCommit& commit,
+    const mujoco_sim::core::AdapterCommit& pending) {
   if (!SameCommitPayload(commit, pending)) {
     return RejectActiveCommit(controller, "duplicate commit payload mismatch");
   }
+  controller->last_presence_at = std::chrono::steady_clock::now();
   CommitReceipt receipt;
   receipt.duplicate = true;
   receipt.message = "duplicate commit ignored";
@@ -243,20 +248,17 @@ EngineResult<CommitReceipt> SimulationCore::Impl::RejectActiveCommit(
 }
 
 EngineResult<CommitReceipt> SimulationCore::Impl::AcceptActiveCommit(
-    Controller* controller, const mujoco_sim::v2::AdapterCommit& commit) {
-  if (commit.status() != mujoco_sim::v2::COMMIT_OK) {
-    return RejectActiveCommit(
-        controller,
-        "controller reported commit error: " + commit.error_message());
-  }
+    Controller* controller, const mujoco_sim::core::AdapterCommit& commit) {
   std::string message;
   if (!ValidateCommands(*controller, commit, &message)) {
     return RejectActiveCommit(controller, message);
   }
 
   EngineResult<CommitReceipt> result;
-  barrier_coordinator_->AcceptCommit(controller->id, commit);
+  barrier_coordinator_->AcceptCommit(controller->id, commit,
+                                     controller->layout);
   controller->last_commit = commit;
+  controller->last_presence_at = std::chrono::steady_clock::now();
   if (!barrier_coordinator_->Ready()) {
     result.response.message = "commit accepted";
   } else {
@@ -266,53 +268,37 @@ EngineResult<CommitReceipt> SimulationCore::Impl::AcceptActiveCommit(
                                   ? "barrier complete"
                                   : "commit accepted";
   }
-  result.effects.status_changed = true;
+  result.effects.status_urgency =
+      EngineEffects::StatusUrgency::kPeriodicOnly;
   return result;
 }
 
 
 bool SimulationCore::Impl::ValidateCommands(
     const Controller& controller,
-    const mujoco_sim::v2::AdapterCommit& commit,
+    const mujoco_sim::core::AdapterCommit& commit,
     std::string* message) const {
-  std::set<std::string> expected;
-  for (const auto& command : controller.layout.commands()) {
-    expected.insert(command.name());
-  }
-  std::set<std::string> seen;
-  for (const auto& command : commit.commands()) {
-    if (!expected.contains(command.name())) {
-      *message = "controller submitted unowned actuator: " + command.name();
-      return false;
-    }
-    if (!seen.insert(command.name()).second) {
-      *message = "duplicate actuator command: " + command.name();
-      return false;
-    }
-    if (command.values_size() != 1) {
-      *message = "actuator command must contain exactly one value: " +
-                 command.name();
-      return false;
-    }
-    const double value = command.values(0);
-    if (!std::isfinite(value)) {
-      *message = "actuator command is not finite: " + command.name();
-      return false;
-    }
-    const auto* descriptor = resource_catalog_->FindCommand(command.name());
-    if (descriptor == nullptr) {
-      *message = "controller submitted unknown actuator: " + command.name();
-      return false;
-    }
-    if (descriptor->has_ctrl_range() &&
-        (value < descriptor->ctrl_min() || value > descriptor->ctrl_max())) {
-      *message = "actuator command is outside ctrl range: " + command.name();
-      return false;
-    }
-  }
-  if (seen != expected) {
-    *message = "commit does not include all claimed actuators";
+  if (commit.commands.size() != controller.layout.command_scalar_count) {
+    *message = "commit scalar count does not match layout";
     return false;
+  }
+  for (std::size_t resource = 0;
+       resource < controller.layout.commands_.size(); ++resource) {
+    const auto& descriptor = controller.layout.commands_[resource];
+    const auto& span = controller.layout.command_spans[resource];
+    for (std::uint32_t offset = 0; offset < span.dimension; ++offset) {
+      const double value = commit.commands[span.offset + offset];
+      if (!std::isfinite(value)) {
+        *message = "actuator command is not finite: " + descriptor.name();
+        return false;
+      }
+      if (descriptor.has_ctrl_range() &&
+          (value < descriptor.ctrl_min() || value > descriptor.ctrl_max())) {
+        *message = "actuator command is outside ctrl range: " +
+                   descriptor.name();
+        return false;
+      }
+    }
   }
   return true;
 }
@@ -342,13 +328,13 @@ std::optional<StepCompletedEvent> SimulationCore::Impl::EnterControllerError(
 void SimulationCore::Impl::RecordCommitChange(
     EngineResult<CommitReceipt>* result, AdapterChangeKind kind,
     const Controller& controller,
-    mujoco_sim::v2::ControllerState old_state,
-    mujoco_sim::v2::ControllerState new_state) const {
+    mujoco_sim::core::ControllerState old_state,
+    mujoco_sim::core::ControllerState new_state) const {
   result->effects.adapter_changes.push_back(
-      {kind, controller.id, mujoco_sim::v2::CONTROLLER,
+      {kind, controller.id, mujoco_sim::core::CONTROLLER,
        controller.session_id, std::nullopt, old_state, new_state,
        result->response.message, current_tick_id_});
-  result->effects.status_changed = true;
+  result->effects.status_urgency = EngineEffects::StatusUrgency::kLifecycle;
 }
 
 

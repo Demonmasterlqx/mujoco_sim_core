@@ -5,7 +5,7 @@
 | 包 | 作用 | 文档 |
 |---|---|---|
 | `mujoco_sim_config` | 从 schema 在构建期生成 C++ 配置类型、严格 YAML/CLI 解析器 | [查看](core/mujoco_sim_config/README.md) |
-| `mujoco_sim_protocol` | 定义严格 V2.0 Protobuf/raw stream 协议和带版本的 eCAL 命名规则 | [查看](core/mujoco_sim_protocol/Readme.md) |
+| `mujoco_sim_protocol` | 定义唯一 Protocol V3 控制面、稠密数据面、Sensor framing 和 eCAL 命名规则 | [查看](core/mujoco_sim_protocol/Readme.md) |
 | `mujoco_sim_core` | 管理 MuJoCo 状态、资源所有权和 lockstep 仿真 | [查看](core/mujoco_sim_core/Readme.md) |
 | `mujoco_sim_sensor` | 从隔离 Snapshot 捕获 headless camera 与 360 度 ray LiDAR | [查看](core/mujoco_sim_sensor/README.md) |
 | `mujoco_sim_server` | 提供 eCAL server、配置解析和图形界面 | [查看](core/mujoco_sim_server/Readme.md) |
@@ -16,7 +16,7 @@
 
 ## 构建方式
 
-使用 colcon 作为构建工具。当前 V2 包均为纯 CMake 包：
+使用 colcon 作为构建工具。所有包均为纯 CMake 包：
 
 配置生成依赖 Python 3/PyYAML，生成后的运行时依赖 CLI11 和 yaml-cpp；server 图形界面
 依赖 GLFW 和 libpng。可通过 rosdep 安装，对应 Ubuntu 包包括 `python3-yaml`、
@@ -37,7 +37,7 @@ colcon test-result --verbose
 
 以 `mujoco_sim_core` 为核心，MuJoCo server 掌管整个仿真进程，包括模型加载、仿真进度、仿真时间和 `mj_step()`。
 
-V2 使用 eCAL 作为 IPC 方案。外部控制器通过 adapter 接入，不直接访问 `mjModel` 或 `mjData`。
+Protocol V3 使用 eCAL 作为 IPC 方案。外部控制器通过 adapter 接入，不直接访问 `mjModel` 或 `mjData`。
 
 外部控制器（ROS 2/RTOS/裸机/native C++ 等）通过 adapter 接入。
 
@@ -59,9 +59,22 @@ model_path: robot.xml
 initial_keyframe: ""
 max_ticks: 0
 tick_timeout_ms: 1000
+session_timeout_ms: 1000
 activation_timeout_ms: 5000
+controller_heartbeat_period_ms: 250
+observer_heartbeat_period_ms: 250
+tick_retry_initial_ms: 5
+tick_retry_backoff_multiplier: 2.0
+tick_retry_max_delay_ms: 20
+tick_retry_max_attempts: 3
 allow_timed_out_adapter_replacement: true
 status_period_ms: 100
+status_min_interval_ms: 20
+observer_max_rate_hz: 500
+allow_every_step_observer: false
+transport_subscriber_sample_period_ms: 1000
+sensor_subscriber_sample_period_ms: 200
+log_summary_period_ms: 1000
 headless: false
 render_backend: auto
 sensor_streams: []
@@ -69,7 +82,7 @@ sensor_streams: []
 
 YAML 中的相对路径按配置文件所在目录解析，CLI 路径按进程当前目录解析。使用
 `mujoco-sim-server --config server.yaml` 加载配置；`--model`、`--initial-keyframe`、
-`--server-name`、`--max-ticks`、`--tick-timeout-ms`、`--activation-timeout-ms` 和
+`--server-name`、`--max-ticks`、`--tick-timeout-ms`、`--session-timeout-ms`、`--activation-timeout-ms` 和
 同名超时 adapter 替换开关可以覆盖对应 YAML 字段。默认启动 MuJoCo 官方
 `simulate` 图形界面；远程服务、CI 或无显示环境使用 `--headless`，该模式不会初始化
 GLFW viewer。若配置 camera Stream，sensor worker 仍会初始化 EGL 或 OSMesa offscreen
@@ -79,7 +92,7 @@ OpenGL context。若 YAML 设置了 `headless: true`，可用 `--gui` 在命令�
 渲染选项、传感器和性能面板。UI 不持有也不会修改真实 `mjModel/mjData`，控制器所有权
 和 Tick/Commit Barrier 行为在 GUI 与 headless 模式下完全一致。
 
-## V2 运行示例
+## Protocol V3 运行示例
 
 打开两个终端，并确保当前目录都是仓库根目录。终端 1 先启动 server：
 

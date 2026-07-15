@@ -33,6 +33,7 @@ int main(int argc, char** argv) {
     client.Unregister(&ignored);
     return 1;
   }
+  const demo::StateDecoder decoder(client.layout(), config.interfaces);
   std::cout << "sensor-demo state observer ready adapter="
             << config.observer.observer_id << std::endl;
 
@@ -40,7 +41,7 @@ int main(int argc, char** argv) {
   int result = 0;
   while (!demo::ProcessStopRequested() &&
          (config.max_frames == 0 || frames < config.max_frames)) {
-    mujoco_sim::v2::ObservationFrame frame;
+    mujoco_sim::adapter_sdk::ObservationLease frame;
     const auto wait_result = client.WaitForObservation(
         std::chrono::milliseconds(config.wait_timeout_ms), &frame, &message);
     if (wait_result ==
@@ -56,8 +57,7 @@ int main(int argc, char** argv) {
       break;
     }
     demo::StateSample sample;
-    if (!demo::DecodeStateSample(frame, config.interfaces, &sample,
-                                 &message)) {
+    if (!decoder.Decode(frame, &sample, &message)) {
       std::cerr << "state observation validation failed: " << message << '\n';
       result = 1;
       break;

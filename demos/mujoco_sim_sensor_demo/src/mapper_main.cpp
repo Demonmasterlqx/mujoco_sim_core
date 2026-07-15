@@ -22,13 +22,12 @@ namespace demo = mujoco_sim::sensor_demo;
 
 namespace {
 
-bool AddImuFrame(const mujoco_sim::v2::ObservationFrame& frame,
-                 const std::string& observation_name,
+bool AddImuFrame(const mujoco_sim::adapter_sdk::ObservationLease& frame,
+                 const demo::ImuOrientationDecoder& decoder,
                  demo::ImuSynchronizer* synchronizer,
                  std::string* error_message) {
   demo::ImuOrientationSample sample;
-  if (!demo::DecodeImuOrientation(frame, observation_name, &sample,
-                                  error_message)) {
+  if (!decoder.Decode(frame, &sample, error_message)) {
     return false;
   }
   demo::TimedOrientation timed;
@@ -80,6 +79,8 @@ int main(int argc, char** argv) {
   }
 
   demo::ImuSynchronizer imu(config.observer.queue_capacity);
+  const demo::ImuOrientationDecoder imu_decoder(observer.layout(),
+                                                 config.imu_quaternion);
   demo::SimpleIcpMapper mapper(config.algorithm);
   std::cout << "sensor-demo mapper ready observer="
             << config.observer.observer_id
@@ -90,7 +91,7 @@ int main(int argc, char** argv) {
   try {
     while (!demo::ProcessStopRequested() && scan_accounting.CanStartScan()) {
       while (true) {
-        mujoco_sim::v2::ObservationFrame frame;
+        mujoco_sim::adapter_sdk::ObservationLease frame;
         const auto observation_result = observer.WaitForObservation(
             std::chrono::milliseconds(0), &frame, &message);
         if (observation_result ==
@@ -103,7 +104,7 @@ int main(int argc, char** argv) {
           result = 1;
           break;
         }
-        if (!AddImuFrame(frame, config.imu_quaternion, &imu, &message)) {
+        if (!AddImuFrame(frame, imu_decoder, &imu, &message)) {
           std::cerr << "mapper IMU validation failed: " << message << '\n';
           result = 1;
           break;
@@ -135,14 +136,14 @@ int main(int argc, char** argv) {
       }
       demo::MapperScanScope scan(scan_accounting);
       const std::uint64_t scan_number = scan.scan_number();
-      const double timestamp = sample.header.header().simulation_time_s();
+      const double timestamp = sample.header.simulation_time_s();
       auto orientation = imu.FindNearest(timestamp, config.imu_max_age_s);
       const auto imu_deadline =
           std::chrono::steady_clock::now() +
           std::chrono::milliseconds(config.wait_timeout_ms);
       while (!orientation.has_value() && !demo::ProcessStopRequested() &&
              std::chrono::steady_clock::now() < imu_deadline) {
-        mujoco_sim::v2::ObservationFrame frame;
+        mujoco_sim::adapter_sdk::ObservationLease frame;
         const auto remaining =
             std::chrono::duration_cast<std::chrono::milliseconds>(
                 imu_deadline - std::chrono::steady_clock::now());
@@ -155,7 +156,7 @@ int main(int argc, char** argv) {
         }
         if (observation_result !=
                 mujoco_sim::adapter_sdk::ObservationWaitResult::kReceived ||
-            !AddImuFrame(frame, config.imu_quaternion, &imu, &message)) {
+            !AddImuFrame(frame, imu_decoder, &imu, &message)) {
           std::cerr << "mapper IMU synchronization failed: " << message
                     << '\n';
           result = 1;

@@ -33,18 +33,11 @@ namespace {
 
 using Clock = std::chrono::steady_clock;
 
-std::uint64_t NowUnixNanos() {
-  return static_cast<std::uint64_t>(
-      std::chrono::duration_cast<std::chrono::nanoseconds>(
-          std::chrono::system_clock::now().time_since_epoch())
-          .count());
-}
-
-mujoco_sim::v2::StreamFormat FormatForKind(const std::string& kind) {
-  if (kind == "rgb") return mujoco_sim::v2::RGB8;
-  if (kind == "depth") return mujoco_sim::v2::DEPTH32F;
-  if (kind == "segmentation") return mujoco_sim::v2::SEGMENTATION32U;
-  return mujoco_sim::v2::XYZ32F;
+mujoco_sim::v3::StreamFormat FormatForKind(const std::string& kind) {
+  if (kind == "rgb") return mujoco_sim::v3::RGB8;
+  if (kind == "depth") return mujoco_sim::v3::DEPTH32F;
+  if (kind == "segmentation") return mujoco_sim::v3::SEGMENTATION32U;
+  return mujoco_sim::v3::XYZ32F;
 }
 
 mujoco_sim::sensor::BackendPreference BackendFor(
@@ -87,9 +80,9 @@ struct CameraGroupKey {
 
 struct SensorRuntime::Impl {
   struct StreamInfo {
-    mujoco_sim::v2::StreamDescriptor descriptor;
+    mujoco_sim::v3::StreamDescriptor descriptor;
     SensorRuntimePublisher publisher;
-    mujoco_sim::v2::StreamState state = mujoco_sim::v2::STREAM_IDLE;
+    mujoco_sim::v3::StreamState state = mujoco_sim::v3::STREAM_IDLE;
     std::string message;
     std::uint64_t subscribers = 0;
     std::uint64_t captures = 0;
@@ -102,7 +95,9 @@ struct SensorRuntime::Impl {
 
   struct Job {
     std::unique_ptr<mujoco_sim::core::SimulationSnapshot> snapshot;
-    mujoco_sim::v2::Header header;
+    std::uint64_t epoch = 0;
+    std::uint64_t tick_id = 0;
+    double simulation_time_s = 0.0;
     std::uint64_t capture_id = 0;
     std::uint64_t dropped_since_previous = 0;
   };
@@ -139,44 +134,53 @@ struct SensorRuntime::Impl {
     std::uint64_t acknowledged_blocking_capture_id = 0;
     std::function<void(const std::string&)> before_capture;
     std::function<void(const std::string&)> on_blocking_wait_started;
-    std::function<void(mujoco_sim::v2::StreamFrameHeader*)>
+    std::function<void(mujoco_sim::v3::StreamFrameHeader*)>
         before_serialize;
     std::function<void(const std::string&)> before_initialize;
 
-    bool HasLiveSubscriber() {
-      std::scoped_lock locks(mutex, publisher_mutex);
-      bool live = false;
+    void UpdateSubscriberCache() {
       for (auto& stream : streams) {
+        std::size_t subscribers = 0;
         try {
-          stream.subscribers = stream.publisher.subscriber_count();
+          std::lock_guard publisher_lock(publisher_mutex);
+          subscribers = stream.publisher.subscriber_count();
         } catch (const std::exception& exception) {
-          stream.state = mujoco_sim::v2::STREAM_ERROR;
+          std::lock_guard lock(mutex);
+          stream.state = mujoco_sim::v3::STREAM_ERROR;
           stream.message = std::string("subscriber query threw: ") +
                            exception.what();
           ++stream.publish_errors;
           continue;
         } catch (...) {
-          stream.state = mujoco_sim::v2::STREAM_ERROR;
+          std::lock_guard lock(mutex);
+          stream.state = mujoco_sim::v3::STREAM_ERROR;
           stream.message = "subscriber query threw";
           ++stream.publish_errors;
           continue;
         }
-        if (stream.state != mujoco_sim::v2::STREAM_ERROR &&
+        std::lock_guard lock(mutex);
+        stream.subscribers = subscribers;
+        if (stream.state != mujoco_sim::v3::STREAM_ERROR &&
             stream.subscribers == 0) {
-          stream.state = mujoco_sim::v2::STREAM_IDLE;
+          stream.state = mujoco_sim::v3::STREAM_IDLE;
           stream.message.clear();
         }
-        if (stream.state != mujoco_sim::v2::STREAM_ERROR &&
-            stream.subscribers > 0) {
-          live = true;
-        }
       }
+    }
+
+    bool HasLiveSubscriber() const {
+      std::lock_guard lock(mutex);
+      const bool live = std::any_of(
+          streams.begin(), streams.end(), [](const auto& stream) {
+            return stream.state != mujoco_sim::v3::STREAM_ERROR &&
+                   stream.subscribers > 0;
+          });
       return live;
     }
 
     bool AllStreamsFailedLocked() const {
       return std::all_of(streams.begin(), streams.end(), [](const auto& info) {
-        return info.state == mujoco_sim::v2::STREAM_ERROR;
+        return info.state == mujoco_sim::v3::STREAM_ERROR;
       });
     }
 
@@ -214,7 +218,7 @@ struct SensorRuntime::Impl {
       if (queue_mode == QueueMode::kBlocking) {
         if (pending_blocking_job.has_value()) {
           for (auto& stream : streams) {
-            stream.state = mujoco_sim::v2::STREAM_ERROR;
+            stream.state = mujoco_sim::v3::STREAM_ERROR;
             stream.message = "blocking sensor enqueue overlapped";
           }
           condition.notify_all();
@@ -247,7 +251,7 @@ struct SensorRuntime::Impl {
         lock.lock();
         free.push_back(std::move(snapshot));
         for (auto& stream : streams) {
-          stream.state = mujoco_sim::v2::STREAM_ERROR;
+          stream.state = mujoco_sim::v3::STREAM_ERROR;
           stream.message = "snapshot update failed: " + error;
         }
         lock.unlock();
@@ -258,13 +262,9 @@ struct SensorRuntime::Impl {
       Job job;
       job.snapshot = std::move(snapshot);
       job.capture_id = capture_id;
-      job.header.set_server_name(server_name);
-      job.header.set_epoch(core_state.epoch);
-      job.header.set_tick_id(core_state.current_tick_id);
-      job.header.set_timestamp_unix_nanos(NowUnixNanos());
-      job.header.set_protocol_major(mujoco_sim::protocol::kProtocolMajor);
-      job.header.set_protocol_minor(mujoco_sim::protocol::kProtocolMinor);
-      job.header.set_simulation_time_s(simulation_time);
+      job.epoch = core_state.epoch;
+      job.tick_id = core_state.current_tick_id;
+      job.simulation_time_s = simulation_time;
       lock.lock();
       job.dropped_since_previous = pending_dropped;
       pending_dropped = 0;
@@ -328,7 +328,7 @@ struct SensorRuntime::Impl {
           lock.lock();
           if (!callback_error.empty()) {
             for (auto& stream : streams) {
-              stream.state = mujoco_sim::v2::STREAM_ERROR;
+              stream.state = mujoco_sim::v3::STREAM_ERROR;
               stream.message = callback_error;
             }
             condition.notify_all();
@@ -359,7 +359,7 @@ struct SensorRuntime::Impl {
     void SetCaptureError(const std::string& error) {
       std::lock_guard lock(mutex);
       for (auto& stream : streams) {
-        stream.state = mujoco_sim::v2::STREAM_ERROR;
+        stream.state = mujoco_sim::v3::STREAM_ERROR;
         stream.message = error;
       }
       while (!jobs.empty()) {
@@ -375,7 +375,7 @@ struct SensorRuntime::Impl {
 
     void SetStreamError(StreamInfo* stream, const std::string& error) {
       std::lock_guard lock(mutex);
-      stream->state = mujoco_sim::v2::STREAM_ERROR;
+      stream->state = mujoco_sim::v3::STREAM_ERROR;
       stream->message = error;
       ++stream->publish_errors;
       condition.notify_all();
@@ -390,7 +390,7 @@ struct SensorRuntime::Impl {
         } else {
           stopping = true;
           for (auto& stream : streams) {
-            stream.state = mujoco_sim::v2::STREAM_ERROR;
+            stream.state = mujoco_sim::v3::STREAM_ERROR;
             stream.message = error;
           }
           while (!jobs.empty()) {
@@ -450,7 +450,9 @@ struct SensorRuntime::Impl {
 
         try {
           mujoco_sim::sensor::CaptureMetadata metadata;
-          metadata.header = job.header;
+          metadata.epoch = job.epoch;
+          metadata.tick_id = job.tick_id;
+          metadata.simulation_time_s = job.simulation_time_s;
           metadata.capture_id = job.capture_id;
           metadata.stream_sequence = ++sequence;
           metadata.dropped_since_previous = job.dropped_since_previous;
@@ -469,7 +471,7 @@ struct SensorRuntime::Impl {
           if (!captured) {
             SetCaptureError("capture failed: " + error);
           } else {
-            Publish(job.header.tick_id(), frames);
+            Publish(job.tick_id, frames);
           }
         } catch (const std::exception& exception) {
           SetCaptureError(std::string("sensor job threw: ") +
@@ -510,7 +512,7 @@ struct SensorRuntime::Impl {
           std::lock_guard lock(mutex);
           ++found->captures;
           found->last_capture_tick = tick_id;
-          if (found->state == mujoco_sim::v2::STREAM_ERROR) continue;
+          if (found->state == mujoco_sim::v3::STREAM_ERROR) continue;
         }
         try {
           std::string bytes;
@@ -522,28 +524,24 @@ struct SensorRuntime::Impl {
             SetStreamError(&*found, error);
             continue;
           }
+          bool has_subscriber = false;
+          {
+            std::lock_guard lock(mutex);
+            has_subscriber = found->subscribers > 0;
+          }
+          if (!has_subscriber) continue;
           bool sent = false;
-          std::size_t subscribers_before = 0;
-          std::size_t subscribers_after = 0;
           {
             std::lock_guard publisher_lock(publisher_mutex);
-            subscribers_before = found->publisher.subscriber_count();
-            if (subscribers_before > 0) sent = found->publisher.send(bytes);
-            subscribers_after = found->publisher.subscriber_count();
+            sent = found->publisher.send(bytes);
           }
           std::lock_guard lock(mutex);
-          found->subscribers = subscribers_after;
           if (sent) {
-            found->state = subscribers_after == 0
-                               ? mujoco_sim::v2::STREAM_IDLE
-                               : mujoco_sim::v2::STREAM_RUNNING;
+            found->state = mujoco_sim::v3::STREAM_RUNNING;
             found->message.clear();
             ++found->published;
-          } else if (subscribers_before == 0 || subscribers_after == 0) {
-            found->state = mujoco_sim::v2::STREAM_IDLE;
-            found->message.clear();
           } else {
-            found->state = mujoco_sim::v2::STREAM_RUNNING;
+            found->state = mujoco_sim::v3::STREAM_RUNNING;
             found->message = "eCAL rejected stream frame publish; retrying";
             ++found->publish_errors;
             condition.notify_all();
@@ -571,7 +569,7 @@ struct SensorRuntime::Impl {
       if (thread.joinable()) thread.join();
     }
 
-    void AppendStatus(mujoco_sim::v2::ServerStatus* status) const {
+    void AppendStatus(mujoco_sim::v3::ServerStatus* status) const {
       std::lock_guard lock(mutex);
       for (const auto& stream : streams) {
         auto* output = status->add_streams();
@@ -595,6 +593,8 @@ struct SensorRuntime::Impl {
   std::uint64_t epoch = 0;
   std::vector<std::unique_ptr<Worker>> workers;
   std::atomic<std::uint64_t> next_capture_id{1};
+  std::chrono::milliseconds subscriber_sample_period{200};
+  Clock::time_point next_subscriber_sample{};
   bool initialized = false;
   SensorRuntimeTestHooks hooks;
 
@@ -683,6 +683,9 @@ bool SensorRuntime::Initialize(mujoco_sim::core::SimulationCore& core,
   impl_ = std::make_unique<Impl>(hooks_);
   impl_->server_name = config.server_name;
   impl_->epoch = core.state().epoch;
+  impl_->subscriber_sample_period =
+      std::chrono::milliseconds(config.sensor_subscriber_sample_period_ms);
+  impl_->next_subscriber_sample = Clock::now();
   if (config.sensor_streams.empty()) {
     impl_->initialized = true;
     return true;
@@ -724,7 +727,7 @@ bool SensorRuntime::Initialize(mujoco_sim::core::SimulationCore& core,
       worker->camera_profile.outputs.push_back(
           {FormatForKind(output.kind), output.name});
     }
-    std::vector<mujoco_sim::v2::StreamDescriptor> descriptors;
+    std::vector<mujoco_sim::v3::StreamDescriptor> descriptors;
     if (!mujoco_sim::sensor::DescribeCameraStreams(
             *validation_snapshot, worker->camera_profile, &descriptors,
             error_message)) {
@@ -766,7 +769,7 @@ bool SensorRuntime::Initialize(mujoco_sim::core::SimulationCore& core,
     worker->lidar_profile.rate_hz = source.rate_hz;
     worker->lidar_profile.frame_id = source.frame_id;
     worker->lidar_profile.stream_name = source.name;
-    mujoco_sim::v2::StreamDescriptor descriptor;
+    mujoco_sim::v3::StreamDescriptor descriptor;
     if (!mujoco_sim::sensor::DescribeRayLidarStream(
             *validation_snapshot, worker->lidar_profile, &descriptor,
             error_message)) {
@@ -789,6 +792,11 @@ bool SensorRuntime::Initialize(mujoco_sim::core::SimulationCore& core,
 
 void SensorRuntime::OnStepCompleted(mujoco_sim::core::SimulationCore& core) {
   if (!impl_->initialized) return;
+  const auto now = Clock::now();
+  if (now >= impl_->next_subscriber_sample) {
+    for (auto& worker : impl_->workers) worker->UpdateSubscriberCache();
+    impl_->next_subscriber_sample = now + impl_->subscriber_sample_period;
+  }
   for (auto& worker : impl_->workers) {
     worker->Enqueue(core, impl_->next_capture_id.fetch_add(1));
   }
@@ -814,26 +822,15 @@ void SensorRuntime::Stop() {
   impl_->initialized = false;
 }
 
-mujoco_sim::v2::GetSensorStreamsResponse SensorRuntime::GetCatalog(
-    const mujoco_sim::v2::GetSensorStreamsRequest& request) const {
-  mujoco_sim::v2::GetSensorStreamsResponse response;
+mujoco_sim::v3::GetSensorStreamsResponse SensorRuntime::GetCatalog(
+    const mujoco_sim::v3::GetSensorStreamsRequest&) const {
+  mujoco_sim::v3::GetSensorStreamsResponse response;
   if (!impl_->initialized) {
-    response.set_code(mujoco_sim::v2::FAILED_PRECONDITION);
+    response.set_code(mujoco_sim::v3::FAILED_PRECONDITION);
     response.set_message("sensor runtime is not initialized");
     return response;
   }
-  if (request.server_name() != impl_->server_name) {
-    response.set_code(mujoco_sim::v2::NOT_FOUND);
-    response.set_message("server name mismatch");
-    return response;
-  }
-  if (request.protocol_major() != mujoco_sim::protocol::kProtocolMajor ||
-      request.protocol_minor() != mujoco_sim::protocol::kProtocolMinor) {
-    response.set_code(mujoco_sim::v2::VERSION_MISMATCH);
-    response.set_message("protocol version mismatch; expected 2.0");
-    return response;
-  }
-  response.set_code(mujoco_sim::v2::OK);
+  response.set_code(mujoco_sim::v3::OK);
   response.set_epoch(impl_->epoch);
   for (const auto& worker : impl_->workers) {
     std::lock_guard lock(worker->mutex);
@@ -844,7 +841,7 @@ mujoco_sim::v2::GetSensorStreamsResponse SensorRuntime::GetCatalog(
   return response;
 }
 
-void SensorRuntime::AppendStatus(mujoco_sim::v2::ServerStatus* status) const {
+void SensorRuntime::AppendStatus(mujoco_sim::v3::ServerStatus* status) const {
   if (status == nullptr || !impl_->initialized) return;
   for (const auto& worker : impl_->workers) worker->AppendStatus(status);
 }

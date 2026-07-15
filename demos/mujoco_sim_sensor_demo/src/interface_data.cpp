@@ -1,85 +1,47 @@
 #include <mujoco_sim/sensor_demo/interface_data.hpp>
 
+#include <algorithm>
 #include <cmath>
-#include <cstddef>
-#include <string>
-#include <unordered_map>
-#include <utility>
-
-#include <google/protobuf/repeated_ptr_field.h>
+#include <span>
 
 namespace mujoco_sim::sensor_demo {
 namespace {
 
-using ObservationIndex =
-    std::unordered_map<std::string, const mujoco_sim::v2::ObservationBlock*>;
-
-bool Fail(const std::string& message, std::string* error_message) {
-  if (error_message != nullptr) *error_message = message;
+bool Fail(const std::string& message, std::string* error) {
+  if (error) *error = message;
   return false;
 }
 
-bool BuildIndex(
-    const google::protobuf::RepeatedPtrField<
-        mujoco_sim::v2::ObservationBlock>& observations,
-    ObservationIndex* index, std::string* error_message) {
-  index->clear();
-  for (const auto& observation : observations) {
-    if (observation.name().empty()) {
-      return Fail("observation block has an empty name", error_message);
-    }
-    if (!index->emplace(observation.name(), &observation).second) {
-      return Fail("duplicate observation block: " + observation.name(),
-                  error_message);
-    }
-  }
-  return true;
-}
-
 template <std::size_t Size>
-bool CopyObservation(const ObservationIndex& index, const std::string& name,
-                     std::array<double, Size>* output,
-                     std::string* error_message) {
-  const auto found = index.find(name);
-  if (found == index.end()) {
-    return Fail("missing observation block: " + name, error_message);
+bool Copy(std::span<const double> values,
+          mujoco_sim::adapter_sdk::ScalarSpan span, const char* name,
+          std::array<double, Size>* output, std::string* error) {
+  if (span.count != Size || span.offset + Size > values.size()) {
+    return Fail(std::string("observation layout mismatch for ") + name,
+                error);
   }
-  const auto& values = found->second->values();
-  if (values.size() != static_cast<int>(Size)) {
-    return Fail("observation dimension mismatch for " + name + ": expected " +
-                    std::to_string(Size) + ", got " +
-                    std::to_string(values.size()),
-                error_message);
-  }
-  std::array<double, Size> next{};
-  for (std::size_t index_value = 0; index_value < Size; ++index_value) {
-    const double value = values.Get(static_cast<int>(index_value));
+  for (std::size_t i = 0; i < Size; ++i) {
+    const double value = values[span.offset + i];
     if (!std::isfinite(value)) {
-      return Fail("non-finite observation value in " + name, error_message);
+      return Fail(std::string("non-finite observation value in ") + name,
+                  error);
     }
-    next[index_value] = value;
+    (*output)[i] = value;
   }
-  *output = next;
   return true;
 }
 
-bool CopyScalar(const ObservationIndex& index, const std::string& name,
-                double* output, std::string* error_message) {
-  std::array<double, 1> value{};
-  if (!CopyObservation(index, name, &value, error_message)) return false;
-  *output = value[0];
-  return true;
-}
-
-bool SimulationTime(const mujoco_sim::v2::Header& header, double* output,
-                    std::string* error_message) {
-  if (!header.has_simulation_time_s() ||
-      !std::isfinite(header.simulation_time_s()) ||
-      header.simulation_time_s() < 0.0) {
-    return Fail("message header has no valid simulation_time_s",
-                error_message);
+bool ResolveObservation(
+    const mujoco_sim::adapter_sdk::ControllerLayout& layout,
+    const std::string& name, std::size_t count,
+    mujoco_sim::adapter_sdk::ScalarSpan* output, std::string* error) {
+  const auto span = layout.Observation(name);
+  if (!span || span->count != count ||
+      span->offset + span->count > layout.observation_scalar_count()) {
+    if (error->empty()) *error = "observation layout mismatch for " + name;
+    return false;
   }
-  *output = header.simulation_time_s();
+  *output = *span;
   return true;
 }
 
@@ -94,7 +56,6 @@ void Append(const std::array<std::string, Size>& source,
 std::vector<std::string> ControllerObservationNames(
     const ControllerInterfaces& interfaces) {
   std::vector<std::string> result;
-  result.reserve(6);
   Append(interfaces.wheel_positions, &result);
   result.push_back(interfaces.imu_quaternion);
   result.push_back(interfaces.imu_angular_velocity);
@@ -110,7 +71,6 @@ std::vector<std::string> ControllerCommandNames(
 std::vector<std::string> StateObservationNames(
     const StateObserverInterfaces& interfaces) {
   std::vector<std::string> result;
-  result.reserve(11);
   Append(interfaces.wheel_positions, &result);
   Append(interfaces.wheel_velocities, &result);
   result.push_back(interfaces.imu_quaternion);
@@ -119,102 +79,156 @@ std::vector<std::string> StateObservationNames(
   return result;
 }
 
-bool DecodeVehicleSample(const mujoco_sim::v2::Tick& tick,
-                         const ControllerInterfaces& interfaces,
-                         VehicleSample* sample,
-                         std::string* error_message) {
-  if (sample == nullptr || error_message == nullptr) {
-    return Fail("sample and error_message must not be null", error_message);
+VehicleDecoder::VehicleDecoder(
+    const mujoco_sim::adapter_sdk::ControllerLayout& layout,
+    const ControllerInterfaces& interfaces) {
+  for (std::size_t i = 0; i < wheel_positions_.size(); ++i) {
+    ResolveObservation(layout, interfaces.wheel_positions[i], 1,
+                       &wheel_positions_[i], &layout_error_);
   }
-  error_message->clear();
-  ObservationIndex index;
-  if (!BuildIndex(tick.observations(), &index, error_message)) return false;
+  ResolveObservation(layout, interfaces.imu_quaternion, 4, &imu_quaternion_,
+                     &layout_error_);
+  ResolveObservation(layout, interfaces.imu_angular_velocity, 3, &imu_gyro_,
+                     &layout_error_);
+}
 
+bool VehicleDecoder::Decode(const mujoco_sim::adapter_sdk::TickLease& tick,
+                            VehicleSample* sample, std::string* error) const {
+  return Decode(tick.observations(), tick.simulation_time_s(), sample, error);
+}
+
+bool VehicleDecoder::Decode(std::span<const double> values,
+                            double simulation_time_s, VehicleSample* sample,
+                            std::string* error) const {
+  if (!sample || !error) return Fail("invalid output arguments", error);
+  if (!layout_error_.empty()) return Fail(layout_error_, error);
   VehicleSample next;
-  if (!SimulationTime(tick.header(), &next.simulation_time, error_message)) {
-    return false;
-  }
-  for (std::size_t i = 0; i < interfaces.wheel_positions.size(); ++i) {
-    if (!CopyScalar(index, interfaces.wheel_positions[i],
-                    &next.wheel_positions[i], error_message)) {
+  next.simulation_time = simulation_time_s;
+  for (std::size_t i = 0; i < wheel_positions_.size(); ++i) {
+    std::array<double, 1> value{};
+    if (!Copy(values, wheel_positions_[i], "wheel position", &value, error))
       return false;
-    }
+    next.wheel_positions[i] = value[0];
   }
-  if (!CopyObservation(index, interfaces.imu_quaternion,
-                       &next.imu_quaternion, error_message) ||
-      !CopyObservation(index, interfaces.imu_angular_velocity,
-                       &next.imu_gyro, error_message)) {
+  if (!Copy(values, imu_quaternion_, "IMU quaternion", &next.imu_quaternion,
+            error) ||
+      !Copy(values, imu_gyro_, "IMU angular velocity", &next.imu_gyro,
+            error))
     return false;
-  }
   *sample = next;
   return true;
 }
 
-bool DecodeStateSample(const mujoco_sim::v2::ObservationFrame& frame,
-                       const StateObserverInterfaces& interfaces,
-                       StateSample* sample,
-                       std::string* error_message) {
-  if (sample == nullptr || error_message == nullptr) {
-    return Fail("sample and error_message must not be null", error_message);
+StateDecoder::StateDecoder(
+    const mujoco_sim::adapter_sdk::ControllerLayout& layout,
+    const StateObserverInterfaces& interfaces) {
+  for (std::size_t i = 0; i < wheel_positions_.size(); ++i) {
+    ResolveObservation(layout, interfaces.wheel_positions[i], 1,
+                       &wheel_positions_[i], &layout_error_);
+    ResolveObservation(layout, interfaces.wheel_velocities[i], 1,
+                       &wheel_velocities_[i], &layout_error_);
   }
-  error_message->clear();
-  ObservationIndex index;
-  if (!BuildIndex(frame.observations(), &index, error_message)) return false;
+  ResolveObservation(layout, interfaces.imu_quaternion, 4, &imu_quaternion_,
+                     &layout_error_);
+  ResolveObservation(layout, interfaces.imu_angular_velocity, 3,
+                     &imu_angular_velocity_, &layout_error_);
+  ResolveObservation(layout, interfaces.imu_linear_acceleration, 3,
+                     &imu_linear_acceleration_, &layout_error_);
+}
 
+bool StateDecoder::Decode(
+    const mujoco_sim::adapter_sdk::ObservationLease& frame,
+    StateSample* sample, std::string* error) const {
+  return Decode(frame.observations(), frame.simulation_time_s(), sample,
+                error);
+}
+
+bool StateDecoder::Decode(std::span<const double> values,
+                          double simulation_time_s, StateSample* sample,
+                          std::string* error) const {
+  if (!sample || !error) return Fail("invalid output arguments", error);
+  if (!layout_error_.empty()) return Fail(layout_error_, error);
   StateSample next;
-  if (!SimulationTime(frame.header(), &next.simulation_time, error_message)) {
-    return false;
-  }
-  for (std::size_t i = 0; i < interfaces.wheel_positions.size(); ++i) {
-    if (!CopyScalar(index, interfaces.wheel_positions[i],
-                    &next.wheel_positions[i], error_message) ||
-        !CopyScalar(index, interfaces.wheel_velocities[i],
-                    &next.wheel_velocities[i], error_message)) {
+  next.simulation_time = simulation_time_s;
+  for (std::size_t i = 0; i < wheel_positions_.size(); ++i) {
+    std::array<double, 1> position{}, velocity{};
+    if (!Copy(values, wheel_positions_[i], "wheel position", &position,
+              error) ||
+        !Copy(values, wheel_velocities_[i], "wheel velocity", &velocity,
+              error))
       return false;
-    }
+    next.wheel_positions[i] = position[0];
+    next.wheel_velocities[i] = velocity[0];
   }
-  if (!CopyObservation(index, interfaces.imu_quaternion,
-                       &next.imu_quaternion, error_message) ||
-      !CopyObservation(index, interfaces.imu_angular_velocity,
-                       &next.imu_angular_velocity, error_message) ||
-      !CopyObservation(index, interfaces.imu_linear_acceleration,
-                       &next.imu_linear_acceleration, error_message)) {
+  if (!Copy(values, imu_quaternion_, "IMU quaternion", &next.imu_quaternion,
+            error) ||
+      !Copy(values, imu_angular_velocity_, "IMU angular velocity",
+            &next.imu_angular_velocity, error) ||
+      !Copy(values, imu_linear_acceleration_, "IMU linear acceleration",
+            &next.imu_linear_acceleration, error))
     return false;
-  }
   *sample = next;
   return true;
 }
 
-bool DecodeImuOrientation(const mujoco_sim::v2::ObservationFrame& frame,
-                          const std::string& observation_name,
-                          ImuOrientationSample* sample,
-                          std::string* error_message) {
-  if (sample == nullptr || error_message == nullptr) {
-    return Fail("sample and error_message must not be null", error_message);
-  }
-  error_message->clear();
-  ObservationIndex index;
-  if (!BuildIndex(frame.observations(), &index, error_message)) return false;
+ImuOrientationDecoder::ImuOrientationDecoder(
+    const mujoco_sim::adapter_sdk::ControllerLayout& layout,
+    const std::string& name) {
+  ResolveObservation(layout, name, 4, &quaternion_, &layout_error_);
+}
+
+bool ImuOrientationDecoder::Decode(
+    const mujoco_sim::adapter_sdk::ObservationLease& frame,
+    ImuOrientationSample* sample, std::string* error) const {
+  return Decode(frame.observations(), frame.simulation_time_s(), sample,
+                error);
+}
+
+bool ImuOrientationDecoder::Decode(std::span<const double> values,
+                                   double simulation_time_s,
+                                   ImuOrientationSample* sample,
+                                   std::string* error) const {
+  if (!sample || !error) return Fail("invalid output arguments", error);
+  if (!layout_error_.empty()) return Fail(layout_error_, error);
   ImuOrientationSample next;
-  if (!SimulationTime(frame.header(), &next.simulation_time, error_message) ||
-      !CopyObservation(index, observation_name, &next.quaternion,
-                       error_message)) {
+  next.simulation_time = simulation_time_s;
+  if (!Copy(values, quaternion_, "IMU quaternion", &next.quaternion, error))
     return false;
-  }
   *sample = next;
   return true;
 }
 
-std::vector<mujoco_sim::adapter_sdk::CommandValue> BuildWheelCommands(
-    const ControllerInterfaces& interfaces,
-    const std::array<double, 4>& wheel_angular_velocities) {
-  std::vector<mujoco_sim::adapter_sdk::CommandValue> result;
-  result.reserve(wheel_angular_velocities.size());
-  for (std::size_t i = 0; i < wheel_angular_velocities.size(); ++i) {
-    result.push_back(
-        {interfaces.wheel_velocity_commands[i], wheel_angular_velocities[i]});
+WheelCommandMapper::WheelCommandMapper(
+    const mujoco_sim::adapter_sdk::ControllerLayout& layout,
+    const ControllerInterfaces& interfaces)
+    : scalar_count_(layout.command_scalar_count()) {
+  for (std::size_t i = 0; i < offsets_.size(); ++i) {
+    const auto span = layout.Command(interfaces.wheel_velocity_commands[i]);
+    if (!span || span->count != 1 || span->offset >= scalar_count_) {
+      if (layout_error_.empty()) {
+        layout_error_ = "command layout mismatch for " +
+                        interfaces.wheel_velocity_commands[i];
+      }
+      continue;
+    }
+    offsets_[i] = span->offset;
   }
-  return result;
+}
+
+bool WheelCommandMapper::Map(const std::array<double, 4>& velocities,
+                             std::vector<double>* commands,
+                             std::string* error) const {
+  if (!commands || !error) return Fail("invalid output arguments", error);
+  if (!layout_error_.empty()) return Fail(layout_error_, error);
+  std::vector<double> next(scalar_count_);
+  for (std::size_t i = 0; i < velocities.size(); ++i) {
+    if (!std::isfinite(velocities[i])) {
+      return Fail("non-finite wheel command", error);
+    }
+    next[offsets_[i]] = velocities[i];
+  }
+  *commands = std::move(next);
+  return true;
 }
 
 }  // namespace mujoco_sim::sensor_demo

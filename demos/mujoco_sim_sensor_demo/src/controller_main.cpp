@@ -42,6 +42,9 @@ int main(int argc, char** argv) {
     return 1;
   }
   demo::WaypointController controller(config.control);
+  const demo::VehicleDecoder decoder(client.layout(), config.interfaces);
+  const demo::WheelCommandMapper command_mapper(client.layout(),
+                                                 config.interfaces);
   std::cout << "sensor-demo controller ready adapter="
             << config.adapter.adapter_id << std::endl;
 
@@ -51,7 +54,7 @@ int main(int argc, char** argv) {
   std::optional<double> first_simulation_time;
   int result = 0;
   while (!demo::ProcessStopRequested()) {
-    mujoco_sim::v2::Tick tick;
+    mujoco_sim::adapter_sdk::TickLease tick;
     const auto wait_result = client.WaitForTick(
         std::chrono::milliseconds(config.wait_timeout_ms), &tick, &message);
     if (wait_result == mujoco_sim::adapter_sdk::TickWaitResult::kTimeout) {
@@ -66,16 +69,18 @@ int main(int argc, char** argv) {
 
     try {
       demo::VehicleSample sample;
-      if (!demo::DecodeVehicleSample(tick, config.interfaces, &sample,
-                                     &message)) {
+      if (!decoder.Decode(tick, &sample, &message)) {
         throw std::runtime_error(message);
       }
       if (!first_simulation_time.has_value()) {
         first_simulation_time = sample.simulation_time;
       }
       const demo::WaypointControllerOutput output = controller.Update(sample);
-      const auto commands = demo::BuildWheelCommands(
-          config.interfaces, output.wheel_angular_velocities);
+      std::vector<double> commands;
+      if (!command_mapper.Map(output.wheel_angular_velocities, &commands,
+                              &message)) {
+        throw std::runtime_error(message);
+      }
       if (!client.Commit(tick, commands, &message)) {
         throw std::runtime_error("Commit failed: " + message);
       }

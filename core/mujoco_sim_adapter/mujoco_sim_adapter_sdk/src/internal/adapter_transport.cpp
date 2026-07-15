@@ -33,40 +33,48 @@ class EcalAdapterTransport final : public AdapterTransport {
     registry_client_ = std::make_unique<eCAL::CServiceClient>(
         mujoco_sim::protocol::RegistryServiceName(server_name), methods);
     heartbeat_publisher_ = std::make_unique<eCAL::CPublisher>(
-        mujoco_sim::protocol::AdapterHeartbeatTopicName(server_name));
+        mujoco_sim::protocol::SessionHeartbeatTopicName(server_name));
     if (publish_commits) {
       commit_publisher_ = std::make_unique<eCAL::CPublisher>(
           mujoco_sim::protocol::CommitTopicName(server_name));
+      fault_publisher_ = std::make_unique<eCAL::CPublisher>(
+          mujoco_sim::protocol::ControllerFaultTopicName(server_name));
     }
   }
 
-  bool Register(const mujoco_sim::v2::RegisterAdapterRequest& request,
-                mujoco_sim::v2::RegisterAdapterResponse* response,
+  bool Register(const mujoco_sim::v3::RegisterAdapterRequest& request,
+                mujoco_sim::v3::RegisterAdapterResponse* response,
                 std::string* error_message) override {
     return Call(mujoco_sim::protocol::kRegisterAdapterMethod, request, response,
                 error_message, false);
   }
 
-  bool Activate(const mujoco_sim::v2::ActivateAdapterRequest& request,
-                mujoco_sim::v2::ActivateAdapterResponse* response,
+  bool Activate(const mujoco_sim::v3::ActivateAdapterRequest& request,
+                mujoco_sim::v3::ActivateAdapterResponse* response,
                 std::string* error_message) override {
     return Call(mujoco_sim::protocol::kActivateAdapterMethod, request, response,
                 error_message, false);
   }
 
-  bool Unregister(const mujoco_sim::v2::UnregisterAdapterRequest& request,
-                  mujoco_sim::v2::UnregisterAdapterResponse* response,
+  bool Unregister(const mujoco_sim::v3::UnregisterAdapterRequest& request,
+                  mujoco_sim::v3::UnregisterAdapterResponse* response,
                   std::string* error_message) override {
     return Call(mujoco_sim::protocol::kUnregisterAdapterMethod, request,
                 response, error_message, true);
   }
 
-  bool PublishCommit(const mujoco_sim::v2::AdapterCommit& commit) override {
-    return Publish(commit, commit_publisher_.get());
+  bool PublishCommit(std::string_view encoded_commit) override {
+    std::lock_guard lock(publisher_mutex_);
+    return commit_publisher_ != nullptr &&
+           commit_publisher_->Send(encoded_commit.data(), encoded_commit.size());
+  }
+
+  bool PublishFault(const mujoco_sim::v3::ControllerFault& fault) override {
+    return Publish(fault, fault_publisher_.get());
   }
 
   void PublishHeartbeat(
-      const mujoco_sim::v2::AdapterHeartbeat& heartbeat) override {
+      const mujoco_sim::v3::SessionHeartbeat& heartbeat) override {
     (void)Publish(heartbeat, heartbeat_publisher_.get());
   }
 
@@ -119,6 +127,7 @@ class EcalAdapterTransport final : public AdapterTransport {
   const std::atomic<bool>* stop_requested_;
   std::unique_ptr<eCAL::CServiceClient> registry_client_;
   std::unique_ptr<eCAL::CPublisher> commit_publisher_;
+  std::unique_ptr<eCAL::CPublisher> fault_publisher_;
   std::unique_ptr<eCAL::CPublisher> heartbeat_publisher_;
   std::mutex publisher_mutex_;
 };
@@ -136,8 +145,8 @@ class EcalSensorStreamTransport final : public SensorStreamTransport {
         mujoco_sim::protocol::RegistryServiceName(server_name), methods);
   }
 
-  bool Discover(const mujoco_sim::v2::GetSensorStreamsRequest& request,
-                mujoco_sim::v2::GetSensorStreamsResponse* response,
+  bool Discover(const mujoco_sim::v3::GetSensorStreamsRequest& request,
+                mujoco_sim::v3::GetSensorStreamsResponse* response,
                 std::string* error_message) override {
     if (response == nullptr || error_message == nullptr) return false;
     std::string bytes;

@@ -11,8 +11,7 @@ namespace mujoco_sim::core::internal {
 class TickStore {
  public:
   IssuedTickHandle Insert(const std::string& adapter_id,
-                          mujoco_sim::v2::Tick message,
-                          std::size_t layout_bytes_avoided,
+                          mujoco_sim::core::Tick message,
                           std::uint64_t session_id, std::uint64_t epoch,
                           std::uint64_t tick_id);
   IssuedTickHandle Find(const std::string& adapter_id) const;

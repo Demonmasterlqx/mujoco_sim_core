@@ -2,8 +2,6 @@
 
 #include <algorithm>
 
-#include "resource_catalog.hpp"
-
 namespace mujoco_sim::core::internal {
 
 void BarrierCoordinator::Reset() {
@@ -21,16 +19,10 @@ bool BarrierCoordinator::Ready() const {
                      });
 }
 
-std::vector<ValidatedActuatorWrite> BarrierCoordinator::BuildWritePlan(
-    const ResourceCatalog& catalog) const {
+std::vector<ValidatedActuatorWrite> BarrierCoordinator::BuildWritePlan() const {
   std::vector<ValidatedActuatorWrite> writes;
   for (const auto& [_, pending] : pending_commits_) {
-    for (const auto& command : pending.commands()) {
-      const auto* descriptor = catalog.FindCommand(command.name());
-      if (descriptor != nullptr) {
-        writes.push_back({descriptor->mujoco_id(), command.values(0)});
-      }
-    }
+    writes.insert(writes.end(), pending.writes.begin(), pending.writes.end());
   }
   for (const int actuator_id : pending_zero_actuators_) {
     writes.push_back({actuator_id, 0.0});
@@ -67,16 +59,29 @@ bool BarrierCoordinator::HasPendingCommit(const std::string& adapter_id) const {
   return pending_commits_.contains(adapter_id);
 }
 
-const mujoco_sim::v2::AdapterCommit* BarrierCoordinator::FindPendingCommit(
+const mujoco_sim::core::AdapterCommit* BarrierCoordinator::FindPendingCommit(
     const std::string& adapter_id) const {
   const auto found = pending_commits_.find(adapter_id);
-  return found == pending_commits_.end() ? nullptr : &found->second;
+  return found == pending_commits_.end() ? nullptr : &found->second.commit;
 }
 
 void BarrierCoordinator::AcceptCommit(
     const std::string& adapter_id,
-    const mujoco_sim::v2::AdapterCommit& commit) {
-  pending_commits_.emplace(adapter_id, commit);
+    const mujoco_sim::core::AdapterCommit& commit,
+    const mujoco_sim::core::ResourceLayout& layout) {
+  PendingCommit pending;
+  pending.commit = commit;
+  pending.writes.reserve(layout.commands_.size());
+  for (std::size_t index = 0; index < layout.commands_.size(); ++index) {
+    const auto& descriptor = layout.commands_[index];
+    const auto& span = layout.command_spans[index];
+    for (std::uint32_t offset = 0; offset < span.dimension; ++offset) {
+      pending.writes.push_back(
+          {descriptor.mujoco_id() + static_cast<int>(offset),
+           commit.commands[span.offset + offset]});
+    }
+  }
+  pending_commits_.emplace(adapter_id, std::move(pending));
 }
 
 void BarrierCoordinator::QueueZeroActuators(

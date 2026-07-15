@@ -7,16 +7,10 @@
 namespace mujoco_sim::core::internal {
 
 IssuedTickHandle TickStore::Insert(
-    const std::string& adapter_id, mujoco_sim::v2::Tick message,
-    std::size_t layout_bytes_avoided, std::uint64_t session_id,
-    std::uint64_t epoch, std::uint64_t tick_id) {
+    const std::string& adapter_id, mujoco_sim::core::Tick message,
+    std::uint64_t session_id, std::uint64_t epoch, std::uint64_t tick_id) {
   auto issued_tick = std::make_shared<IssuedTick>();
-  issued_tick->message = std::move(message);
-  if (!issued_tick->message.SerializeToString(&issued_tick->serialized_bytes)) {
-    return {};
-  }
-  issued_tick->serialization_count = 1;
-  issued_tick->layout_bytes_avoided = layout_bytes_avoided;
+  issued_tick->frame = std::move(message);
   issued_tick->identity = {adapter_id, session_id, epoch, tick_id,
                            next_issue_generation_++};
   issued_.insert_or_assign(adapter_id, issued_tick);

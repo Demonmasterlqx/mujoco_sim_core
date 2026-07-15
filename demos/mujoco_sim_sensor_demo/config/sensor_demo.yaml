@@ -5,7 +5,9 @@ common:
 
 controller:
   adapter_id: perimeter_controller
-  timeout_ms: 5000
+  commit_timeout_ms: 5000
+  session_timeout_ms: 5000
+  heartbeat_period_ms: 500
   log_every_ticks: 250
   max_simulation_time_s: 0.0
   interfaces:

@@ -7,12 +7,13 @@ include(CMakePackageConfigHelpers)
 find_package(Protobuf REQUIRED)
 
 set(PROTO_FILES
-  "${CMAKE_CURRENT_SOURCE_DIR}/proto/mujoco_sim/v2/sync.proto"
+  "${CMAKE_CURRENT_SOURCE_DIR}/proto/mujoco_sim/v3/sync.proto"
 )
 file(MAKE_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}/generated/proto")
 
 add_library(${PROJECT_NAME}
   ${PROTO_FILES}
+  src/data_frame.cpp
   src/identifier.cpp
   src/layout_hash.cpp
   src/stream_frame.cpp
@@ -46,11 +47,13 @@ install(TARGETS ${PROJECT_NAME}
   RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR}
 )
 install(DIRECTORY include/ DESTINATION ${CMAKE_INSTALL_INCLUDEDIR})
-install(DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}/generated/proto/"
-  DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}
-  FILES_MATCHING PATTERN "*.pb.h"
+install(FILES
+  "${CMAKE_CURRENT_BINARY_DIR}/generated/proto/mujoco_sim/v3/sync.pb.h"
+  DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}/mujoco_sim/v3
 )
-install(DIRECTORY proto/ DESTINATION share/${PROJECT_NAME}/proto)
+install(FILES "${CMAKE_CURRENT_SOURCE_DIR}/proto/mujoco_sim/v3/sync.proto"
+  DESTINATION share/${PROJECT_NAME}/proto/mujoco_sim/v3
+)
 
 write_basic_package_version_file(
   "${CMAKE_CURRENT_BINARY_DIR}/${PROJECT_NAME}ConfigVersion.cmake"
@@ -79,4 +82,10 @@ if(BUILD_TESTING)
   add_executable(protocol_test test/protocol_test.cpp)
   target_link_libraries(protocol_test PRIVATE ${PROJECT_NAME} GTest::gtest_main)
   add_test(NAME protocol_test COMMAND protocol_test)
+  add_executable(data_frame_allocation_test test/data_frame_allocation_test.cpp)
+  target_link_libraries(data_frame_allocation_test PRIVATE ${PROJECT_NAME})
+  add_test(NAME data_frame_allocation_test COMMAND data_frame_allocation_test)
+  add_executable(data_frame_performance_test test/data_frame_performance_test.cpp)
+  target_link_libraries(data_frame_performance_test PRIVATE ${PROJECT_NAME})
+  add_test(NAME data_frame_performance_test COMMAND data_frame_performance_test)
 endif()

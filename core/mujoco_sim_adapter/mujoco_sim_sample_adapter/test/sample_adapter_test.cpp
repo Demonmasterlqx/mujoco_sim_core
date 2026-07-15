@@ -49,7 +49,12 @@ void ExpectOptionsEqual(
   EXPECT_EQ(actual.adapter.observation_names,
             expected.adapter.observation_names);
   EXPECT_EQ(actual.adapter.command_names, expected.adapter.command_names);
-  EXPECT_EQ(actual.adapter.timeout_ms, expected.adapter.timeout_ms);
+  EXPECT_EQ(actual.adapter.commit_timeout_ms,
+            expected.adapter.commit_timeout_ms);
+  EXPECT_EQ(actual.adapter.session_timeout_ms,
+            expected.adapter.session_timeout_ms);
+  EXPECT_EQ(actual.adapter.heartbeat_period_ms,
+            expected.adapter.heartbeat_period_ms);
   EXPECT_EQ(actual.adapter.service_timeout_ms,
             expected.adapter.service_timeout_ms);
   EXPECT_EQ(actual.max_ticks, expected.max_ticks);
@@ -66,16 +71,13 @@ TEST(SampleAdapterTest, ParsesNameList) {
 }
 
 TEST(SampleAdapterTest, BuildsConstantCommandsFromRegistrationLayout) {
-  mujoco_sim::v2::ResourceLayout layout;
-  auto* command = layout.add_commands();
-  command->set_name("hinge_motor");
-  command->set_type(mujoco_sim::v2::COMMAND_ACTUATOR);
+  mujoco_sim::adapter_sdk::ControllerLayout layout(
+      {}, {{"hinge_motor", {0, 1}}}, 0, 1);
 
   const auto commands =
       mujoco_sim::sample_adapter::ConstantCommandsForLayout(layout, 0.25);
   ASSERT_EQ(commands.size(), 1);
-  EXPECT_EQ(commands[0].name, "hinge_motor");
-  EXPECT_DOUBLE_EQ(commands[0].value, 0.25);
+  EXPECT_DOUBLE_EQ(commands[0], 0.25);
 }
 
 TEST(SampleAdapterTest, ParsesCommandLineDefaultsAndOverrides) {
@@ -106,7 +108,7 @@ TEST(SampleAdapterTest, RejectsInvalidNumericValuesAndDuplicateOptions) {
   const std::vector<std::vector<std::string>> invalid_arguments = {
       {"mujoco-sim-sample-adapter", "--ticks", "-1"},
       {"mujoco-sim-sample-adapter", "--ticks", "18446744073709551616"},
-      {"mujoco-sim-sample-adapter", "--timeout-ms", "4294967296"},
+      {"mujoco-sim-sample-adapter", "--commit-timeout-ms", "4294967296"},
       {"mujoco-sim-sample-adapter", "--service-timeout-ms", "-1"},
       {"mujoco-sim-sample-adapter", "--command-value", "nan"},
       {"mujoco-sim-sample-adapter", "--command-value", "inf"},
@@ -128,7 +130,9 @@ TEST(SampleAdapterTest, ParsingFailureIsTransactional) {
   options.adapter.adapter_id = "original";
   options.adapter.observation_names = {"one"};
   options.adapter.command_names = {"motor"};
-  options.adapter.timeout_ms = 123;
+  options.adapter.commit_timeout_ms = 123;
+  options.adapter.session_timeout_ms = 789;
+  options.adapter.heartbeat_period_ms = 200;
   options.adapter.service_timeout_ms = 456;
   options.max_ticks = 7;
   options.command_value = 0.25;
@@ -136,7 +140,7 @@ TEST(SampleAdapterTest, ParsingFailureIsTransactional) {
   std::string error;
 
   EXPECT_FALSE(ParseArgs({"mujoco-sim-sample-adapter", "--server-name",
-                          "changed", "--timeout-ms", "4294967296"},
+                          "changed", "--commit-timeout-ms", "4294967296"},
                          &options, &error));
   ExpectOptionsEqual(options, expected);
 }
@@ -148,7 +152,9 @@ TEST(SampleAdapterTest, ReturnsGeneratedHelpForEverySupportedOption) {
                          &error));
   EXPECT_EQ(error, mujoco_sim::sample_adapter::Usage());
   EXPECT_NE(error.find("--config"), std::string::npos);
-  EXPECT_NE(error.find("--timeout-ms"), std::string::npos);
+  EXPECT_NE(error.find("--commit-timeout-ms"), std::string::npos);
+  EXPECT_NE(error.find("--session-timeout-ms"), std::string::npos);
+  EXPECT_NE(error.find("--heartbeat-period-ms"), std::string::npos);
   EXPECT_NE(error.find("--service-timeout-ms"), std::string::npos);
 }
 
@@ -161,7 +167,9 @@ TEST(SampleAdapterTest, LoadsYamlAndAppliesCommandLineOverrides) {
       "command_names: [motor_a, motor_b]\n"
       "max_ticks: 10\n"
       "command_value: 0.2\n"
-      "timeout_ms: 300\n"
+      "commit_timeout_ms: 300\n"
+      "session_timeout_ms: 900\n"
+      "heartbeat_period_ms: 200\n"
       "service_timeout_ms: 400\n");
   mujoco_sim::sample_adapter::SampleOptions options;
   std::string error;
@@ -179,7 +187,9 @@ TEST(SampleAdapterTest, LoadsYamlAndAppliesCommandLineOverrides) {
             (std::vector<std::string>{"motor_a", "motor_b"}));
   EXPECT_EQ(options.max_ticks, 11u);
   EXPECT_DOUBLE_EQ(options.command_value, 0.2);
-  EXPECT_EQ(options.adapter.timeout_ms, 300u);
+  EXPECT_EQ(options.adapter.commit_timeout_ms, 300u);
+  EXPECT_EQ(options.adapter.session_timeout_ms, 900u);
+  EXPECT_EQ(options.adapter.heartbeat_period_ms, 200u);
   EXPECT_EQ(options.adapter.service_timeout_ms, 400u);
 }
 
@@ -188,7 +198,7 @@ TEST(SampleAdapterTest, RejectsInvalidYamlTransactionally) {
       {"unknown: true\n", "unknown"},
       {"command_names: motor\n", "sequence"},
       {"command_value: nan\n", "finite"},
-      {"timeout_ms: 4294967296\n", "range"},
+      {"commit_timeout_ms: 4294967296\n", "range"},
   };
 
   for (std::size_t i = 0; i < invalid.size(); ++i) {

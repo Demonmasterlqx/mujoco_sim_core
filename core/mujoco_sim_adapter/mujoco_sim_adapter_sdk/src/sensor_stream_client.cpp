@@ -21,14 +21,14 @@ namespace mujoco_sim::adapter_sdk {
 namespace {
 
 std::optional<std::uint64_t> BytesPerPixel(
-    mujoco_sim::v2::StreamFormat format) {
+    mujoco_sim::v3::StreamFormat format) {
   switch (format) {
-    case mujoco_sim::v2::RGB8:
+    case mujoco_sim::v3::RGB8:
       return 3;
-    case mujoco_sim::v2::DEPTH32F:
-    case mujoco_sim::v2::SEGMENTATION32U:
+    case mujoco_sim::v3::DEPTH32F:
+    case mujoco_sim::v3::SEGMENTATION32U:
       return 4;
-    case mujoco_sim::v2::XYZ32F:
+    case mujoco_sim::v3::XYZ32F:
       return 12;
     default:
       return std::nullopt;
@@ -217,14 +217,11 @@ bool SensorStreamClient::Impl::FinishStart(std::string* error_message) {
 }
 
 bool SensorStreamClient::Impl::DiscoverStreams(std::string* error_message) {
-  mujoco_sim::v2::GetSensorStreamsRequest request;
-  request.set_server_name(options_.server_name);
-  request.set_protocol_major(mujoco_sim::protocol::kProtocolMajor);
-  request.set_protocol_minor(mujoco_sim::protocol::kProtocolMinor);
+  mujoco_sim::v3::GetSensorStreamsRequest request;
   if (!transport_->Discover(request, &discovery_, error_message)) {
     return false;
   }
-  if (discovery_.code() != mujoco_sim::v2::OK) {
+  if (discovery_.code() != mujoco_sim::v3::OK) {
     *error_message = discovery_.message();
     return false;
   }
@@ -237,7 +234,7 @@ bool SensorStreamClient::Impl::DiscoverStreams(std::string* error_message) {
 
 bool SensorStreamClient::Impl::ConfigureDiscoveredStreams(
     std::string* error_message) {
-  std::unordered_map<std::string, const mujoco_sim::v2::StreamDescriptor*>
+  std::unordered_map<std::string, const mujoco_sim::v3::StreamDescriptor*>
       available;
   for (const auto& descriptor : discovery_.streams()) {
     if (!available.emplace(descriptor.name(), &descriptor).second) {
@@ -269,7 +266,7 @@ bool SensorStreamClient::Impl::ConfigureDiscoveredStreams(
 }
 
 bool SensorStreamClient::Impl::ValidateDescriptor(
-    const mujoco_sim::v2::StreamDescriptor& descriptor,
+    const mujoco_sim::v3::StreamDescriptor& descriptor,
     std::string* error_message) const {
   const auto bytes_per_pixel = BytesPerPixel(descriptor.format());
   if (descriptor.name().empty() || !bytes_per_pixel.has_value()) {
@@ -306,7 +303,7 @@ bool SensorStreamClient::Impl::ValidateDescriptor(
     return false;
   }
   if (descriptor.frame_convention() ==
-      mujoco_sim::v2::FRAME_CONVENTION_UNSPECIFIED) {
+      mujoco_sim::v3::FRAME_CONVENTION_UNSPECIFIED) {
     *error_message = "sensor stream frame convention is unspecified: " +
                      descriptor.name();
     return false;
@@ -415,7 +412,7 @@ void SensorStreamClient::Impl::Stop() {
   condition_.notify_all();
 }
 
-std::optional<mujoco_sim::v2::StreamDescriptor>
+std::optional<mujoco_sim::v3::StreamDescriptor>
 SensorStreamClient::Impl::descriptor(const std::string& stream_name) const {
   std::lock_guard lock(mutex_);
   const auto found = streams_.find(stream_name);
