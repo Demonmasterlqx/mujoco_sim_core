@@ -20,13 +20,12 @@ namespace {
 
 constexpr auto kWarningPeriod = std::chrono::seconds(1);
 
-void LogBoundaryFailure(const std::shared_ptr<spdlog::logger>& logger,
-                        std::string_view boundary, std::string_view operation,
-                        std::string_view error) noexcept {
+void LogBoundaryFailure(const std::shared_ptr<spdlog::logger>& logger, std::string_view boundary,
+                        std::string_view operation, std::string_view error) noexcept {
   try {
     if (logger) {
-      logger->error("event=ecal_exception boundary={} operation={} error={}",
-                    boundary, LogValue(operation), LogValue(error));
+      logger->error("event=ecal_exception boundary={} operation={} error={}", boundary,
+                    LogValue(operation), LogValue(error));
     }
   } catch (...) {
   }
@@ -59,15 +58,15 @@ class ServerApplication::Impl {
     const auto log = logger->get();
     log->info(
         "event=server_starting server_name={} model_path={} initial_keyframe={} "
-        "mode={} max_ticks={} tick_timeout_ms={} activation_timeout_ms={} "
-        "allow_timed_out_adapter_replacement={} status_period_ms={} "
+        "mode={} pacing_mode={} realtime_factor={} max_ticks={} "
+        "command_timeout_ms={} command_keepalive_ms={} "
+        "activation_timeout_ms={} status_period_ms={} "
         "log_level={} log_file={} log_summary_period_ms={}",
         LogValue(config.server_name), LogValue(config.model_path),
-        LogValue(config.initial_keyframe), config.headless ? "headless" : "gui",
-        config.max_ticks, config.tick_timeout_ms, config.activation_timeout_ms,
-        config.allow_timed_out_adapter_replacement, config.status_period_ms,
-        config.log_level, LogValue(config.log_file),
-        config.log_summary_period_ms);
+        LogValue(config.initial_keyframe), config.headless ? "headless" : "gui", config.pacing_mode,
+        config.realtime_factor, config.max_ticks, config.command_timeout_ms,
+        config.command_keepalive_ms, config.activation_timeout_ms, config.status_period_ms,
+        config.log_level, LogValue(config.log_file), config.log_summary_period_ms);
 
     std::string boundary_error;
     bool initialized = false;
@@ -83,9 +82,8 @@ class ServerApplication::Impl {
             },
             &boundary_error) ||
         !initialized) {
-      *error_message = boundary_error.empty()
-                           ? "failed to initialize eCAL"
-                           : "eCAL initialization threw: " + boundary_error;
+      *error_message = boundary_error.empty() ? "failed to initialize eCAL"
+                                              : "eCAL initialization threw: " + boundary_error;
       return false;
     }
 
@@ -97,18 +95,15 @@ class ServerApplication::Impl {
       log->info("event=viewer_initialized mode=headless");
     }
 
-    transport =
-        std::make_unique<EcalServerTransport>(config.server_name, logger->get());
-    loop = std::make_unique<SimulationLoop>(
-        config, logger->get(), warning_limiter.get(), transport.get(),
-        viewer.get());
+    transport = std::make_unique<EcalServerTransport>(config.server_name, logger->get());
+    loop = std::make_unique<SimulationLoop>(config, logger->get(), warning_limiter.get(),
+                                            transport.get(), viewer.get());
     if (!loop->Initialize(error_message)) return false;
     if (!transport->Start(loop->MakeHandlers(), error_message)) return false;
     if (!loop->Start(error_message)) return false;
 
     started = true;
-    log->info("event=server_started server_name={}",
-              LogValue(config.server_name));
+    log->info("event=server_started server_name={}", LogValue(config.server_name));
     return true;
   }
 
@@ -122,14 +117,11 @@ class ServerApplication::Impl {
     bool render_succeeded = true;
     if (viewer) {
       std::string error;
-      render_succeeded = RunWithExceptionBoundary(
-          [this] { viewer->RenderLoop(); }, &error);
+      render_succeeded = RunWithExceptionBoundary([this] { viewer->RenderLoop(); }, &error);
       if (!render_succeeded) {
-        LogBoundaryFailure(logger->get(), "gui_render_thread", "RenderLoop",
-                           error);
+        LogBoundaryFailure(logger->get(), "gui_render_thread", "RenderLoop", error);
       }
-      RequestStop(render_succeeded ? "viewer_closed"
-                                   : "viewer_render_exception");
+      RequestStop(render_succeeded ? "viewer_closed" : "viewer_render_exception");
     }
 
     int result = loop->Join();
@@ -160,8 +152,8 @@ class ServerApplication::Impl {
         },
         &error);
     if (!error.empty()) {
-      LogBoundaryFailure(logger ? logger->get() : nullptr, "server_destructor",
-                         "simulation_loop", error);
+      LogBoundaryFailure(logger ? logger->get() : nullptr, "server_destructor", "simulation_loop",
+                         error);
     }
     RunWithExceptionBoundary(
         [this] {
@@ -203,7 +195,9 @@ bool ServerApplication::Start(std::string* error_message) {
   return impl_->Start(error_message);
 }
 
-int ServerApplication::Run() { return impl_->Run(); }
+int ServerApplication::Run() {
+  return impl_->Run();
+}
 
 void ServerApplication::RequestStop(std::string reason) {
   impl_->RequestStop(std::move(reason));

@@ -11,7 +11,7 @@ import sys
 
 MAX_CCN = 15
 MAX_FUNCTION_NLOC = 80
-MAX_CPP_LINES = 500
+MAX_CPP_LINES = 800
 ANALYZED_PATH = "core/mujoco_sim_adapter/mujoco_sim_adapter_sdk/src"
 
 

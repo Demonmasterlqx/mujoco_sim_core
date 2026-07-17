@@ -5,7 +5,7 @@
 #include <string>
 #include <vector>
 
-#include <mujoco_sim/adapter_sdk/sync_adapter_client.hpp>
+#include <mujoco_sim/adapter_sdk/controller_client.hpp>
 #include <mujoco_sim/adapter_sdk/observer_client.hpp>
 #include <mujoco_sim/sensor_demo/waypoint_controller.hpp>
 
@@ -40,21 +40,18 @@ struct ImuOrientationSample {
   std::array<double, 4> quaternion{1.0, 0.0, 0.0, 0.0};
 };
 
-std::vector<std::string> ControllerObservationNames(
-    const ControllerInterfaces& interfaces);
-std::vector<std::string> ControllerCommandNames(
-    const ControllerInterfaces& interfaces);
-std::vector<std::string> StateObservationNames(
-    const StateObserverInterfaces& interfaces);
+std::vector<std::string> ControllerObservationNames(const ControllerInterfaces& interfaces);
+std::vector<std::string> ControllerCommandNames(const ControllerInterfaces& interfaces);
+std::vector<std::string> StateObservationNames(const StateObserverInterfaces& interfaces);
 
 class VehicleDecoder {
  public:
   VehicleDecoder(const mujoco_sim::adapter_sdk::ControllerLayout& layout,
                  const ControllerInterfaces& interfaces);
-  bool Decode(const mujoco_sim::adapter_sdk::TickLease& tick,
-              VehicleSample* sample, std::string* error_message) const;
-  bool Decode(std::span<const double> observations, double simulation_time_s,
-              VehicleSample* sample, std::string* error_message) const;
+  bool Decode(const mujoco_sim::adapter_sdk::StateLease& tick, VehicleSample* sample,
+              std::string* error_message) const;
+  bool Decode(std::span<const double> observations, double simulation_time_s, VehicleSample* sample,
+              std::string* error_message) const;
 
  private:
   std::array<mujoco_sim::adapter_sdk::ScalarSpan, 4> wheel_positions_{};
@@ -67,10 +64,10 @@ class StateDecoder {
  public:
   StateDecoder(const mujoco_sim::adapter_sdk::ControllerLayout& layout,
                const StateObserverInterfaces& interfaces);
-  bool Decode(const mujoco_sim::adapter_sdk::ObservationLease& frame,
-              StateSample* sample, std::string* error_message) const;
-  bool Decode(std::span<const double> observations, double simulation_time_s,
-              StateSample* sample, std::string* error_message) const;
+  bool Decode(const mujoco_sim::adapter_sdk::ObservationLease& frame, StateSample* sample,
+              std::string* error_message) const;
+  bool Decode(std::span<const double> observations, double simulation_time_s, StateSample* sample,
+              std::string* error_message) const;
 
  private:
   std::array<mujoco_sim::adapter_sdk::ScalarSpan, 4> wheel_positions_{};
@@ -83,15 +80,12 @@ class StateDecoder {
 
 class ImuOrientationDecoder {
  public:
-  ImuOrientationDecoder(
-      const mujoco_sim::adapter_sdk::ControllerLayout& layout,
-      const std::string& observation_name);
-  bool Decode(const mujoco_sim::adapter_sdk::ObservationLease& frame,
-              ImuOrientationSample* sample,
+  ImuOrientationDecoder(const mujoco_sim::adapter_sdk::ControllerLayout& layout,
+                        const std::string& observation_name);
+  bool Decode(const mujoco_sim::adapter_sdk::ObservationLease& frame, ImuOrientationSample* sample,
               std::string* error_message) const;
   bool Decode(std::span<const double> observations, double simulation_time_s,
-              ImuOrientationSample* sample,
-              std::string* error_message) const;
+              ImuOrientationSample* sample, std::string* error_message) const;
 
  private:
   mujoco_sim::adapter_sdk::ScalarSpan quaternion_{};
@@ -102,8 +96,8 @@ class WheelCommandMapper {
  public:
   WheelCommandMapper(const mujoco_sim::adapter_sdk::ControllerLayout& layout,
                      const ControllerInterfaces& interfaces);
-  bool Map(const std::array<double, 4>& wheel_angular_velocities,
-           std::vector<double>* commands, std::string* error_message) const;
+  bool Map(const std::array<double, 4>& wheel_angular_velocities, std::vector<double>* commands,
+           std::string* error_message) const;
 
  private:
   std::array<std::size_t, 4> offsets_{};

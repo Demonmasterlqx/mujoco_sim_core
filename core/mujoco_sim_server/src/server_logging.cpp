@@ -47,17 +47,17 @@ spdlog::level::level_enum ParseLevel(const std::string& level) {
 }
 
 bool IsValidLevel(const std::string& level) {
-  return level == "trace" || level == "debug" || level == "info" ||
-         level == "warn" || level == "error" || level == "critical" ||
-         level == "off";
+  return level == "trace" || level == "debug" || level == "info" || level == "warn" ||
+         level == "error" || level == "critical" || level == "off";
 }
 
 }  // namespace
 
-ServerLogger::~ServerLogger() { Flush(); }
+ServerLogger::~ServerLogger() {
+  Flush();
+}
 
-bool ServerLogger::Initialize(const ServerConfig& config,
-                              std::string* error_message) {
+bool ServerLogger::Initialize(const ServerConfig& config, std::string* error_message) {
   if (error_message == nullptr) {
     return false;
   }
@@ -74,8 +74,7 @@ bool ServerLogger::Initialize(const ServerConfig& config,
     *error_message = "log_file_max_size_mb must be >= 1";
     return false;
   }
-  if (config.log_file_max_files == 0 ||
-      config.log_file_max_files > 200000) {
+  if (config.log_file_max_files == 0 || config.log_file_max_files > 200000) {
     *error_message = "log_file_max_files must be in range [1, 200000]";
     return false;
   }
@@ -91,27 +90,23 @@ bool ServerLogger::Initialize(const ServerConfig& config,
       if (!path.parent_path().empty()) {
         std::filesystem::create_directories(path.parent_path());
       }
-      if (config.log_file_max_size_mb >
-          std::numeric_limits<std::size_t>::max() / kBytesPerMiB) {
+      if (config.log_file_max_size_mb > std::numeric_limits<std::size_t>::max() / kBytesPerMiB) {
         *error_message = "log file size is too large";
         return false;
       }
       auto file = std::make_shared<spdlog::sinks::rotating_file_sink_mt>(
-          path.string(),
-          static_cast<std::size_t>(config.log_file_max_size_mb) * kBytesPerMiB,
+          path.string(), static_cast<std::size_t>(config.log_file_max_size_mb) * kBytesPerMiB,
           static_cast<std::size_t>(config.log_file_max_files - 1));
       file->set_pattern(std::string(kFilePattern));
       sinks.push_back(std::move(file));
     }
 
-    auto logger = std::make_shared<spdlog::logger>(
-        "mujoco-sim-server", sinks.begin(), sinks.end());
+    auto logger = std::make_shared<spdlog::logger>("mujoco-sim-server", sinks.begin(), sinks.end());
     auto healthy = std::make_shared<std::atomic<bool>>(true);
     logger->set_error_handler([healthy](const std::string& message) {
       healthy->store(false);
-      std::osyncstream(std::cerr)
-          << "level=error component=server event=log_sink_error error="
-          << LogValue(message) << '\n';
+      std::osyncstream(std::cerr) << "level=error component=server event=log_sink_error error="
+                                  << LogValue(message) << '\n';
     });
     logger->set_level(ParseLevel(config.log_level));
     logger->flush_on(spdlog::level::info);
@@ -119,8 +114,7 @@ bool ServerLogger::Initialize(const ServerConfig& config,
     healthy_ = std::move(healthy);
     return true;
   } catch (const std::exception& error) {
-    *error_message = "failed to initialize server logging: " +
-                     std::string(error.what());
+    *error_message = "failed to initialize server logging: " + std::string(error.what());
     return false;
   }
 }
@@ -135,19 +129,17 @@ bool ServerLogger::healthy() const {
   return healthy_ == nullptr || healthy_->load();
 }
 
-WarningLimiter::WarningLimiter(std::chrono::steady_clock::duration period)
-    : period_(period) {}
+WarningLimiter::WarningLimiter(std::chrono::steady_clock::duration period) : period_(period) {}
 
 WarningDecision WarningLimiter::Admit(std::string_view key) {
   return AdmitAt(key, std::chrono::steady_clock::now());
 }
 
-WarningDecision WarningLimiter::AdmitAt(
-    std::string_view key, std::chrono::steady_clock::time_point now) {
+WarningDecision WarningLimiter::AdmitAt(std::string_view key,
+                                        std::chrono::steady_clock::time_point now) {
   std::lock_guard lock(mutex_);
   auto& entry = entries_[std::string(key)];
-  if (entry.last == std::chrono::steady_clock::time_point{} ||
-      now - entry.last >= period_) {
+  if (entry.last == std::chrono::steady_clock::time_point{} || now - entry.last >= period_) {
     WarningDecision decision{true, entry.suppressed};
     entry.last = now;
     entry.suppressed = 0;

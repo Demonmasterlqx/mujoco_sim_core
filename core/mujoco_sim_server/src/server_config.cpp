@@ -5,11 +5,12 @@
 #include <filesystem>
 #include <limits>
 #include <string>
+#include <unordered_set>
 #include <utility>
 #include <vector>
 
 #include <mujoco_sim/protocol/identifier.hpp>
-#include <mujoco_sim/v3/sync.pb.h>
+#include <mujoco_sim/v4/sync.pb.h>
 #if MUJOCO_SIM_HAS_SENSOR_STREAMS
 #include <mujoco_sim/sensor/source_profile.hpp>
 #endif
@@ -19,8 +20,7 @@
 namespace mujoco_sim::server {
 namespace {
 
-generated::ServerConfig::LogLevel ToGeneratedLogLevel(
-    const std::string& level) {
+generated::ServerConfig::LogLevel ToGeneratedLogLevel(const std::string& level) {
   if (level == "trace") {
     return generated::ServerConfig::LogLevel::kTrace;
   }
@@ -62,8 +62,7 @@ std::string ToPublicLogLevel(generated::ServerConfig::LogLevel level) {
   return "info";
 }
 
-generated::ServerConfig::RenderBackend ToGeneratedRenderBackend(
-    const std::string& value) {
+generated::ServerConfig::RenderBackend ToGeneratedRenderBackend(const std::string& value) {
   if (value == "egl") return generated::ServerConfig::RenderBackend::kEgl;
   if (value == "osmesa") {
     return generated::ServerConfig::RenderBackend::kOsmesa;
@@ -71,8 +70,7 @@ generated::ServerConfig::RenderBackend ToGeneratedRenderBackend(
   return generated::ServerConfig::RenderBackend::kAuto;
 }
 
-std::string ToPublicRenderBackend(
-    generated::ServerConfig::RenderBackend value) {
+std::string ToPublicRenderBackend(generated::ServerConfig::RenderBackend value) {
   switch (value) {
     case generated::ServerConfig::RenderBackend::kEgl:
       return "egl";
@@ -84,8 +82,7 @@ std::string ToPublicRenderBackend(
   return "auto";
 }
 
-generated::ServerConfig::SensorStreamsItem::Kind ToGeneratedStreamKind(
-    const std::string& value) {
+generated::ServerConfig::SensorStreamsItem::Kind ToGeneratedStreamKind(const std::string& value) {
   using Kind = generated::ServerConfig::SensorStreamsItem::Kind;
   if (value == "depth") return Kind::kDepth;
   if (value == "segmentation") return Kind::kSegmentation;
@@ -94,8 +91,7 @@ generated::ServerConfig::SensorStreamsItem::Kind ToGeneratedStreamKind(
   return Kind::kRgb;
 }
 
-std::string ToPublicStreamKind(
-    generated::ServerConfig::SensorStreamsItem::Kind value) {
+std::string ToPublicStreamKind(generated::ServerConfig::SensorStreamsItem::Kind value) {
   using Kind = generated::ServerConfig::SensorStreamsItem::Kind;
   switch (value) {
     case Kind::kRgb:
@@ -120,8 +116,7 @@ generated::ServerConfig::SensorStreamsItem::QueueMode ToGeneratedQueueMode(
   return Mode::kLatest;
 }
 
-std::string ToPublicQueueMode(
-    generated::ServerConfig::SensorStreamsItem::QueueMode value) {
+std::string ToPublicQueueMode(generated::ServerConfig::SensorStreamsItem::QueueMode value) {
   using Mode = generated::ServerConfig::SensorStreamsItem::QueueMode;
   switch (value) {
     case Mode::kLatest:
@@ -134,26 +129,22 @@ std::string ToPublicQueueMode(
   return "latest";
 }
 
-generated::ServerConfig::SensorStreamsItem::FifoOverflow
-ToGeneratedFifoOverflow(const std::string& value) {
-  using Overflow =
-      generated::ServerConfig::SensorStreamsItem::FifoOverflow;
-  return value == "drop_newest" ? Overflow::kDropNewest
-                                 : Overflow::kDropOldest;
+generated::ServerConfig::SensorStreamsItem::FifoOverflow ToGeneratedFifoOverflow(
+    const std::string& value) {
+  using Overflow = generated::ServerConfig::SensorStreamsItem::FifoOverflow;
+  return value == "drop_newest" ? Overflow::kDropNewest : Overflow::kDropOldest;
 }
 
-std::string ToPublicFifoOverflow(
-    generated::ServerConfig::SensorStreamsItem::FifoOverflow value) {
-  using Overflow =
-      generated::ServerConfig::SensorStreamsItem::FifoOverflow;
+std::string ToPublicFifoOverflow(generated::ServerConfig::SensorStreamsItem::FifoOverflow value) {
+  using Overflow = generated::ServerConfig::SensorStreamsItem::FifoOverflow;
   return value == Overflow::kDropNewest ? "drop_newest" : "drop_oldest";
 }
 
-mujoco_sim::v3::StreamFormat StreamFormatForKind(const std::string& kind) {
-  if (kind == "rgb") return mujoco_sim::v3::RGB8;
-  if (kind == "depth") return mujoco_sim::v3::DEPTH32F;
-  if (kind == "segmentation") return mujoco_sim::v3::SEGMENTATION32U;
-  return mujoco_sim::v3::XYZ32F;
+mujoco_sim::v4::StreamFormat StreamFormatForKind(const std::string& kind) {
+  if (kind == "rgb") return mujoco_sim::v4::RGB8;
+  if (kind == "depth") return mujoco_sim::v4::DEPTH32F;
+  if (kind == "segmentation") return mujoco_sim::v4::SEGMENTATION32U;
+  return mujoco_sim::v4::XYZ32F;
 }
 
 generated::ServerConfig ToGenerated(const ServerConfig& config) {
@@ -162,26 +153,42 @@ generated::ServerConfig ToGenerated(const ServerConfig& config) {
   output.model_path = config.model_path;
   output.initial_keyframe = config.initial_keyframe;
   output.max_ticks = config.max_ticks;
-  output.tick_timeout_ms = config.tick_timeout_ms;
+  output.pacing_mode = config.pacing_mode;
+  output.realtime_factor = config.realtime_factor;
+  output.command_timeout_ms = config.command_timeout_ms;
+  output.command_keepalive_ms = config.command_keepalive_ms;
+  output.offline_session_expire_ms = config.offline_session_expire_ms;
+  output.controller_state_every_n_steps = config.controller_state_every_n_steps;
+  output.controller_state_period_s = config.controller_state_period_s;
+  output.controller_state_max_rate_hz = config.controller_state_max_rate_hz;
+  output.startup_ctrl_policy = config.startup_ctrl_policy;
+  output.offline_ctrl_policy = config.offline_ctrl_policy;
+  output.error_ctrl_policy = config.error_ctrl_policy;
+  output.release_ctrl_policy = config.release_ctrl_policy;
+  output.controller_overrides.clear();
+  for (const auto& override : config.controller_overrides) {
+    generated::ServerConfig::ControllerOverridesItem item;
+    item.adapter_id = override.adapter_id;
+    item.command_timeout_ms = override.command_timeout_ms;
+    item.command_keepalive_ms = override.command_keepalive_ms;
+    item.offline_session_expire_ms = override.offline_session_expire_ms;
+    item.state_every_n_steps = override.state_every_n_steps;
+    item.state_period_s = override.state_period_s;
+    item.startup_ctrl_policy = override.startup_ctrl_policy;
+    item.offline_ctrl_policy = override.offline_ctrl_policy;
+    item.error_ctrl_policy = override.error_ctrl_policy;
+    item.release_ctrl_policy = override.release_ctrl_policy;
+    output.controller_overrides.push_back(std::move(item));
+  }
   output.session_timeout_ms = config.session_timeout_ms;
-  output.controller_heartbeat_period_ms =
-      config.controller_heartbeat_period_ms;
   output.observer_heartbeat_period_ms = config.observer_heartbeat_period_ms;
-  output.tick_retry_initial_ms = config.tick_retry_initial_ms;
-  output.tick_retry_backoff_multiplier = config.tick_retry_backoff_multiplier;
-  output.tick_retry_max_delay_ms = config.tick_retry_max_delay_ms;
-  output.tick_retry_max_attempts = config.tick_retry_max_attempts;
   output.activation_timeout_ms = config.activation_timeout_ms;
-  output.allow_timed_out_adapter_replacement =
-      config.allow_timed_out_adapter_replacement;
   output.status_period_ms = config.status_period_ms;
   output.status_min_interval_ms = config.status_min_interval_ms;
   output.observer_max_rate_hz = config.observer_max_rate_hz;
   output.allow_every_step_observer = config.allow_every_step_observer;
-  output.transport_subscriber_sample_period_ms =
-      config.transport_subscriber_sample_period_ms;
-  output.sensor_subscriber_sample_period_ms =
-      config.sensor_subscriber_sample_period_ms;
+  output.transport_subscriber_sample_period_ms = config.transport_subscriber_sample_period_ms;
+  output.sensor_subscriber_sample_period_ms = config.sensor_subscriber_sample_period_ms;
   output.headless = config.headless;
   output.log_level = ToGeneratedLogLevel(config.log_level);
   output.log_file = config.log_file;
@@ -220,26 +227,41 @@ ServerConfig ToPublic(generated::ServerConfig config) {
   output.model_path = std::move(config.model_path).string();
   output.initial_keyframe = std::move(config.initial_keyframe);
   output.max_ticks = config.max_ticks;
-  output.tick_timeout_ms = config.tick_timeout_ms;
+  output.pacing_mode = std::move(config.pacing_mode);
+  output.realtime_factor = config.realtime_factor;
+  output.command_timeout_ms = config.command_timeout_ms;
+  output.command_keepalive_ms = config.command_keepalive_ms;
+  output.offline_session_expire_ms = config.offline_session_expire_ms;
+  output.controller_state_every_n_steps = config.controller_state_every_n_steps;
+  output.controller_state_period_s = config.controller_state_period_s;
+  output.controller_state_max_rate_hz = config.controller_state_max_rate_hz;
+  output.startup_ctrl_policy = std::move(config.startup_ctrl_policy);
+  output.offline_ctrl_policy = std::move(config.offline_ctrl_policy);
+  output.error_ctrl_policy = std::move(config.error_ctrl_policy);
+  output.release_ctrl_policy = std::move(config.release_ctrl_policy);
+  for (auto& override : config.controller_overrides) {
+    ServerConfig::ControllerOverride item;
+    item.adapter_id = std::move(override.adapter_id);
+    item.command_timeout_ms = override.command_timeout_ms;
+    item.command_keepalive_ms = override.command_keepalive_ms;
+    item.offline_session_expire_ms = override.offline_session_expire_ms;
+    item.state_every_n_steps = override.state_every_n_steps;
+    item.state_period_s = override.state_period_s;
+    item.startup_ctrl_policy = std::move(override.startup_ctrl_policy);
+    item.offline_ctrl_policy = std::move(override.offline_ctrl_policy);
+    item.error_ctrl_policy = std::move(override.error_ctrl_policy);
+    item.release_ctrl_policy = std::move(override.release_ctrl_policy);
+    output.controller_overrides.push_back(std::move(item));
+  }
   output.session_timeout_ms = config.session_timeout_ms;
-  output.controller_heartbeat_period_ms =
-      config.controller_heartbeat_period_ms;
   output.observer_heartbeat_period_ms = config.observer_heartbeat_period_ms;
-  output.tick_retry_initial_ms = config.tick_retry_initial_ms;
-  output.tick_retry_backoff_multiplier = config.tick_retry_backoff_multiplier;
-  output.tick_retry_max_delay_ms = config.tick_retry_max_delay_ms;
-  output.tick_retry_max_attempts = config.tick_retry_max_attempts;
   output.activation_timeout_ms = config.activation_timeout_ms;
-  output.allow_timed_out_adapter_replacement =
-      config.allow_timed_out_adapter_replacement;
   output.status_period_ms = config.status_period_ms;
   output.status_min_interval_ms = config.status_min_interval_ms;
   output.observer_max_rate_hz = config.observer_max_rate_hz;
   output.allow_every_step_observer = config.allow_every_step_observer;
-  output.transport_subscriber_sample_period_ms =
-      config.transport_subscriber_sample_period_ms;
-  output.sensor_subscriber_sample_period_ms =
-      config.sensor_subscriber_sample_period_ms;
+  output.transport_subscriber_sample_period_ms = config.transport_subscriber_sample_period_ms;
+  output.sensor_subscriber_sample_period_ms = config.sensor_subscriber_sample_period_ms;
   output.headless = config.headless;
   output.log_level = ToPublicLogLevel(config.log_level);
   output.log_file = std::move(config.log_file).string();
@@ -280,8 +302,7 @@ std::vector<const char*> ConstArgv(int argc, char** argv) {
   return result;
 }
 
-bool ValidateSensorStreams(const ServerConfig& config,
-                           std::string* error_message) {
+bool ValidateSensorStreams(const ServerConfig& config, std::string* error_message) {
 #if !MUJOCO_SIM_HAS_SENSOR_STREAMS
   if (!config.sensor_streams.empty()) {
     *error_message = "this build does not include sensor streams";
@@ -295,29 +316,23 @@ bool ValidateSensorStreams(const ServerConfig& config,
     return false;
   }
   if (!config.headless && config.render_backend == "osmesa") {
-    *error_message =
-        "render_backend osmesa is incompatible with the graphical viewer";
+    *error_message = "render_backend osmesa is incompatible with the graphical viewer";
     return false;
   }
   std::vector<std::string> stream_names;
-  const std::vector<std::string> kinds = {
-      "rgb", "depth", "segmentation", "camera_pointcloud",
-      "lidar_pointcloud"};
-  const std::vector<std::string> queue_modes = {"latest", "fifo",
-                                                 "blocking"};
+  const std::vector<std::string> kinds = {"rgb", "depth", "segmentation", "camera_pointcloud",
+                                          "lidar_pointcloud"};
+  const std::vector<std::string> queue_modes = {"latest", "fifo", "blocking"};
   for (const auto& stream : config.sensor_streams) {
     if (!mujoco_sim::protocol::ValidateIdentifier(
-            stream.name, mujoco_sim::protocol::IdentifierKind::kStream,
-            error_message)) {
+            stream.name, mujoco_sim::protocol::IdentifierKind::kStream, error_message)) {
       return false;
     }
     if (stream.source.empty() || stream.frame_id.empty()) {
-      *error_message =
-          "sensor stream name, source, and frame_id must not be empty";
+      *error_message = "sensor stream name, source, and frame_id must not be empty";
       return false;
     }
-    if (std::find(stream_names.begin(), stream_names.end(), stream.name) !=
-        stream_names.end()) {
+    if (std::find(stream_names.begin(), stream_names.end(), stream.name) != stream_names.end()) {
       *error_message = "duplicate sensor stream name: " + stream.name;
       return false;
     }
@@ -326,62 +341,48 @@ bool ValidateSensorStreams(const ServerConfig& config,
       *error_message = "invalid sensor stream kind: " + stream.name;
       return false;
     }
-    if (!std::isfinite(stream.rate_hz) ||
-        stream.rate_hz < kMinimumSensorStreamRateHz ||
+    if (!std::isfinite(stream.rate_hz) || stream.rate_hz < kMinimumSensorStreamRateHz ||
         stream.rate_hz > kMaximumSensorStreamRateHz) {
-      *error_message = "sensor stream rate_hz is out of range: " +
-                       stream.name;
+      *error_message = "sensor stream rate_hz is out of range: " + stream.name;
       return false;
     }
-    if (stream.width == 0 || stream.height == 0 ||
-        stream.horizontal_samples == 0 || stream.vertical_samples == 0 ||
-        stream.queue_depth == 0) {
-      *error_message = "sensor stream dimensions must be positive: " +
-                       stream.name;
+    if (stream.width == 0 || stream.height == 0 || stream.horizontal_samples == 0 ||
+        stream.vertical_samples == 0 || stream.queue_depth == 0) {
+      *error_message = "sensor stream dimensions must be positive: " + stream.name;
       return false;
     }
     constexpr auto kRendererIntegerLimit =
         static_cast<std::uint32_t>(std::numeric_limits<int>::max());
-    if (stream.width > kRendererIntegerLimit ||
-        stream.height > kRendererIntegerLimit ||
+    if (stream.width > kRendererIntegerLimit || stream.height > kRendererIntegerLimit ||
         stream.horizontal_samples > kRendererIntegerLimit ||
         stream.vertical_samples > kRendererIntegerLimit) {
-      *error_message =
-          "sensor stream dimensions exceed renderer integer limits: " +
-          stream.name;
+      *error_message = "sensor stream dimensions exceed renderer integer limits: " + stream.name;
       return false;
     }
     const bool is_lidar = stream.kind == "lidar_pointcloud";
     mujoco_sim::sensor::StreamShape shape;
     std::string shape_error;
     if (!mujoco_sim::sensor::StreamShapeFor(
-            StreamFormatForKind(stream.kind),
-            is_lidar ? stream.horizontal_samples : stream.width,
-            is_lidar ? stream.vertical_samples : stream.height, &shape,
-            &shape_error)) {
-      *error_message = "sensor stream shape is invalid: " + stream.name +
-                       ": " + shape_error;
+            StreamFormatForKind(stream.kind), is_lidar ? stream.horizontal_samples : stream.width,
+            is_lidar ? stream.vertical_samples : stream.height, &shape, &shape_error)) {
+      *error_message = "sensor stream shape is invalid: " + stream.name + ": " + shape_error;
       return false;
     }
     if (stream.queue_depth > kMaximumSensorStreamQueueDepth) {
       *error_message = "sensor stream queue_depth exceeds maximum of " +
-                       std::to_string(kMaximumSensorStreamQueueDepth) + ": " +
-                       stream.name;
+                       std::to_string(kMaximumSensorStreamQueueDepth) + ": " + stream.name;
       return false;
     }
-    if (std::find(queue_modes.begin(), queue_modes.end(), stream.queue_mode) ==
-        queue_modes.end()) {
+    if (std::find(queue_modes.begin(), queue_modes.end(), stream.queue_mode) == queue_modes.end()) {
       *error_message = "invalid sensor stream queue_mode: " + stream.name;
       return false;
     }
-    if (stream.fifo_overflow != "drop_oldest" &&
-        stream.fifo_overflow != "drop_newest") {
+    if (stream.fifo_overflow != "drop_oldest" && stream.fifo_overflow != "drop_newest") {
       *error_message = "invalid sensor stream fifo_overflow: " + stream.name;
       return false;
     }
     if (!std::isfinite(stream.vertical_fov_min_deg) ||
-        !std::isfinite(stream.vertical_fov_max_deg) ||
-        stream.vertical_fov_min_deg < -90.0 ||
+        !std::isfinite(stream.vertical_fov_max_deg) || stream.vertical_fov_min_deg < -90.0 ||
         stream.vertical_fov_max_deg > 90.0 ||
         stream.vertical_fov_min_deg > stream.vertical_fov_max_deg) {
       *error_message =
@@ -390,9 +391,8 @@ bool ValidateSensorStreams(const ServerConfig& config,
           stream.name;
       return false;
     }
-    if (!std::isfinite(stream.min_range_m) ||
-        !std::isfinite(stream.max_range_m) || stream.min_range_m < 0.0 ||
-        stream.max_range_m < 0.000001 ||
+    if (!std::isfinite(stream.min_range_m) || !std::isfinite(stream.max_range_m) ||
+        stream.min_range_m < 0.0 || stream.max_range_m < 0.000001 ||
         stream.min_range_m >= stream.max_range_m) {
       *error_message =
           "sensor stream range must be finite with 0 <= min_range_m < "
@@ -400,17 +400,12 @@ bool ValidateSensorStreams(const ServerConfig& config,
           stream.name;
       return false;
     }
-    if (is_lidar &&
-        stream.max_range_m >
-            static_cast<double>(std::numeric_limits<float>::max())) {
-      *error_message =
-          "sensor stream max_range_m exceeds lidar float range: " +
-          stream.name;
+    if (is_lidar && stream.max_range_m > static_cast<double>(std::numeric_limits<float>::max())) {
+      *error_message = "sensor stream max_range_m exceeds lidar float range: " + stream.name;
       return false;
     }
     if (stream.queue_mode == "latest" && stream.queue_depth != 1) {
-      *error_message =
-          "latest sensor stream queue_depth must be 1: " + stream.name;
+      *error_message = "latest sensor stream queue_depth must be 1: " + stream.name;
       return false;
     }
   }
@@ -419,10 +414,9 @@ bool ValidateSensorStreams(const ServerConfig& config,
 }
 
 bool ValidateLogging(const ServerConfig& config, std::string* error_message) {
-  static const std::vector<std::string> levels = {
-      "trace", "debug", "info", "warn", "error", "critical", "off"};
-  if (std::find(levels.begin(), levels.end(), config.log_level) ==
-      levels.end()) {
+  static const std::vector<std::string> levels = {"trace", "debug",    "info", "warn",
+                                                  "error", "critical", "off"};
+  if (std::find(levels.begin(), levels.end(), config.log_level) == levels.end()) {
     *error_message =
         "log_level must be one of: trace, debug, info, warn, error, "
         "critical, off";
@@ -444,32 +438,52 @@ bool ValidateLogging(const ServerConfig& config, std::string* error_message) {
     *error_message = "activation_timeout_ms must be >= 1";
     return false;
   }
-  if (config.session_timeout_ms == 0 ||
-      config.controller_heartbeat_period_ms == 0 ||
-      config.observer_heartbeat_period_ms == 0 ||
-      config.controller_heartbeat_period_ms > config.session_timeout_ms / 3 ||
+  if (config.session_timeout_ms == 0 || config.observer_heartbeat_period_ms == 0 ||
       config.observer_heartbeat_period_ms > config.session_timeout_ms / 3) {
     *error_message =
         "heartbeat periods must be positive and no greater than one third "
         "of session_timeout_ms";
     return false;
   }
-  if (config.tick_retry_initial_ms == 0 ||
-      config.tick_retry_max_delay_ms < config.tick_retry_initial_ms ||
-      !std::isfinite(config.tick_retry_backoff_multiplier) ||
-      config.tick_retry_backoff_multiplier < 1.0 ||
-      config.tick_retry_max_delay_ms > config.tick_timeout_ms) {
-    *error_message = "Tick retry configuration is invalid";
+  const auto valid_policy = [](const std::string& value) {
+    return value == "zero" || value == "hold_last";
+  };
+  if ((config.pacing_mode != "realtime" && config.pacing_mode != "unthrottled") ||
+      !std::isfinite(config.realtime_factor) || config.realtime_factor <= 0.0 ||
+      config.command_timeout_ms == 0 || config.command_keepalive_ms == 0 ||
+      config.command_keepalive_ms >= config.command_timeout_ms ||
+      config.controller_state_every_n_steps == 0 ||
+      !std::isfinite(config.controller_state_period_s) || config.controller_state_period_s < 0.0 ||
+      !std::isfinite(config.controller_state_max_rate_hz) ||
+      config.controller_state_max_rate_hz <= 0.0 || !valid_policy(config.startup_ctrl_policy) ||
+      !valid_policy(config.offline_ctrl_policy) || !valid_policy(config.error_ctrl_policy) ||
+      !valid_policy(config.release_ctrl_policy)) {
+    *error_message = "Controller runtime configuration is invalid";
     return false;
+  }
+  std::unordered_set<std::string> override_ids;
+  for (const auto& override : config.controller_overrides) {
+    std::string identifier_error;
+    if (!mujoco_sim::protocol::ValidateIdentifier(override.adapter_id,
+                                                  mujoco_sim::protocol::IdentifierKind::kAdapter,
+                                                  &identifier_error) ||
+        !override_ids.insert(override.adapter_id).second || override.command_timeout_ms == 0 ||
+        override.command_keepalive_ms == 0 ||
+        override.command_keepalive_ms >= override.command_timeout_ms ||
+        override.state_every_n_steps == 0 || !std::isfinite(override.state_period_s) ||
+        override.state_period_s < 0.0 || !valid_policy(override.startup_ctrl_policy) ||
+        !valid_policy(override.offline_ctrl_policy) || !valid_policy(override.error_ctrl_policy) ||
+        !valid_policy(override.release_ctrl_policy)) {
+      *error_message = "Controller override configuration is invalid";
+      return false;
+    }
   }
   if (config.status_period_ms == 0 || config.status_min_interval_ms == 0 ||
       config.status_min_interval_ms > config.status_period_ms) {
-    *error_message =
-        "status_min_interval_ms must be in [1, status_period_ms]";
+    *error_message = "status_min_interval_ms must be in [1, status_period_ms]";
     return false;
   }
-  if (!std::isfinite(config.observer_max_rate_hz) ||
-      config.observer_max_rate_hz <= 0.0 ||
+  if (!std::isfinite(config.observer_max_rate_hz) || config.observer_max_rate_hz <= 0.0 ||
       config.transport_subscriber_sample_period_ms == 0 ||
       config.sensor_subscriber_sample_period_ms == 0) {
     *error_message = "message-rate configuration is invalid";
@@ -497,8 +511,7 @@ bool ValidateFinal(const ServerConfig& config, std::string* error_message) {
     return false;
   }
   if (!mujoco_sim::protocol::ValidateIdentifier(
-          config.server_name,
-          mujoco_sim::protocol::IdentifierKind::kServer, error_message)) {
+          config.server_name, mujoco_sim::protocol::IdentifierKind::kServer, error_message)) {
     return false;
   }
   return true;
@@ -506,8 +519,7 @@ bool ValidateFinal(const ServerConfig& config, std::string* error_message) {
 
 }  // namespace
 
-bool ValidateServerConfig(const ServerConfig& config,
-                          std::string* error_message) {
+bool ValidateServerConfig(const ServerConfig& config, std::string* error_message) {
   if (error_message == nullptr) {
     return false;
   }
@@ -515,8 +527,7 @@ bool ValidateServerConfig(const ServerConfig& config,
   return ValidateFinal(config, error_message);
 }
 
-bool LoadConfigFile(const std::string& path, ServerConfig* config,
-                    std::string* error_message) {
+bool LoadConfigFile(const std::string& path, ServerConfig* config, std::string* error_message) {
   if (config == nullptr || error_message == nullptr) {
     if (error_message != nullptr) {
       *error_message = "config and error_message must not be null";
@@ -538,8 +549,7 @@ bool LoadConfigFile(const std::string& path, ServerConfig* config,
   return true;
 }
 
-bool ParseCommandLine(int argc, char** argv, ServerConfig* config,
-                      std::string* error_message) {
+bool ParseCommandLine(int argc, char** argv, ServerConfig* config, std::string* error_message) {
   if (config == nullptr || error_message == nullptr) {
     if (error_message != nullptr) {
       *error_message = "config and error_message must not be null";
@@ -562,6 +572,8 @@ bool ParseCommandLine(int argc, char** argv, ServerConfig* config,
   return true;
 }
 
-std::string Usage() { return generated::Usage(); }
+std::string Usage() {
+  return generated::Usage();
+}
 
 }  // namespace mujoco_sim::server

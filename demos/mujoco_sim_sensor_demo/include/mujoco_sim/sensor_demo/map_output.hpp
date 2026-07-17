@@ -31,12 +31,11 @@ class MapOutputError : public std::runtime_error {
 
 // All data is validated before the output directory or any temporary file is
 // created. Final files are replaced only after all three staged writes succeed.
-MapOutputPaths SaveMapOutputs(
-    const std::filesystem::path& output_directory, const PointCloud& map,
-    const MapperTrajectory& trajectory, const MapOutputConfig& config = {});
+MapOutputPaths SaveMapOutputs(const std::filesystem::path& output_directory, const PointCloud& map,
+                              const MapperTrajectory& trajectory,
+                              const MapOutputConfig& config = {});
 
-MapOutputPaths SaveMapOutputs(
-    const std::filesystem::path& output_directory,
-    const SimpleIcpMapper& mapper, const MapOutputConfig& config = {});
+MapOutputPaths SaveMapOutputs(const std::filesystem::path& output_directory,
+                              const SimpleIcpMapper& mapper, const MapOutputConfig& config = {});
 
 }  // namespace mujoco_sim::sensor_demo

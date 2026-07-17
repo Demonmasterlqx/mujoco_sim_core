@@ -1,74 +1,88 @@
 # mujoco_sim_core
 
-`mujoco_sim_core` is the transport-independent, single-writer MuJoCo lockstep
-engine. Its public API uses only domain types from
-`<mujoco_sim/core/domain.hpp>` and
-`<mujoco_sim/core/simulation_core.hpp>`. The package does not depend on
-Protobuf, `mujoco_sim_protocol`, or eCAL.
+`SimulationCore` owns the live MuJoCo model/data, resource ownership, Controller
+and Observer sessions, command liveness, and completed-step frame production.
+Production code calls it only from `SimulationLoop`, preserving a single writer.
 
-## Ownership
+The package is transport-independent: it contains no eCAL publisher,
+subscriber, RPC service, command queue, or pacing thread. Callers serialize
+all mutating operations and pass explicit `std::chrono::steady_clock` times to
+command and deadline APIs when deterministic liveness behavior matters.
 
-After model load, production calls to `SimulationCore` are made only by the
-Server's `SimulationLoop`. Core has no mutex and no internal transport thread.
-Viewer and Sensor workers consume isolated `SimulationSnapshot` objects; they
-never access the live `mjData`.
+## Asynchronous Controller model
 
-Every mutating operation returns `EngineEffects`. Commit, Deadline,
-Unregister, LocalError, and EmptyBarrier completion all produce the same
-`StepCompletedEvent` and pass through the Server's one effects pipeline.
+The public runtime operations are `SubmitCommand()`, `Step()`, and
+`CheckDeadlines()`. `SubmitCommand()` validates identity, epoch, layout,
+strictly increasing session sequence, finite values, and actuator ranges, then
+stores only the latest Command. It never steps the model.
 
-## Dense sessions
+At each `Step()` boundary Core applies the final pending policy/Command write,
+calls `mj_step()`, increments the completed-step tick, and creates due
+Controller State and Observer frames. Several Commands received before one
+boundary collapse to the newest. With no new Command, MuJoCo ctrl retains its
+last value.
 
-Registration freezes a `ResourceLayout` containing descriptors, dense scalar
-spans, exact scalar counts, and a 128-bit fingerprint. Issued Tick frames and
-Observer frames contain only identity plus dense `std::vector<double>` values.
-`ControllerCommit` contains dense commands. Resource lookup, MuJoCo IDs, command
-ranges, and write offsets are prepared at registration, so the step path does
-not perform name lookup.
+Controller State cadence is anchored at activation and may use
+`every_n_steps` or simulation-time `period_s`. Activation emits no initial
+State. `OFFLINE` sessions continue receiving State; `ERROR` sessions do not.
+Controller State sequence is per session and starts at one. Observer delivery
+and heartbeat semantics remain independent of Controller command liveness;
+Controllers do not send session heartbeats.
 
-```cpp
-mujoco_sim::core::SimulationCore core;
-auto loaded = core.LoadModel("model.xml", {});
-if (!loaded.response.loaded) return 1;
+## Lifecycle and policy
 
-mujoco_sim::core::RegisterAdapterRequest request;
-request.set_adapter_id("arm");
-request.set_role(mujoco_sim::core::CONTROLLER);
-request.add_observation_names("hinge_pos");
-request.add_command_names("hinge_motor");
-request.set_commit_timeout_ms(1000);
-request.set_session_timeout_ms(1000);
-auto registration = core.RegisterAdapter(request);
-```
+Controller states are `PROVISIONAL`, `ACTIVE_NO_COMMAND`, `ONLINE`, `OFFLINE`,
+`ERROR`, and `UNREGISTERED`. Command liveness begins at activation. The first
+valid Command enters `ONLINE`; timeout enters `OFFLINE`; a later valid Command
+recovers immediately. Invalid, stale, and duplicate Commands are rejected
+without refreshing liveness or entering `ERROR`. A valid reported Fault makes
+the current session terminal `ERROR`.
 
-Tick identity is immutable and remains readable through its shared handle after
-invalidation. `IsIssuedTickCurrent()` is the publication guard. Wire encoding
-and encoded-byte caching belong to `SimulationLoop`, not Core.
+Startup, offline, error, and release policies are independently `zero` or
+`hold_last`. Policy writes take effect at the next Step boundary, and a later
+Command at that boundary wins. Optional offline expiry unregisters the session,
+releases ownership, and applies release policy.
 
-## Lifecycle and timing
+Replacing an `OFFLINE` or `ERROR` session with the same adapter ID is atomic.
+Other existing states return `ALREADY_EXISTS`. Unregister, expiry, and
+replacement surface an `UNREGISTERED` change so the Server can publish one
+tombstone before removing transport resources.
 
-Controller phases are Provisional, Active, TimedOutAwaitingProof,
-RecoveryPending, and Error. Observer sessions never join a Barrier. Session
-presence and per-Tick Commit deadlines are independent: a valid Commit refreshes
-presence, while heartbeat never satisfies or extends the current Barrier.
+## Core API boundaries
 
-Observer delivery must select exactly one cadence (`every_n_steps` or
-`period_s`). Post-step frames are emitted in `StepCompletedEvent` order.
-Status changes use `StatusUrgency`: routine metrics are periodic-only,
-lifecycle changes are coalescible, and terminal changes are immediate.
+- `LoadModel()` creates a new model epoch and resource catalog.
+- `RegisterAdapter()`, `ActivateAdapter()`, and `UnregisterAdapter()` manage
+  exact session identities and exclusive command-resource ownership.
+- `SubmitCommand()` only updates the latest accepted command; it never calls
+  `mj_step()` and rejected commands do not refresh liveness.
+- `Step()` is the only normal physics advance and returns completed-step
+  Controller/Observer frames through `EngineEffects`.
+- `CheckDeadlines()` performs activation expiry, Observer heartbeat timeout,
+  Controller command timeout, and optional offline-session expiry without
+  advancing physics.
+- `CreateSnapshot()`, `CloneSnapshot()`, and `UpdateSnapshot()` provide
+  isolated model/data copies for viewers and sensor workers.
 
-See [Core components](../../doc/architecture/core_components.md),
-[lifecycle](../../doc/architecture/controller_lifecycle.md), and
-[Tick/Commit sequence](../../doc/architecture/tick_commit_sequence.md).
+`EngineEffects` is the sole side-effect description returned to the Server.
+Transport publication happens after the Core operation; a publication failure
+does not roll physics back or make a Controller part of the Step path.
 
 ## Build and test
 
+From the repository root, after dependencies are available:
+
 ```bash
-cmake -S core/mujoco_sim_core -B build/mujoco_sim_core -DBUILD_TESTING=ON
+cmake -S core/mujoco_sim_core -B build/mujoco_sim_core \
+  -DBUILD_TESTING=ON
 cmake --build build/mujoco_sim_core -j
 ctest --test-dir build/mujoco_sim_core --output-on-failure
 ```
 
-The tests cover registration layout, identity/count/range validation, duplicate
-Commit semantics, all five completion sources, timeout/recovery, replacement,
-zeroing, Observer scheduling, snapshots, and the 10,000-step benchmark.
+The bundled MuJoCo distribution is used by default. Set
+`-DMUJOCO_SIM_USE_BUNDLED_MUJOCO=OFF` to require an external MuJoCo CMake
+package. Installed consumers use `find_package(mujoco_sim_core CONFIG
+REQUIRED)` and link `mujoco_sim::core`.
+
+See [Core components](../../doc/architecture/core_components.md),
+[Controller lifecycle](../../doc/architecture/controller_lifecycle.md), and
+[async sequence](../../doc/architecture/async_controller_sequence.md).

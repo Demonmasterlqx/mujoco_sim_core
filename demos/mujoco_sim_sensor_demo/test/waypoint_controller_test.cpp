@@ -12,14 +12,12 @@
 namespace demo = mujoco_sim::sensor_demo;
 namespace {
 
-demo::VehicleSample MakeSample(double time,
-                               const std::array<double, 4>& wheels,
-                               double yaw, double yaw_rate = 0.0) {
+demo::VehicleSample MakeSample(double time, const std::array<double, 4>& wheels, double yaw,
+                               double yaw_rate = 0.0) {
   demo::VehicleSample sample;
   sample.simulation_time = time;
   sample.wheel_positions = wheels;
-  sample.imu_quaternion =
-      {std::cos(0.5 * yaw), 0.0, 0.0, std::sin(0.5 * yaw)};
+  sample.imu_quaternion = {std::cos(0.5 * yaw), 0.0, 0.0, std::sin(0.5 * yaw)};
   sample.imu_gyro = {0.0, 0.0, yaw_rate};
   return sample;
 }
@@ -47,30 +45,25 @@ RectangleRun RunRectangle() {
   double yaw_rate = 0.0;
 
   for (std::size_t step = 0; step < 20000; ++step) {
-    const auto output =
-        controller.Update(MakeSample(step * kDt, wheels, yaw, yaw_rate));
+    const auto output = controller.Update(MakeSample(step * kDt, wheels, yaw, yaw_rate));
     for (double command : output.wheel_angular_velocities) {
       EXPECT_TRUE(std::isfinite(command));
       EXPECT_LE(std::abs(command), config.max_wheel_angular_speed);
     }
-    EXPECT_DOUBLE_EQ(output.wheel_angular_velocities[0],
-                     output.wheel_angular_velocities[2]);
-    EXPECT_DOUBLE_EQ(output.wheel_angular_velocities[1],
-                     output.wheel_angular_velocities[3]);
+    EXPECT_DOUBLE_EQ(output.wheel_angular_velocities[0], output.wheel_angular_velocities[2]);
+    EXPECT_DOUBLE_EQ(output.wheel_angular_velocities[1], output.wheel_angular_velocities[3]);
 
     if (output.lap_complete) {
       EXPECT_EQ(output.completed_laps, 1U);
-      EXPECT_EQ(output.wheel_angular_velocities,
-                (std::array<double, 4>{}));
+      EXPECT_EQ(output.wheel_angular_velocities, (std::array<double, 4>{}));
       return {step + 1, output.pose};
     }
 
-    const double left = 0.5 * (output.wheel_angular_velocities[0] +
-                               output.wheel_angular_velocities[2]);
-    const double right = 0.5 * (output.wheel_angular_velocities[1] +
-                                output.wheel_angular_velocities[3]);
-    const double linear_velocity =
-        0.5 * config.wheel_radius * (left + right);
+    const double left =
+        0.5 * (output.wheel_angular_velocities[0] + output.wheel_angular_velocities[2]);
+    const double right =
+        0.5 * (output.wheel_angular_velocities[1] + output.wheel_angular_velocities[3]);
+    const double linear_velocity = 0.5 * config.wheel_radius * (left + right);
     yaw_rate = config.wheel_radius * (right - left) / config.track_width;
     const double next_yaw = yaw + yaw_rate * kDt;
     const double distance = linear_velocity * kDt;
@@ -106,8 +99,7 @@ TEST(WaypointControllerTest, GyroPredictionUnwrapsQuaternionYaw) {
 
   const std::array<double, 4> wheels{1.0, 1.0, 1.0, 1.0};
   const auto output = controller.Update(
-      MakeSample(0.1, wheels, -3.10, (-3.10 + 2.0 * std::numbers::pi - 3.10) /
-                                          0.1));
+      MakeSample(0.1, wheels, -3.10, (-3.10 + 2.0 * std::numbers::pi - 3.10) / 0.1));
 
   EXPECT_GT(output.pose.yaw, std::numbers::pi);
   EXPECT_NEAR(output.pose.yaw, -3.10 + 2.0 * std::numbers::pi, 1e-12);
@@ -131,8 +123,7 @@ TEST(WaypointControllerTest, InvalidSampleDoesNotAdvanceAnyState) {
   EXPECT_THROW(controller.Update(bad), demo::WaypointControllerError);
   EXPECT_EQ(controller.target_waypoint(), target_before);
 
-  const auto accepted = controller.Update(
-      MakeSample(2.0, {11.0, 11.0, 11.0, 11.0}, 0.0));
+  const auto accepted = controller.Update(MakeSample(2.0, {11.0, 11.0, 11.0, 11.0}, 0.0));
   EXPECT_NEAR(accepted.pose.x, 0.18, 1e-12);
   EXPECT_NEAR(accepted.pose.y, 0.0, 1e-12);
 }

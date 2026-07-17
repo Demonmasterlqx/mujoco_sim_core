@@ -76,7 +76,7 @@ if(BUILD_TESTING)
     NAME sample_adapter_e2e
     COMMAND
       bash
-      "${CMAKE_CURRENT_SOURCE_DIR}/test/e2e_lockstep.sh"
+      "${CMAKE_CURRENT_SOURCE_DIR}/test/e2e_async_controller.sh"
       "$<TARGET_FILE:mujoco_sim::mujoco-sim-server>"
       "$<TARGET_FILE:mujoco-sim-sample-adapter>"
       "${CMAKE_CURRENT_SOURCE_DIR}/../../mujoco_sim_core/test/testdata/simple_actuator.xml"
@@ -94,7 +94,7 @@ if(BUILD_TESTING)
     COMMAND
       ${MUJOCO_SIM_GUI_TEST_PREFIX}
       bash
-      "${CMAKE_CURRENT_SOURCE_DIR}/test/e2e_lockstep.sh"
+      "${CMAKE_CURRENT_SOURCE_DIR}/test/e2e_async_controller.sh"
       "$<TARGET_FILE:mujoco_sim::mujoco-sim-server>"
       "$<TARGET_FILE:mujoco-sim-sample-adapter>"
       "${CMAKE_CURRENT_SOURCE_DIR}/../../mujoco_sim_core/test/testdata/simple_actuator.xml"

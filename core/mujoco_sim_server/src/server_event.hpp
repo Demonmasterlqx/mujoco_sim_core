@@ -5,7 +5,7 @@
 #include <variant>
 
 #include <mujoco_sim/core/domain.hpp>
-#include <mujoco_sim/v3/sync.pb.h>
+#include <mujoco_sim/v4/sync.pb.h>
 
 namespace mujoco_sim::server {
 
@@ -17,39 +17,24 @@ struct RpcEvent {
   std::promise<Response> completion;
 };
 
-using GetAvailableResourcesEvent =
-    RpcEvent<mujoco_sim::v3::GetAvailableResourcesRequest,
-             mujoco_sim::v3::GetAvailableResourcesResponse>;
+using GetAvailableResourcesEvent = RpcEvent<mujoco_sim::v4::GetAvailableResourcesRequest,
+                                            mujoco_sim::v4::GetAvailableResourcesResponse>;
 using RegisterAdapterEvent =
-    RpcEvent<mujoco_sim::v3::RegisterAdapterRequest,
-             mujoco_sim::v3::RegisterAdapterResponse>;
+    RpcEvent<mujoco_sim::v4::RegisterAdapterRequest, mujoco_sim::v4::RegisterAdapterResponse>;
 using ActivateAdapterEvent =
-    RpcEvent<mujoco_sim::v3::ActivateAdapterRequest,
-             mujoco_sim::v3::ActivateAdapterResponse>;
+    RpcEvent<mujoco_sim::v4::ActivateAdapterRequest, mujoco_sim::v4::ActivateAdapterResponse>;
 using UnregisterAdapterEvent =
-    RpcEvent<mujoco_sim::v3::UnregisterAdapterRequest,
-             mujoco_sim::v3::UnregisterAdapterResponse>;
+    RpcEvent<mujoco_sim::v4::UnregisterAdapterRequest, mujoco_sim::v4::UnregisterAdapterResponse>;
 using GetSensorStreamsEvent =
-    RpcEvent<mujoco_sim::v3::GetSensorStreamsRequest,
-             mujoco_sim::v3::GetSensorStreamsResponse>;
-
-struct CommitEvent {
-  mujoco_sim::core::AdapterCommit message;
-};
+    RpcEvent<mujoco_sim::v4::GetSensorStreamsRequest, mujoco_sim::v4::GetSensorStreamsResponse>;
 
 struct HeartbeatEvent {
   mujoco_sim::core::AdapterHeartbeat message;
 };
 
-struct ControllerFaultEvent {
-  mujoco_sim::core::ControllerFault message;
-};
-
 using ServerEvent =
-    std::variant<GetAvailableResourcesEvent, RegisterAdapterEvent,
-                 ActivateAdapterEvent, UnregisterAdapterEvent,
-                 GetSensorStreamsEvent, CommitEvent, HeartbeatEvent,
-                 ControllerFaultEvent>;
+    std::variant<GetAvailableResourcesEvent, RegisterAdapterEvent, ActivateAdapterEvent,
+                 UnregisterAdapterEvent, GetSensorStreamsEvent, HeartbeatEvent>;
 
 std::size_t EventPayloadBytes(const ServerEvent& event);
 void CancelRpcEvent(ServerEvent* event, const char* reason);

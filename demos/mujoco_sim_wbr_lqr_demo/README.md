@@ -1,12 +1,12 @@
 # WBR LQR Demo
 
 This package integrates the upstream `CosmosMount/wbr_mujoco` controller with
-the repository's Protocol V3 lockstep runtime. The executable registers 21
-observation resources and six actuator commands, activates one synchronous
-Controller session, runs the upstream LQR state/control pipeline, and commits a
-dense command vector for each `TickLease`.
+the repository's asynchronous Protocol V4 runtime. The executable registers 21
+observation resources and six actuator commands, activates one Controller
+session, runs the upstream LQR state/control pipeline, and updates the latest
+dense Command for each `StateLease`.
 
-`TickDecoder` validates the registered layout and caches every observation
+`StateDecoder` validates the registered layout and caches every observation
 span in its constructor. `TorqueCommandMapper` caches command offsets and
 ranges. The control loop therefore performs no resource-name lookup and does
 not expose generated Protobuf types.
@@ -14,17 +14,26 @@ not expose generated Protobuf types.
 The interface configuration supports renamed and reordered MuJoCo resources.
 The frozen Server layout, not lexical resource order, determines dense offsets.
 Torque values are checked for finiteness and clamped to registered actuator
-ranges before Commit.
+ranges before `SetCommand()`.
 
-Run from an installed workspace:
+From the repository root after sourcing the installed workspace, start the
+Server and Controller in separate terminals. Both configuration files are
+strict, and CLI values override their YAML counterparts:
 
 ```bash
-mujoco-sim-server \
-  --model demos/mujoco_sim_wbr_lqr_demo/mjcf/wbr_scene.xml \
+mujoco-sim-server --config \
+  demos/mujoco_sim_wbr_lqr_demo/config/wbr_server.yaml \
   --server-name wbr --gui
 
-mujoco-sim-wbr-lqr-demo --server-name wbr
+mujoco-sim-wbr-lqr-adapter --config \
+  demos/mujoco_sim_wbr_lqr_demo/config/wbr_lqr.yaml \
+  --server-name wbr
 ```
+
+The Server configuration resolves `../mjcf/scene.xml` relative to its own
+directory and selects the `home` keyframe. Use `--headless` to override its GUI
+default. The Controller exits after `adapter.max_ticks` State samples (`0`
+means unlimited) and unregisters its session.
 
 Build and test:
 

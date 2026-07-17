@@ -7,7 +7,7 @@ include(CMakePackageConfigHelpers)
 find_package(Protobuf REQUIRED)
 
 set(PROTO_FILES
-  "${CMAKE_CURRENT_SOURCE_DIR}/proto/mujoco_sim/v3/sync.proto"
+  "${CMAKE_CURRENT_SOURCE_DIR}/proto/mujoco_sim/v4/sync.proto"
 )
 file(MAKE_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}/generated/proto")
 
@@ -48,11 +48,11 @@ install(TARGETS ${PROJECT_NAME}
 )
 install(DIRECTORY include/ DESTINATION ${CMAKE_INSTALL_INCLUDEDIR})
 install(FILES
-  "${CMAKE_CURRENT_BINARY_DIR}/generated/proto/mujoco_sim/v3/sync.pb.h"
-  DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}/mujoco_sim/v3
+  "${CMAKE_CURRENT_BINARY_DIR}/generated/proto/mujoco_sim/v4/sync.pb.h"
+  DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}/mujoco_sim/v4
 )
-install(FILES "${CMAKE_CURRENT_SOURCE_DIR}/proto/mujoco_sim/v3/sync.proto"
-  DESTINATION share/${PROJECT_NAME}/proto/mujoco_sim/v3
+install(FILES "${CMAKE_CURRENT_SOURCE_DIR}/proto/mujoco_sim/v4/sync.proto"
+  DESTINATION share/${PROJECT_NAME}/proto/mujoco_sim/v4
 )
 
 write_basic_package_version_file(

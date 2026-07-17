@@ -46,21 +46,41 @@ fi
 for log in "${work_dir}/server.err" "${work_dir}/file/server.log"; do
   grep -Fq "event=server_starting" "${log}"
   grep -Fq "event=server_started" "${log}"
-  grep -Fq "event=service_request_malformed method=RegisterAdapter" "${log}"
-  grep -Fq "event=adapter_request_rejected operation=register" "${log}"
-  grep -Fq "event=topic_payload_malformed message_type=Commit" "${log}"
-  grep -Fq "event=topic_payload_malformed message_type=SessionHeartbeat" "${log}"
-  grep -Fq "event=tick_summary" "${log}"
-  grep -Eq "malformed_messages=[1-9][0-9]*" "${log}"
-  grep -Fq "event=server_stopped reason=max_ticks exit_code=0" "${log}"
-  malformed_log_count="$(grep -c \
-    "event=service_request_malformed method=RegisterAdapter" "${log}")"
-  if ((malformed_log_count >= 20)); then
-    echo "malformed service warnings were not rate limited" >&2
+  if [[ "$(grep -c 'event=server_summary' "${log}")" -lt 2 ]]; then
+    echo "expected periodic server summaries in ${log}" >&2
     exit 1
   fi
-  if grep -Eq "event=(tick_published|commit_accepted)" "${log}"; then
-    echo "info logging contains per-Tick or per-Commit traffic" >&2
+  positive_number='([1-9][0-9]*(\.[0-9]+)?|0\.[0-9]*[1-9][0-9]*)'
+  grep -Eq "event=server_summary .*interval_steps=[1-9][0-9]* .*step_rate_hz=${positive_number} .*realtime_factor_rate=${positive_number}" \
+    "${log}"
+  grep -Eq 'event=server_summary .*transport_endpoints=[0-9]+ .*malformed_messages=[0-9]+' \
+    "${log}"
+  awk '
+    /event=server_summary/ {
+      interval_simulation = ""
+      interval_wall = ""
+      measured_rate = ""
+      for (field_index = 1; field_index <= NF; ++field_index) {
+        split($field_index, field, "=")
+        if (field[1] == "interval_simulation_s") interval_simulation = field[2]
+        if (field[1] == "interval_wall_s") interval_wall = field[2]
+        if (field[1] == "realtime_factor_rate") measured_rate = field[2]
+      }
+      if (interval_simulation != "" && interval_wall + 0 > 0 &&
+          measured_rate != "") {
+        expected_rate = interval_simulation / interval_wall
+        difference = measured_rate - expected_rate
+        if (difference < 0) difference = -difference
+        tolerance = 0.000001 * (1 + expected_rate)
+        if (difference > tolerance) exit 1
+        ++checked
+      }
+    }
+    END { if (checked < 2) exit 1 }
+  ' "${log}"
+  grep -Fq 'event=server_stopped reason="max_ticks" exit_code=0' "${log}"
+  if grep -Eq "event=(state_published|command_accepted)" "${log}"; then
+    echo "info logging contains per-State or per-Command traffic" >&2
     exit 1
   fi
   if grep -Fq "event=message_send_rejected message_type=ServerStatus" \

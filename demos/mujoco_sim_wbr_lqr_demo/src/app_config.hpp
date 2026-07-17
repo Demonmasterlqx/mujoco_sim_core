@@ -17,7 +17,7 @@ struct AppConfig {
   std::uint64_t log_every_ticks = 0;
 };
 
-bool BuildAppConfig(const generated::WbrConfig& generated_config,
-                    AppConfig* config, std::string* error_message);
+bool BuildAppConfig(const generated::WbrConfig& generated_config, AppConfig* config,
+                    std::string* error_message);
 
 }  // namespace mujoco_sim::wbr_lqr_demo

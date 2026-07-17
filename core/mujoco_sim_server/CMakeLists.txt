@@ -9,8 +9,6 @@ option(MUJOCO_SIM_BUILD_SENSOR_STREAMS
   "Build asynchronous camera and LiDAR streams" ON)
 option(MUJOCO_SIM_RUN_BUILD_MATRIX_TESTS
   "Run nested optional-feature build matrix verification" OFF)
-option(MUJOCO_SIM_BUILD_PERFORMANCE_BENCHMARK
-  "Build the deterministic Controller/Observer/Sensor benchmark" OFF)
 
 find_package(eCAL REQUIRED)
 find_package(mujoco_sim_config CONFIG REQUIRED)
@@ -31,6 +29,8 @@ set(MUJOCO_SIMULATE_ROOT
 )
 
 add_library(${PROJECT_NAME}_lib
+  src/adapter_registration.cpp
+  src/controller_command_inbox.cpp
   src/ecal_server_transport.cpp
   src/server_application.cpp
   src/server_config.cpp
@@ -104,16 +104,6 @@ set_target_properties(mujoco-sim-server PROPERTIES
   INSTALL_RPATH "$ORIGIN/../lib;$ORIGIN/../../mujoco_sim_core/lib"
 )
 
-if(MUJOCO_SIM_BUILD_PERFORMANCE_BENCHMARK)
-  if(NOT MUJOCO_SIM_BUILD_SENSOR_STREAMS)
-    message(FATAL_ERROR "The Server performance benchmark requires sensors")
-  endif()
-  add_executable(server_performance_benchmark test/performance_benchmark.cpp)
-  target_include_directories(server_performance_benchmark PRIVATE src)
-  target_link_libraries(server_performance_benchmark PRIVATE
-    ${PROJECT_NAME}_lib)
-endif()
-
 install(TARGETS ${PROJECT_NAME}_lib mujoco-sim-server
   EXPORT ${PROJECT_NAME}Targets
   ARCHIVE DESTINATION ${CMAKE_INSTALL_LIBDIR}
@@ -151,16 +141,22 @@ endif()
 add_subdirectory(tools/status)
 
 if(BUILD_TESTING)
-  add_executable(server_test test/server_test.cpp)
-  target_include_directories(server_test PRIVATE
-    "${CMAKE_CURRENT_SOURCE_DIR}/src"
-  )
-  target_link_libraries(server_test PRIVATE
-    ${PROJECT_NAME}_lib
-    GTest::gtest_main
-    spdlog::spdlog
-  )
-  add_test(NAME server_test COMMAND server_test)
+  add_executable(adapter_registration_test test/adapter_registration_test.cpp)
+  target_include_directories(adapter_registration_test PRIVATE
+    "${CMAKE_CURRENT_SOURCE_DIR}/src")
+  target_link_libraries(adapter_registration_test PRIVATE
+    ${PROJECT_NAME}_lib GTest::gtest_main)
+  target_compile_definitions(adapter_registration_test PRIVATE
+    MUJOCO_SIM_SERVER_TEST_MODEL="${CMAKE_CURRENT_SOURCE_DIR}/../mujoco_sim_core/test/testdata/simple_actuator.xml")
+  add_test(NAME adapter_registration_test COMMAND adapter_registration_test)
+
+  add_executable(controller_command_inbox_test
+    test/controller_command_inbox_test.cpp)
+  target_include_directories(controller_command_inbox_test PRIVATE
+    "${CMAKE_CURRENT_SOURCE_DIR}/src")
+  target_link_libraries(controller_command_inbox_test PRIVATE
+    ${PROJECT_NAME}_lib GTest::gtest_main)
+  add_test(NAME controller_command_inbox_test COMMAND controller_command_inbox_test)
 
   add_executable(server_event_queue_test test/server_event_queue_test.cpp)
   target_include_directories(server_event_queue_test PRIVATE
@@ -168,6 +164,20 @@ if(BUILD_TESTING)
   target_link_libraries(server_event_queue_test PRIVATE
     ${PROJECT_NAME}_lib GTest::gtest_main)
   add_test(NAME server_event_queue_test COMMAND server_event_queue_test)
+
+  add_executable(server_config_test test/server_config_test.cpp)
+  target_link_libraries(server_config_test PRIVATE
+    ${PROJECT_NAME}_lib GTest::gtest_main)
+  add_test(NAME server_config_test COMMAND server_config_test)
+
+  add_executable(server_stop_concurrency_test
+    test/server_stop_concurrency_test.cpp)
+  target_link_libraries(server_stop_concurrency_test PRIVATE
+    ${PROJECT_NAME}_lib GTest::gtest_main)
+  target_compile_definitions(server_stop_concurrency_test PRIVATE
+    MUJOCO_SIM_SERVER_TEST_MODEL="${CMAKE_CURRENT_SOURCE_DIR}/../mujoco_sim_core/test/testdata/simple_actuator.xml")
+  add_test(NAME server_stop_concurrency_test COMMAND server_stop_concurrency_test)
+  set_tests_properties(server_stop_concurrency_test PROPERTIES TIMEOUT 15)
 
   if(MUJOCO_SIM_RUN_BUILD_MATRIX_TESTS)
     add_test(NAME server_build_matrix
@@ -230,21 +240,6 @@ if(BUILD_TESTING)
             "${CMAKE_CURRENT_SOURCE_DIR}/../mujoco_sim_core/test/testdata/simple_actuator.xml"
   )
   set_tests_properties(server_logging_e2e PROPERTIES TIMEOUT 15)
-
-  add_executable(server_lifecycle_probe test/server_lifecycle_probe.cpp)
-  target_link_libraries(server_lifecycle_probe PRIVATE
-    eCAL::core
-    mujoco_sim::protocol
-  )
-  add_test(
-    NAME server_lifecycle_e2e
-    COMMAND bash
-            "${CMAKE_CURRENT_SOURCE_DIR}/test/server_lifecycle_e2e.sh"
-            $<TARGET_FILE:mujoco-sim-server>
-            $<TARGET_FILE:server_lifecycle_probe>
-            "${CMAKE_CURRENT_SOURCE_DIR}/../mujoco_sim_core/test/testdata/dual_actuator.xml"
-  )
-  set_tests_properties(server_lifecycle_e2e PROPERTIES TIMEOUT 25)
 
   configure_file(
     test/package_consumer_test.cmake.in

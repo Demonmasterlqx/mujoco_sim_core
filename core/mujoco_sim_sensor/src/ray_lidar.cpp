@@ -24,7 +24,7 @@ constexpr double kTwoPi = 6.28318530717958647692528676655900577;
 
 struct RayLidar::Impl {
   RayLidarProfile profile;
-  mujoco_sim::v3::StreamDescriptor descriptor;
+  mujoco_sim::v4::StreamDescriptor descriptor;
   std::vector<double> vertical_angles;
   const mjModel* model = nullptr;
   int site_id = -1;
@@ -35,14 +35,12 @@ RayLidar::~RayLidar() = default;
 RayLidar::RayLidar(RayLidar&&) noexcept = default;
 RayLidar& RayLidar::operator=(RayLidar&&) noexcept = default;
 
-std::unique_ptr<RayLidar> RayLidar::Create(
-    const core::SimulationSnapshot& snapshot, RayLidarProfile profile,
-    std::string* error_message) {
+std::unique_ptr<RayLidar> RayLidar::Create(const core::SimulationSnapshot& snapshot,
+                                           RayLidarProfile profile, std::string* error_message) {
   auto impl = std::make_unique<Impl>();
   impl->profile = std::move(profile);
-  if (!detail::BuildRayLidarDescriptor(
-          snapshot, impl->profile, &impl->descriptor,
-          &impl->vertical_angles, &impl->site_id, error_message)) {
+  if (!detail::BuildRayLidarDescriptor(snapshot, impl->profile, &impl->descriptor,
+                                       &impl->vertical_angles, &impl->site_id, error_message)) {
     return nullptr;
   }
   impl->model = snapshot.model();
@@ -53,13 +51,12 @@ const RayLidarProfile& RayLidar::profile() const noexcept {
   return impl_->profile;
 }
 
-const mujoco_sim::v3::StreamDescriptor& RayLidar::descriptor() const noexcept {
+const mujoco_sim::v4::StreamDescriptor& RayLidar::descriptor() const noexcept {
   return impl_->descriptor;
 }
 
-bool RayLidar::Capture(const core::SimulationSnapshot& snapshot,
-                       const CaptureMetadata& metadata, RawFrame* frame,
-                       std::string* error_message) const {
+bool RayLidar::Capture(const core::SimulationSnapshot& snapshot, const CaptureMetadata& metadata,
+                       RawFrame* frame, std::string* error_message) const {
   detail::ClearError(error_message);
   if (frame == nullptr) {
     return detail::Fail("ray lidar frame output is null", error_message);
@@ -70,9 +67,8 @@ bool RayLidar::Capture(const core::SimulationSnapshot& snapshot,
     return false;
   }
   if (snapshot.model() != impl_->model || snapshot.data() == nullptr) {
-    return detail::Fail(
-        "ray lidar snapshot is not the model used to create this source",
-        error_message);
+    return detail::Fail("ray lidar snapshot is not the model used to create this source",
+                        error_message);
   }
 
   const std::size_t width = impl_->profile.horizontal_samples;
@@ -100,24 +96,20 @@ bool RayLidar::Capture(const core::SimulationSnapshot& snapshot,
       const std::size_t ring = index / width;
       const std::size_t column = index % width;
       const double elevation = impl_->vertical_angles[ring];
-      const double azimuth = kTwoPi * static_cast<double>(column) /
-                             static_cast<double>(width);
+      const double azimuth = kTwoPi * static_cast<double>(column) / static_cast<double>(width);
       const mjtNum local[3] = {std::cos(elevation) * std::cos(azimuth),
-                               std::cos(elevation) * std::sin(azimuth),
-                               std::sin(elevation)};
+                               std::cos(elevation) * std::sin(azimuth), std::sin(elevation)};
       for (int axis = 0; axis < 3; ++axis) {
         local_directions[3 * offset + axis] = local[axis];
-        world_directions[3 * offset + axis] =
-            site_rotation[3 * axis] * local[0] +
-            site_rotation[3 * axis + 1] * local[1] +
-            site_rotation[3 * axis + 2] * local[2];
+        world_directions[3 * offset + axis] = site_rotation[3 * axis] * local[0] +
+                                              site_rotation[3 * axis + 1] * local[1] +
+                                              site_rotation[3 * axis + 2] * local[2];
       }
     }
 
-    mj_multiRay(impl_->model, snapshot.data(), site_position,
-                world_directions.data(), nullptr, 1, body_exclude,
-                geom_ids.data(), distances.data(), nullptr,
-                static_cast<int>(count), impl_->profile.max_range_m);
+    mj_multiRay(impl_->model, snapshot.data(), site_position, world_directions.data(), nullptr, 1,
+                body_exclude, geom_ids.data(), distances.data(), nullptr, static_cast<int>(count),
+                impl_->profile.max_range_m);
     for (std::size_t offset = 0; offset < count; ++offset) {
       const double distance = distances[offset];
       if (!std::isfinite(distance) || distance < impl_->profile.min_range_m ||
@@ -125,23 +117,17 @@ bool RayLidar::Capture(const core::SimulationSnapshot& snapshot,
         continue;
       }
       const std::size_t index = start + offset;
-      points[3 * index] =
-          static_cast<float>(distance * local_directions[3 * offset]);
-      points[3 * index + 1] =
-          static_cast<float>(distance * local_directions[3 * offset + 1]);
-      points[3 * index + 2] =
-          static_cast<float>(distance * local_directions[3 * offset + 2]);
+      points[3 * index] = static_cast<float>(distance * local_directions[3 * offset]);
+      points[3 * index + 1] = static_cast<float>(distance * local_directions[3 * offset + 1]);
+      points[3 * index + 2] = static_cast<float>(distance * local_directions[3 * offset + 2]);
     }
   }
 
-  std::vector<std::byte> payload =
-      detail::ToBytes<float>(std::span<const float>(points));
+  std::vector<std::byte> payload = detail::ToBytes<float>(std::span<const float>(points));
   if (payload.size() != impl_->descriptor.maximum_payload_bytes()) {
-    return detail::Fail("ray lidar payload shape changed unexpectedly",
-                        error_message);
+    return detail::Fail("ray lidar payload shape changed unexpectedly", error_message);
   }
-  *frame = detail::MakeRawFrame(impl_->descriptor, metadata,
-                                std::move(payload));
+  *frame = detail::MakeRawFrame(impl_->descriptor, metadata, std::move(payload));
   return true;
 }
 

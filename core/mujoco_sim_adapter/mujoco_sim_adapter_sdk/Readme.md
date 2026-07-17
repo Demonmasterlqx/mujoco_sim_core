@@ -1,82 +1,83 @@
 # mujoco_sim_adapter_sdk
 
-The Adapter SDK provides single-session Protocol V3 clients for synchronous
-Controllers, asynchronous Observers, and Sensor streams. Public Controller and
-Observer APIs expose domain DTOs, leases, spans, and dense scalar arrays; they
-do not expose generated Protobuf types.
+The Adapter SDK provides Protocol V4 clients for asynchronous Controllers,
+Observers, and Sensor streams. Public APIs expose domain DTOs, immutable leases,
+spans, and dense scalar arrays rather than generated Protobuf types.
 
 ## Controller
 
 ```cpp
-mujoco_sim::adapter_sdk::AdapterOptions options;
+mujoco_sim::adapter_sdk::ControllerOptions options;
 options.server_name = "default";
 options.adapter_id = "arm";
 options.observation_names = {"hinge_pos"};
 options.command_names = {"hinge_motor"};
-options.commit_timeout_ms = 1000;
-options.session_timeout_ms = 1000;
-options.heartbeat_period_ms = 250;
 
-mujoco_sim::adapter_sdk::SyncAdapterClient client(options);
+mujoco_sim::adapter_sdk::ControllerClient client(options);
 std::string error;
 if (!client.Start(&error) || !client.Activate(&error)) return 1;
 
 const auto command = client.layout().Command("hinge_motor");
-mujoco_sim::adapter_sdk::TickLease tick;
-if (client.WaitForTick(std::chrono::milliseconds(100), &tick, &error) ==
-    mujoco_sim::adapter_sdk::TickWaitResult::kReceived) {
-  std::vector<double> commands(client.layout().command_scalar_count());
-  commands[command->offset] = 0.25;
-  if (!client.Commit(tick, commands, &error)) return 2;
+if (!command) return 2;
+mujoco_sim::adapter_sdk::StateLease state;
+if (client.WaitForNewState(std::chrono::milliseconds(100), &state, &error) ==
+    mujoco_sim::adapter_sdk::StateReadResult::kReceived) {
+  std::vector<double> values(client.layout().command_scalar_count());
+  values[command->offset] = 0.25;
+  if (!client.SetCommand(values, &error)) return 3;
 }
-client.Unregister(&error);
+if (!client.Unregister(&error)) return 4;
 ```
 
-`ControllerLayout` resolves names to `{offset, count}` once after registration.
-Applications should cache those spans and use `TickLease::observations()` on
-the hot path. `TickLease` is move-only and keeps its mailbox buffer alive.
-`Commit()` verifies lease ownership, exact count, finite values, and registered
-command ranges before encoding a dense Commit.
+`ControllerLayout` resolves resource names to `{offset, count}` once after
+registration. `StateLease` is move-only and owns an immutable mailbox buffer.
+`ReadLatestState()` is non-blocking; `WaitForNewState()` waits for a newer
+sequence than the last successful read. Both return `kReceived`, `kTimeout`,
+`kStopped`, or `kError`; a successful read replaces the output lease. State
+reads permit one user thread and `SetCommand()` permits one control thread.
 
-Duplicate Tick handling is internal. An uncommitted duplicate is not delivered
-again; after Commit, the exact cached Commit bytes may be resent. A duplicate
-identity with different Tick payload is terminal.
+`SetCommand()` validates exact scalar count, finite values, and registered
+ranges before replacing the depth-1 latest-command mailbox. A publisher thread
+sends each new generation and republishes the latest value at the granted
+keepalive cadence. A failed send retains the same sequence and bytes for retry;
+newer mailbox generations remain pending until that retry succeeds. Controllers
+do not send session heartbeats.
 
-## Observer
+The registration response supplies the Server-granted command timeout,
+keepalive, State cadence, control policies, and offline expiry. `Stop()` wakes
+waiters and stops local publishing without removing the remote session.
+`Unregister()` performs remote cleanup, then stops local publishing and
+reception; it preserves session identity after a failed RPC so the call can be
+retried. Destruction attempts both local shutdown and best-effort unregister.
+`ReportFault()` publishes one of `kControllerError`, `kInvalidOutput`, or
+`kInternalControllerError`; an accepted fault makes the current Server session
+terminal `ERROR`. A received `ERROR`/`UNREGISTERED` status, or disappearance of
+a session after it has appeared in status, terminates subsequent State waits.
 
-`ObserverOptions` defaults to an explicit `period_s = 0.01` (100 Hz), queue
-capacity 1, `session_timeout_ms = 1000`, and `heartbeat_period_ms = 250`.
-Exactly one of `period_s` and `every_n_steps` must be set. The Server rejects a
-cadence over its configured cap and rejects every-step delivery unless it is
-explicitly enabled.
+`Start()` registers and starts State/status reception but does not activate the
+session. `Activate()` starts Server-side liveness and the Command publisher;
+`SetCommand()` is rejected before activation. Activation does not synthesize
+State: the first lease is produced by the next completed Step for which the
+Server-granted cadence is due. A client is single-use and cannot be restarted
+after `Stop()` or successful `Unregister()`.
 
-`WaitForObservation()` returns a move-only `ObservationLease` with sequence,
-Tick, simulation time, and a dense observation span. Queue overflow drops the
-oldest frame and contributes to `dropped_frames()` along with transport
-sequence gaps. Observer heartbeat is periodic and never emitted per frame.
+## Observer and Sensor streams
 
-## Liveness and cleanup
+Observers retain explicit cadence, heartbeat, delivery, and bounded mailbox
+semantics. `ObserverClient::Start()` registers and begins reception and
+heartbeat, `Activate()` transitions the provisional session to `ONLINE`, and
+`Unregister()` provides retryable remote cleanup. `ObservationLease` includes
+sequence, completed-step tick, simulation time, and dense observations.
 
-Controller heartbeat is suppressed while Commit publishes are active. It is
-sent only when both the last successful Commit publish and the last heartbeat
-are at least `heartbeat_period_ms` old. Commit refreshes Server presence;
-heartbeat cannot extend a Barrier deadline. Observer heartbeat runs at the
-configured low rate.
-
-`Stop()` performs local cancellation only: it wakes waiters, stops heartbeat,
-and disables callbacks. `Unregister()` performs remote cleanup. A failed
-Unregister preserves session identity so it can be retried. Callback teardown
-disables delivery, removes callbacks, waits for in-flight leases, and then
-destroys endpoints. Only one waiter is allowed per client.
-
-## Sensor streams
-
-`SensorStreamClient` discovers V3 stream descriptors and receives framed raw
-payloads into bounded per-stream mailboxes. `OwnedStreamSample` owns both its
-V3 `StreamFrameHeader` and payload. Stream data is not part of a Controller
-Tick or Observer frame.
+Sensor clients do not create an Adapter session. They discover V4 stream
+descriptors and receive raw payloads with the separate `MJSTREAM` 1.0 framing
+and V4 `StreamFrameHeader` into per-stream bounded mailboxes, or deliver a
+borrowed `StreamSampleView` synchronously to a callback. Sensor payloads do not
+enter Controller State or Observer frames.
 
 ## Build and test
+
+After building the workspace dependencies and sourcing `install/setup.bash`:
 
 ```bash
 cmake -S core/mujoco_sim_adapter/mujoco_sim_adapter_sdk \
@@ -84,7 +85,3 @@ cmake -S core/mujoco_sim_adapter/mujoco_sim_adapter_sdk \
 cmake --build build/mujoco_sim_adapter_sdk -j
 ctest --test-dir build/mujoco_sim_adapter_sdk --output-on-failure
 ```
-
-Tests cover lifecycle retry, callback teardown, single waiters, dense
-encode/decode, duplicate behavior, heartbeat suppression/stop, mailbox
-eviction, Sensor framing, installed consumption, and real eCAL E2E paths.

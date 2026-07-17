@@ -25,24 +25,30 @@ class SensorStreamClient::Impl : public std::enable_shared_from_this<Impl> {
   bool Start(std::string* error_message);
   bool SetCallback(const std::string& stream_name, StreamCallback callback,
                    std::string* error_message);
-  SampleWaitResult WaitForSample(const std::string& stream_name,
-                                 std::chrono::milliseconds timeout,
-                                 OwnedStreamSample* sample,
-                                 std::string* error_message);
+  SampleWaitResult WaitForSample(const std::string& stream_name, std::chrono::milliseconds timeout,
+                                 OwnedStreamSample* sample, std::string* error_message);
   void Stop();
-  std::optional<mujoco_sim::v3::StreamDescriptor> descriptor(
-      const std::string& stream_name) const;
+  std::optional<mujoco_sim::v4::StreamDescriptor> descriptor(const std::string& stream_name) const;
   std::uint64_t dropped_samples(const std::string& stream_name) const;
   std::string stream_diagnostic(const std::string& stream_name) const;
 
  private:
   friend class SensorStreamClient;
   friend class SensorStreamClientTestPeer;
-  enum class Phase { kConstructed, kStarting, kActive, kStopped };
-  enum class DeliveryMode { kUnset, kCallback, kWait };
+  enum class Phase {
+    kConstructed,
+    kStarting,
+    kActive,
+    kStopped
+  };
+  enum class DeliveryMode {
+    kUnset,
+    kCallback,
+    kWait
+  };
   struct StreamState {
     std::mutex delivery_mutex;
-    mujoco_sim::v3::StreamDescriptor descriptor;
+    mujoco_sim::v4::StreamDescriptor descriptor;
     DeliveryMode mode = DeliveryMode::kUnset;
     StreamCallback callback;
     internal::BlockingMailbox<OwnedStreamSample> samples;
@@ -56,33 +62,28 @@ class SensorStreamClient::Impl : public std::enable_shared_from_this<Impl> {
   bool FinishStart(std::string* error_message);
   bool DiscoverStreams(std::string* error_message);
   bool ConfigureDiscoveredStreams(std::string* error_message);
-  bool ValidateDescriptor(const mujoco_sim::v3::StreamDescriptor& descriptor,
+  bool ValidateDescriptor(const mujoco_sim::v4::StreamDescriptor& descriptor,
                           std::string* error_message) const;
-  bool IsExpectedFrame(
-      const std::string& stream_name,
-      const mujoco_sim::protocol::ParsedStreamFrame& frame,
-      std::string* error_message) const;
-  bool CanAcceptStatusLocked(const mujoco_sim::v3::ServerStatus& status) const;
-  bool ApplyGlobalStatusLocked(const mujoco_sim::v3::ServerStatus& status);
-  bool ApplyStreamErrorsLocked(const mujoco_sim::v3::ServerStatus& status);
-  void HandleStreamBytes(const std::string& stream_name, const void* data,
-                         std::size_t size);
+  bool IsExpectedFrame(const std::string& stream_name,
+                       const mujoco_sim::protocol::ParsedStreamFrame& frame,
+                       std::string* error_message) const;
+  bool CanAcceptStatusLocked(const mujoco_sim::v4::ServerStatus& status) const;
+  bool ApplyGlobalStatusLocked(const mujoco_sim::v4::ServerStatus& status);
+  bool ApplyStreamErrorsLocked(const mujoco_sim::v4::ServerStatus& status);
+  void HandleStreamBytes(const std::string& stream_name, const void* data, std::size_t size);
   void HandleStatusBytes(const void* data, std::size_t size);
-  void HandleStreamFrame(
-      const std::string& stream_name,
-      const mujoco_sim::protocol::ParsedStreamFrame& frame);
-  void RecordDiagnostic(const std::string& stream_name,
-                        const std::string& diagnostic);
+  void HandleStreamFrame(const std::string& stream_name,
+                         const mujoco_sim::protocol::ParsedStreamFrame& frame);
+  void RecordDiagnostic(const std::string& stream_name, const std::string& diagnostic);
   void StopSampleReception();
   using CallbackGate = internal::CallbackGate<Impl>;
   using CallbackState = CallbackGate::State;
   using CallbackLease = CallbackGate::Lease;
 
   SensorStreamOptions options_;
-  mujoco_sim::v3::GetSensorStreamsResponse discovery_;
+  mujoco_sim::v4::GetSensorStreamsResponse discovery_;
   std::shared_ptr<internal::SensorStreamTransport> transport_;
-  std::unordered_map<std::string, std::unique_ptr<eCAL::CSubscriber>>
-      subscribers_;
+  std::unordered_map<std::string, std::unique_ptr<eCAL::CSubscriber>> subscribers_;
   std::unique_ptr<eCAL::CSubscriber> status_subscriber_;
   std::unordered_map<std::string, std::shared_ptr<StreamState>> streams_;
   std::optional<std::uint64_t> last_status_tick_id_;

@@ -1,7 +1,8 @@
 server_name: sensor_demo
 model_path: ../mjcf/scene.xml
 max_ticks: 0
-tick_timeout_ms: 5000
+command_timeout_ms: 5000
+command_keepalive_ms: 500
 activation_timeout_ms: 10000
 status_period_ms: 100
 allow_every_step_observer: true

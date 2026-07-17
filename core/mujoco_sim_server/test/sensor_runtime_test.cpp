@@ -53,13 +53,11 @@ class FakePublisherBus {
       return channel->subscribers.load(std::memory_order_relaxed);
     };
     publisher.send = [channel](const std::string& frame) {
-      if (channel->disconnect_on_send.exchange(false,
-                                               std::memory_order_relaxed)) {
+      if (channel->disconnect_on_send.exchange(false, std::memory_order_relaxed)) {
         channel->subscribers.store(0, std::memory_order_relaxed);
         return false;
       }
-      if (channel->replace_subscriber_on_send.exchange(
-              false, std::memory_order_relaxed)) {
+      if (channel->replace_subscriber_on_send.exchange(false, std::memory_order_relaxed)) {
         return false;
       }
       if (channel->fail_send.load(std::memory_order_relaxed)) return false;
@@ -78,8 +76,7 @@ class FakePublisherBus {
     const auto found = channels_.find(topic);
     if (found != channels_.end()) return found->second;
     auto channel = std::make_shared<Channel>();
-    channel->subscribers.store(default_subscribers_,
-                               std::memory_order_relaxed);
+    channel->subscribers.store(default_subscribers_, std::memory_order_relaxed);
     channels_.emplace(topic, channel);
     return channel;
   }
@@ -88,8 +85,8 @@ class FakePublisherBus {
                      std::chrono::milliseconds timeout = 3s) {
     auto channel = GetOrCreate(topic);
     std::unique_lock lock(channel->mutex);
-    return channel->condition.wait_for(
-        lock, timeout, [&] { return channel->frames.size() >= count; });
+    return channel->condition.wait_for(lock, timeout,
+                                       [&] { return channel->frames.size() >= count; });
   }
 
   std::vector<std::string> Frames(const std::string& topic) {
@@ -164,10 +161,11 @@ std::unique_ptr<mujoco_sim::core::SimulationCore> LoadCore() {
   return core;
 }
 
-ServerConfig::SensorStream LidarStream(
-    std::string name = "lidar", std::string queue_mode = "latest",
-    std::uint32_t queue_depth = 1,
-    std::string overflow = "drop_oldest", double rate_hz = 100.0) {
+ServerConfig::SensorStream LidarStream(std::string name = "lidar",
+                                       std::string queue_mode = "latest",
+                                       std::uint32_t queue_depth = 1,
+                                       std::string overflow = "drop_oldest",
+                                       double rate_hz = 100.0) {
   ServerConfig::SensorStream stream;
   stream.name = std::move(name);
   stream.kind = "lidar_pointcloud";
@@ -210,33 +208,29 @@ ServerConfig BaseConfig() {
   return config;
 }
 
-bool Advance(mujoco_sim::core::SimulationCore* core,
-             SensorRuntime* runtime) {
-  core->OpenIssuedTicks();
-  if (!core->CompleteEmptyBarrier().step_completed.has_value()) return false;
+bool Advance(mujoco_sim::core::SimulationCore* core, SensorRuntime* runtime) {
+  if (!core->Step().step_completed.has_value()) return false;
   runtime->OnStepCompleted(*core);
   runtime->CompleteBlockingEnqueues();
   return true;
 }
 
-mujoco_sim::v3::GetSensorStreamsRequest CatalogRequest() {
+mujoco_sim::v4::GetSensorStreamsRequest CatalogRequest() {
   return {};
 }
 
-std::optional<mujoco_sim::v3::StreamStatus> StreamStatusFor(
-    const SensorRuntime& runtime, const std::string& name) {
-  mujoco_sim::v3::ServerStatus status;
+std::optional<mujoco_sim::v4::StreamStatus> StreamStatusFor(const SensorRuntime& runtime,
+                                                            const std::string& name) {
+  mujoco_sim::v4::ServerStatus status;
   runtime.AppendStatus(&status);
-  const auto found = std::find_if(
-      status.streams().begin(), status.streams().end(),
-      [&name](const auto& stream) { return stream.name() == name; });
+  const auto found = std::find_if(status.streams().begin(), status.streams().end(),
+                                  [&name](const auto& stream) { return stream.name() == name; });
   if (found == status.streams().end()) return std::nullopt;
   return *found;
 }
 
 template <typename Predicate>
-bool WaitUntil(Predicate predicate,
-               std::chrono::milliseconds timeout = 3s) {
+bool WaitUntil(Predicate predicate, std::chrono::milliseconds timeout = 3s) {
   const auto deadline = std::chrono::steady_clock::now() + timeout;
   while (std::chrono::steady_clock::now() < deadline) {
     if (predicate()) return true;
@@ -250,21 +244,18 @@ std::vector<std::uint64_t> TickIds(const std::vector<std::string>& frames) {
   for (const auto& bytes : frames) {
     mujoco_sim::protocol::ParsedStreamFrame parsed;
     std::string error;
-    EXPECT_TRUE(mujoco_sim::protocol::ParseStreamFrame(bytes, &parsed, &error))
-        << error;
+    EXPECT_TRUE(mujoco_sim::protocol::ParseStreamFrame(bytes, &parsed, &error)) << error;
     result.push_back(parsed.header.tick_id());
   }
   return result;
 }
 
-std::vector<std::uint64_t> DroppedCounts(
-    const std::vector<std::string>& frames) {
+std::vector<std::uint64_t> DroppedCounts(const std::vector<std::string>& frames) {
   std::vector<std::uint64_t> result;
   for (const auto& bytes : frames) {
     mujoco_sim::protocol::ParsedStreamFrame parsed;
     std::string error;
-    EXPECT_TRUE(mujoco_sim::protocol::ParseStreamFrame(bytes, &parsed, &error))
-        << error;
+    EXPECT_TRUE(mujoco_sim::protocol::ParseStreamFrame(bytes, &parsed, &error)) << error;
     result.push_back(parsed.header.dropped_since_previous());
   }
   return result;
@@ -273,10 +264,8 @@ std::vector<std::uint64_t> DroppedCounts(
 TEST(SensorRuntimeTest, PublishesHeadlessCameraAndLidarCatalogFrames) {
   auto core = LoadCore();
   FakePublisherBus bus;
-  SensorRuntime runtime({[&bus](const std::string& topic) {
-                           return bus.MakePublisher(topic);
-                         },
-                         {}});
+  SensorRuntime runtime(
+      {[&bus](const std::string& topic) { return bus.MakePublisher(topic); }, {}});
   ServerConfig config = BaseConfig();
   config.sensor_streams = {
       CameraStream("rgb", "rgb"),
@@ -289,47 +278,39 @@ TEST(SensorRuntimeTest, PublishesHeadlessCameraAndLidarCatalogFrames) {
   std::string error;
   ASSERT_TRUE(runtime.Initialize(*core, config, &error)) << error;
   const auto catalog = runtime.GetCatalog(CatalogRequest());
-  ASSERT_EQ(catalog.code(), mujoco_sim::v3::OK);
+  ASSERT_EQ(catalog.code(), mujoco_sim::v4::OK);
   ASSERT_EQ(catalog.streams_size(), 5);
   for (const auto& descriptor : catalog.streams()) {
     EXPECT_EQ(descriptor.topic(),
-              mujoco_sim::protocol::SensorStreamTopicName(
-                  "sensor-test", descriptor.name()));
+              mujoco_sim::protocol::SensorStreamTopicName("sensor-test", descriptor.name()));
     EXPECT_GT(descriptor.maximum_payload_bytes(), 0U);
   }
 
   ASSERT_TRUE(Advance(core.get(), &runtime));
-  for (const std::string name :
-       {"rgb", "depth", "segmentation", "camera_cloud", "lidar"}) {
-    ASSERT_TRUE(bus.WaitForFrames(
-        mujoco_sim::protocol::SensorStreamTopicName("sensor-test", name), 1))
+  for (const std::string name : {"rgb", "depth", "segmentation", "camera_cloud", "lidar"}) {
+    ASSERT_TRUE(
+        bus.WaitForFrames(mujoco_sim::protocol::SensorStreamTopicName("sensor-test", name), 1))
         << name;
   }
 
-  const auto rgb_bytes = bus.Frames(
-      mujoco_sim::protocol::SensorStreamTopicName("sensor-test", "rgb"));
+  const auto rgb_bytes =
+      bus.Frames(mujoco_sim::protocol::SensorStreamTopicName("sensor-test", "rgb"));
   mujoco_sim::protocol::ParsedStreamFrame rgb;
-  ASSERT_TRUE(mujoco_sim::protocol::ParseStreamFrame(rgb_bytes.front(), &rgb,
-                                                     &error))
-      << error;
-  EXPECT_EQ(rgb.header.format(), mujoco_sim::v3::RGB8);
+  ASSERT_TRUE(mujoco_sim::protocol::ParseStreamFrame(rgb_bytes.front(), &rgb, &error)) << error;
+  EXPECT_EQ(rgb.header.format(), mujoco_sim::v4::RGB8);
   EXPECT_EQ(rgb.payload.size(), 64U * 48U * 3U);
-  EXPECT_FALSE(std::all_of(rgb.payload.begin(), rgb.payload.end(),
-                           [first = rgb.payload.front()](std::byte value) {
-                             return value == first;
-                           }));
+  EXPECT_FALSE(
+      std::all_of(rgb.payload.begin(), rgb.payload.end(),
+                  [first = rgb.payload.front()](std::byte value) { return value == first; }));
 
-  const auto lidar_bytes = bus.Frames(
-      mujoco_sim::protocol::SensorStreamTopicName("sensor-test", "lidar"));
+  const auto lidar_bytes =
+      bus.Frames(mujoco_sim::protocol::SensorStreamTopicName("sensor-test", "lidar"));
   mujoco_sim::protocol::ParsedStreamFrame lidar;
-  ASSERT_TRUE(mujoco_sim::protocol::ParseStreamFrame(
-      lidar_bytes.front(), &lidar, &error))
-      << error;
-  EXPECT_EQ(lidar.header.format(), mujoco_sim::v3::XYZ32F);
+  ASSERT_TRUE(mujoco_sim::protocol::ParseStreamFrame(lidar_bytes.front(), &lidar, &error)) << error;
+  EXPECT_EQ(lidar.header.format(), mujoco_sim::v4::XYZ32F);
   EXPECT_EQ(lidar.payload.size(), 72U * 4U * 3U * sizeof(float));
   bool has_finite_point = false;
-  for (std::size_t offset = 0; offset < lidar.payload.size();
-       offset += 3 * sizeof(float)) {
+  for (std::size_t offset = 0; offset < lidar.payload.size(); offset += 3 * sizeof(float)) {
     float x = 0.0F;
     std::memcpy(&x, lidar.payload.data() + offset, sizeof(x));
     has_finite_point = has_finite_point || std::isfinite(x);
@@ -340,52 +321,42 @@ TEST(SensorRuntimeTest, PublishesHeadlessCameraAndLidarCatalogFrames) {
 TEST(SensorRuntimeTest, UsesSimulationTimeForStreamRate) {
   auto core = LoadCore();
   FakePublisherBus bus;
-  SensorRuntime runtime({[&bus](const std::string& topic) {
-                           return bus.MakePublisher(topic);
-                         },
-                         {}});
+  SensorRuntime runtime(
+      {[&bus](const std::string& topic) { return bus.MakePublisher(topic); }, {}});
   ServerConfig config = BaseConfig();
-  config.sensor_streams = {
-      LidarStream("lidar", "blocking", 1, "drop_oldest", 20.0)};
+  config.sensor_streams = {LidarStream("lidar", "blocking", 1, "drop_oldest", 20.0)};
   std::string error;
   ASSERT_TRUE(runtime.Initialize(*core, config, &error)) << error;
 
   for (int step = 0; step < 21; ++step) {
     ASSERT_TRUE(Advance(core.get(), &runtime));
   }
-  const std::string topic =
-      mujoco_sim::protocol::SensorStreamTopicName("sensor-test", "lidar");
+  const std::string topic = mujoco_sim::protocol::SensorStreamTopicName("sensor-test", "lidar");
   ASSERT_TRUE(bus.WaitForFrames(topic, 5));
   const auto frames = bus.Frames(topic);
   ASSERT_EQ(frames.size(), 5U);
   for (std::size_t index = 0; index < frames.size(); ++index) {
     mujoco_sim::protocol::ParsedStreamFrame parsed;
-    ASSERT_TRUE(mujoco_sim::protocol::ParseStreamFrame(frames[index], &parsed,
-                                                       &error));
-    EXPECT_NEAR(parsed.header.simulation_time_s(),
-                0.01 + 0.05 * static_cast<double>(index), 1e-10);
+    ASSERT_TRUE(mujoco_sim::protocol::ParseStreamFrame(frames[index], &parsed, &error));
+    EXPECT_NEAR(parsed.header.simulation_time_s(), 0.01 + 0.05 * static_cast<double>(index), 1e-10);
   }
 }
 
 TEST(SensorRuntimeTest, MaximumRateAdvancesScheduleWithoutCatchUpLoop) {
   auto core = LoadCore();
   FakePublisherBus bus;
-  SensorRuntime runtime({[&bus](const std::string& topic) {
-                           return bus.MakePublisher(topic);
-                         },
-                         {}});
+  SensorRuntime runtime(
+      {[&bus](const std::string& topic) { return bus.MakePublisher(topic); }, {}});
   ServerConfig config = BaseConfig();
-  config.sensor_streams = {LidarStream("lidar", "blocking", 1,
-                                       "drop_oldest",
-                                       kMaximumSensorStreamRateHz)};
+  config.sensor_streams = {
+      LidarStream("lidar", "blocking", 1, "drop_oldest", kMaximumSensorStreamRateHz)};
   std::string error;
   ASSERT_TRUE(runtime.Initialize(*core, config, &error)) << error;
 
   for (int step = 0; step < 3; ++step) {
     ASSERT_TRUE(Advance(core.get(), &runtime));
   }
-  const std::string topic =
-      mujoco_sim::protocol::SensorStreamTopicName("sensor-test", "lidar");
+  const std::string topic = mujoco_sim::protocol::SensorStreamTopicName("sensor-test", "lidar");
   EXPECT_TRUE(bus.WaitForFrames(topic, 3));
 }
 
@@ -393,9 +364,8 @@ TEST(SensorRuntimeTest, LatestQueueKeepsNewestCaptureAndCountsDrops) {
   auto core = LoadCore();
   FakePublisherBus bus;
   FirstCaptureGate gate;
-  SensorRuntime runtime({
-      [&bus](const std::string& topic) { return bus.MakePublisher(topic); },
-      [&gate](const std::string& source) { gate.BeforeCapture(source); }});
+  SensorRuntime runtime({[&bus](const std::string& topic) { return bus.MakePublisher(topic); },
+                         [&gate](const std::string& source) { gate.BeforeCapture(source); }});
   ServerConfig config = BaseConfig();
   config.sensor_streams = {LidarStream()};
   std::string error;
@@ -408,14 +378,11 @@ TEST(SensorRuntimeTest, LatestQueueKeepsNewestCaptureAndCountsDrops) {
   }
   gate.Release();
 
-  const std::string topic =
-      mujoco_sim::protocol::SensorStreamTopicName("sensor-test", "lidar");
+  const std::string topic = mujoco_sim::protocol::SensorStreamTopicName("sensor-test", "lidar");
   ASSERT_TRUE(bus.WaitForFrames(topic, 2));
   const auto frames = bus.Frames(topic);
-  EXPECT_EQ(TickIds(frames),
-            (std::vector<std::uint64_t>{1, 6}));
-  EXPECT_EQ(DroppedCounts(frames),
-            (std::vector<std::uint64_t>{0, 4}));
+  EXPECT_EQ(TickIds(frames), (std::vector<std::uint64_t>{1, 6}));
+  EXPECT_EQ(DroppedCounts(frames), (std::vector<std::uint64_t>{0, 4}));
   ASSERT_TRUE(WaitUntil([&] {
     const auto status = StreamStatusFor(runtime, "lidar");
     return status && status->dropped() == 4;
@@ -423,19 +390,16 @@ TEST(SensorRuntimeTest, LatestQueueKeepsNewestCaptureAndCountsDrops) {
 }
 
 class SensorFifoRuntimeTest
-    : public testing::TestWithParam<std::pair<std::string,
-                                              std::vector<std::uint64_t>>> {};
+    : public testing::TestWithParam<std::pair<std::string, std::vector<std::uint64_t>>> {};
 
 TEST_P(SensorFifoRuntimeTest, AppliesConfiguredOverflowPolicy) {
   auto core = LoadCore();
   FakePublisherBus bus;
   FirstCaptureGate gate;
-  SensorRuntime runtime({
-      [&bus](const std::string& topic) { return bus.MakePublisher(topic); },
-      [&gate](const std::string& source) { gate.BeforeCapture(source); }});
+  SensorRuntime runtime({[&bus](const std::string& topic) { return bus.MakePublisher(topic); },
+                         [&gate](const std::string& source) { gate.BeforeCapture(source); }});
   ServerConfig config = BaseConfig();
-  config.sensor_streams = {
-      LidarStream("lidar", "fifo", 2, GetParam().first)};
+  config.sensor_streams = {LidarStream("lidar", "fifo", 2, GetParam().first)};
   std::string error;
   ASSERT_TRUE(runtime.Initialize(*core, config, &error)) << error;
 
@@ -446,8 +410,7 @@ TEST_P(SensorFifoRuntimeTest, AppliesConfiguredOverflowPolicy) {
   }
   gate.Release();
 
-  const std::string topic =
-      mujoco_sim::protocol::SensorStreamTopicName("sensor-test", "lidar");
+  const std::string topic = mujoco_sim::protocol::SensorStreamTopicName("sensor-test", "lidar");
   ASSERT_TRUE(bus.WaitForFrames(topic, 3));
   EXPECT_EQ(TickIds(bus.Frames(topic)), GetParam().second);
   ASSERT_TRUE(WaitUntil([&] {
@@ -458,11 +421,8 @@ TEST_P(SensorFifoRuntimeTest, AppliesConfiguredOverflowPolicy) {
 
 INSTANTIATE_TEST_SUITE_P(
     OverflowPolicies, SensorFifoRuntimeTest,
-    testing::Values(
-        std::make_pair("drop_oldest",
-                       std::vector<std::uint64_t>{1, 4, 5}),
-        std::make_pair("drop_newest",
-                       std::vector<std::uint64_t>{1, 2, 3})));
+    testing::Values(std::make_pair("drop_oldest", std::vector<std::uint64_t>{1, 4, 5}),
+                    std::make_pair("drop_newest", std::vector<std::uint64_t>{1, 2, 3})));
 
 TEST(SensorRuntimeTest, BlockingQueueWaitsThroughSuccessfulPublish) {
   auto core = LoadCore();
@@ -470,28 +430,22 @@ TEST(SensorRuntimeTest, BlockingQueueWaitsThroughSuccessfulPublish) {
   FakePublisherBus bus;
   FirstCaptureGate gate;
   BlockingWaitGate wait_gate;
-  SensorRuntime runtime({
-      [&bus](const std::string& topic) { return bus.MakePublisher(topic); },
-      [&gate](const std::string& source) { gate.BeforeCapture(source); },
-      [&wait_gate](const std::string& source) {
-        wait_gate.OnWaitStarted(source);
-      }});
+  SensorRuntime runtime(
+      {[&bus](const std::string& topic) { return bus.MakePublisher(topic); },
+       [&gate](const std::string& source) { gate.BeforeCapture(source); },
+       [&wait_gate](const std::string& source) { wait_gate.OnWaitStarted(source); }});
   ServerConfig config = BaseConfig();
-  config.sensor_streams = {
-      LidarStream("lidar", "blocking", 1, "drop_oldest")};
+  config.sensor_streams = {LidarStream("lidar", "blocking", 1, "drop_oldest")};
   std::string error;
   ASSERT_TRUE(runtime.Initialize(*core, config, &error)) << error;
 
   {
     std::lock_guard lock(core_mutex);
-    core->OpenIssuedTicks();
-    ASSERT_TRUE(core->CompleteEmptyBarrier().step_completed.has_value());
+    ASSERT_TRUE(core->Step().step_completed.has_value());
     runtime.OnStepCompleted(*core);
   }
   ASSERT_TRUE(gate.WaitUntilEntered());
-  auto completion = std::async(std::launch::async, [&] {
-    runtime.CompleteBlockingEnqueues();
-  });
+  auto completion = std::async(std::launch::async, [&] { runtime.CompleteBlockingEnqueues(); });
   ASSERT_TRUE(wait_gate.WaitUntilEntered());
   EXPECT_EQ(completion.wait_for(0ms), std::future_status::timeout);
   auto status_future = std::async(std::launch::async, [&] {
@@ -500,8 +454,7 @@ TEST(SensorRuntimeTest, BlockingQueueWaitsThroughSuccessfulPublish) {
   });
   ASSERT_EQ(status_future.wait_for(500ms), std::future_status::ready);
   EXPECT_EQ(status_future.get().state, mujoco_sim::core::RUNNING);
-  const std::string topic =
-      mujoco_sim::protocol::SensorStreamTopicName("sensor-test", "lidar");
+  const std::string topic = mujoco_sim::protocol::SensorStreamTopicName("sensor-test", "lidar");
   EXPECT_TRUE(bus.Frames(topic).empty());
   gate.Release();
   ASSERT_EQ(completion.wait_for(3s), std::future_status::ready);
@@ -518,27 +471,19 @@ TEST(SensorRuntimeTest, StopRequestReleasesBlockingEnqueueBeforeWorkerJoin) {
   FakePublisherBus bus;
   FirstCaptureGate capture_gate;
   BlockingWaitGate wait_gate;
-  SensorRuntime runtime({
-      [&bus](const std::string& topic) { return bus.MakePublisher(topic); },
-      [&capture_gate](const std::string& source) {
-        capture_gate.BeforeCapture(source);
-      },
-      [&wait_gate](const std::string& source) {
-        wait_gate.OnWaitStarted(source);
-      }});
+  SensorRuntime runtime(
+      {[&bus](const std::string& topic) { return bus.MakePublisher(topic); },
+       [&capture_gate](const std::string& source) { capture_gate.BeforeCapture(source); },
+       [&wait_gate](const std::string& source) { wait_gate.OnWaitStarted(source); }});
   ServerConfig config = BaseConfig();
-  config.sensor_streams = {
-      LidarStream("lidar", "blocking", 1, "drop_oldest")};
+  config.sensor_streams = {LidarStream("lidar", "blocking", 1, "drop_oldest")};
   std::string error;
   ASSERT_TRUE(runtime.Initialize(*core, config, &error)) << error;
 
-  core->OpenIssuedTicks();
-  ASSERT_TRUE(core->CompleteEmptyBarrier().step_completed.has_value());
+  ASSERT_TRUE(core->Step().step_completed.has_value());
   runtime.OnStepCompleted(*core);
   ASSERT_TRUE(capture_gate.WaitUntilEntered());
-  auto completion = std::async(std::launch::async, [&] {
-    runtime.CompleteBlockingEnqueues();
-  });
+  auto completion = std::async(std::launch::async, [&] { runtime.CompleteBlockingEnqueues(); });
   ASSERT_TRUE(wait_gate.WaitUntilEntered());
   ASSERT_EQ(completion.wait_for(0ms), std::future_status::timeout);
 
@@ -555,28 +500,21 @@ TEST(SensorRuntimeTest, ExternalStopPredicateReleasesBlockingEnqueue) {
   FakePublisherBus bus;
   FirstCaptureGate capture_gate;
   BlockingWaitGate wait_gate;
-  SensorRuntime runtime({
-      [&bus](const std::string& topic) { return bus.MakePublisher(topic); },
-      [&capture_gate](const std::string& source) {
-        capture_gate.BeforeCapture(source);
-      },
-      [&wait_gate](const std::string& source) {
-        wait_gate.OnWaitStarted(source);
-      }});
+  SensorRuntime runtime(
+      {[&bus](const std::string& topic) { return bus.MakePublisher(topic); },
+       [&capture_gate](const std::string& source) { capture_gate.BeforeCapture(source); },
+       [&wait_gate](const std::string& source) { wait_gate.OnWaitStarted(source); }});
   ServerConfig config = BaseConfig();
-  config.sensor_streams = {
-      LidarStream("lidar", "blocking", 1, "drop_oldest")};
+  config.sensor_streams = {LidarStream("lidar", "blocking", 1, "drop_oldest")};
   std::string error;
   ASSERT_TRUE(runtime.Initialize(*core, config, &error)) << error;
 
-  core->OpenIssuedTicks();
-  ASSERT_TRUE(core->CompleteEmptyBarrier().step_completed.has_value());
+  ASSERT_TRUE(core->Step().step_completed.has_value());
   runtime.OnStepCompleted(*core);
   ASSERT_TRUE(capture_gate.WaitUntilEntered());
   std::stop_source stop_source;
-  auto completion = std::async(std::launch::async, [&] {
-    runtime.CompleteBlockingEnqueues(stop_source.get_token());
-  });
+  auto completion = std::async(std::launch::async,
+                               [&] { runtime.CompleteBlockingEnqueues(stop_source.get_token()); });
   ASSERT_TRUE(wait_gate.WaitUntilEntered());
   ASSERT_EQ(completion.wait_for(0ms), std::future_status::timeout);
 
@@ -593,33 +531,26 @@ TEST(SensorRuntimeTest, BlockingCaptureFailureReleasesPendingWaitSafely) {
   FakePublisherBus bus;
   FirstCaptureGate capture_gate;
   BlockingWaitGate wait_gate;
-  SensorRuntime runtime({
-      [&bus](const std::string& topic) { return bus.MakePublisher(topic); },
-      [&capture_gate](const std::string& source) {
-        capture_gate.BeforeCapture(source);
-        throw std::runtime_error("injected blocking capture failure");
-      },
-      [&wait_gate](const std::string& source) {
-        wait_gate.OnWaitStarted(source);
-      }});
+  SensorRuntime runtime(
+      {[&bus](const std::string& topic) { return bus.MakePublisher(topic); },
+       [&capture_gate](const std::string& source) {
+         capture_gate.BeforeCapture(source);
+         throw std::runtime_error("injected blocking capture failure");
+       },
+       [&wait_gate](const std::string& source) { wait_gate.OnWaitStarted(source); }});
   ServerConfig config = BaseConfig();
-  config.sensor_streams = {
-      LidarStream("lidar", "blocking", 1, "drop_oldest")};
+  config.sensor_streams = {LidarStream("lidar", "blocking", 1, "drop_oldest")};
   std::string error;
   ASSERT_TRUE(runtime.Initialize(*core, config, &error)) << error;
 
-  core->OpenIssuedTicks();
-  ASSERT_TRUE(core->CompleteEmptyBarrier().step_completed.has_value());
+  ASSERT_TRUE(core->Step().step_completed.has_value());
   runtime.OnStepCompleted(*core);
   ASSERT_TRUE(capture_gate.WaitUntilEntered());
   for (int step = 0; step < 2; ++step) {
-    core->OpenIssuedTicks();
-    ASSERT_TRUE(core->CompleteEmptyBarrier().step_completed.has_value());
+    ASSERT_TRUE(core->Step().step_completed.has_value());
     runtime.OnStepCompleted(*core);
   }
-  auto completion = std::async(std::launch::async, [&] {
-    runtime.CompleteBlockingEnqueues();
-  });
+  auto completion = std::async(std::launch::async, [&] { runtime.CompleteBlockingEnqueues(); });
   ASSERT_TRUE(wait_gate.WaitUntilEntered());
   EXPECT_EQ(completion.wait_for(0ms), std::future_status::timeout);
   capture_gate.Release();
@@ -628,40 +559,33 @@ TEST(SensorRuntimeTest, BlockingCaptureFailureReleasesPendingWaitSafely) {
 
   const auto status = StreamStatusFor(runtime, "lidar");
   ASSERT_TRUE(status.has_value());
-  EXPECT_EQ(status->state(), mujoco_sim::v3::STREAM_ERROR);
-  EXPECT_NE(status->message().find("injected blocking capture failure"),
-            std::string::npos);
+  EXPECT_EQ(status->state(), mujoco_sim::v4::STREAM_ERROR);
+  EXPECT_NE(status->message().find("injected blocking capture failure"), std::string::npos);
 }
 
 TEST(SensorRuntimeTest, PublishRejectionIsRetriedWithoutStoppingStream) {
   auto core = LoadCore();
   FakePublisherBus bus;
-  SensorRuntime runtime({[&bus](const std::string& topic) {
-                           return bus.MakePublisher(topic);
-                         },
-                         {}});
+  SensorRuntime runtime(
+      {[&bus](const std::string& topic) { return bus.MakePublisher(topic); }, {}});
   ServerConfig config = BaseConfig();
-  config.sensor_streams = {CameraStream("rgb", "rgb"),
-                           CameraStream("depth", "depth")};
+  config.sensor_streams = {CameraStream("rgb", "rgb"), CameraStream("depth", "depth")};
   std::string error;
   ASSERT_TRUE(runtime.Initialize(*core, config, &error)) << error;
-  const std::string rgb_topic =
-      mujoco_sim::protocol::SensorStreamTopicName("sensor-test", "rgb");
+  const std::string rgb_topic = mujoco_sim::protocol::SensorStreamTopicName("sensor-test", "rgb");
   const std::string depth_topic =
       mujoco_sim::protocol::SensorStreamTopicName("sensor-test", "depth");
-  bus.GetOrCreate(rgb_topic)->fail_send.store(true,
-                                               std::memory_order_relaxed);
+  bus.GetOrCreate(rgb_topic)->fail_send.store(true, std::memory_order_relaxed);
 
   ASSERT_TRUE(Advance(core.get(), &runtime));
   ASSERT_TRUE(bus.WaitForFrames(depth_topic, 1));
   auto rgb = StreamStatusFor(runtime, "rgb");
   ASSERT_TRUE(rgb.has_value());
-  EXPECT_EQ(rgb->state(), mujoco_sim::v3::STREAM_RUNNING);
+  EXPECT_EQ(rgb->state(), mujoco_sim::v4::STREAM_RUNNING);
   EXPECT_EQ(rgb->publish_errors(), 1U);
   EXPECT_EQ(rgb->published(), 0U);
 
-  bus.GetOrCreate(rgb_topic)->fail_send.store(false,
-                                                std::memory_order_relaxed);
+  bus.GetOrCreate(rgb_topic)->fail_send.store(false, std::memory_order_relaxed);
   ASSERT_TRUE(Advance(core.get(), &runtime));
   ASSERT_TRUE(bus.WaitForFrames(rgb_topic, 1));
   ASSERT_TRUE(bus.WaitForFrames(depth_topic, 2));
@@ -670,31 +594,29 @@ TEST(SensorRuntimeTest, PublishRejectionIsRetriedWithoutStoppingStream) {
   const auto depth = StreamStatusFor(runtime, "depth");
   ASSERT_TRUE(rgb.has_value());
   ASSERT_TRUE(depth.has_value());
-  EXPECT_EQ(rgb->state(), mujoco_sim::v3::STREAM_RUNNING);
+  EXPECT_EQ(rgb->state(), mujoco_sim::v4::STREAM_RUNNING);
   EXPECT_EQ(rgb->publish_errors(), 1U);
   EXPECT_EQ(rgb->published(), 1U);
-  EXPECT_EQ(depth->state(), mujoco_sim::v3::STREAM_RUNNING);
+  EXPECT_EQ(depth->state(), mujoco_sim::v4::STREAM_RUNNING);
   EXPECT_EQ(depth->published(), 2U);
 }
 
 TEST(SensorRuntimeTest, SerializationFailureErrorsOnlyThatCameraOutput) {
   auto core = LoadCore();
   FakePublisherBus bus;
-  SensorRuntime runtime({
-      [&bus](const std::string& topic) { return bus.MakePublisher(topic); },
-      {}, {},
-      [](mujoco_sim::v3::StreamFrameHeader* header) {
-        if (header->stream_name() == "rgb") {
-          header->set_payload_size(header->payload_size() + 1);
-        }
-      }});
+  SensorRuntime runtime({[&bus](const std::string& topic) { return bus.MakePublisher(topic); },
+                         {},
+                         {},
+                         [](mujoco_sim::v4::StreamFrameHeader* header) {
+                           if (header->stream_name() == "rgb") {
+                             header->set_payload_size(header->payload_size() + 1);
+                           }
+                         }});
   ServerConfig config = BaseConfig();
-  config.sensor_streams = {CameraStream("rgb", "rgb"),
-                           CameraStream("depth", "depth")};
+  config.sensor_streams = {CameraStream("rgb", "rgb"), CameraStream("depth", "depth")};
   std::string error;
   ASSERT_TRUE(runtime.Initialize(*core, config, &error)) << error;
-  const std::string rgb_topic =
-      mujoco_sim::protocol::SensorStreamTopicName("sensor-test", "rgb");
+  const std::string rgb_topic = mujoco_sim::protocol::SensorStreamTopicName("sensor-test", "rgb");
   const std::string depth_topic =
       mujoco_sim::protocol::SensorStreamTopicName("sensor-test", "depth");
 
@@ -705,10 +627,10 @@ TEST(SensorRuntimeTest, SerializationFailureErrorsOnlyThatCameraOutput) {
   auto depth = StreamStatusFor(runtime, "depth");
   ASSERT_TRUE(rgb.has_value());
   ASSERT_TRUE(depth.has_value());
-  EXPECT_EQ(rgb->state(), mujoco_sim::v3::STREAM_ERROR);
+  EXPECT_EQ(rgb->state(), mujoco_sim::v4::STREAM_ERROR);
   EXPECT_EQ(rgb->publish_errors(), 1U);
   EXPECT_NE(rgb->message().find("payload_size"), std::string::npos);
-  EXPECT_EQ(depth->state(), mujoco_sim::v3::STREAM_RUNNING);
+  EXPECT_EQ(depth->state(), mujoco_sim::v4::STREAM_RUNNING);
 
   ASSERT_TRUE(Advance(core.get(), &runtime));
   ASSERT_TRUE(bus.WaitForFrames(depth_topic, 2));
@@ -727,15 +649,14 @@ TEST(SensorRuntimeTest, SerializationExceptionErrorsOnlyThatCameraOutput) {
   hooks.make_publisher = [&bus](const std::string& topic) {
     return bus.MakePublisher(topic);
   };
-  hooks.before_serialize = [](mujoco_sim::v3::StreamFrameHeader* header) {
+  hooks.before_serialize = [](mujoco_sim::v4::StreamFrameHeader* header) {
     if (header->stream_name() == "rgb") {
       throw std::runtime_error("injected serialization exception");
     }
   };
   SensorRuntime runtime(std::move(hooks));
   ServerConfig config = BaseConfig();
-  config.sensor_streams = {CameraStream("rgb", "rgb"),
-                           CameraStream("depth", "depth")};
+  config.sensor_streams = {CameraStream("rgb", "rgb"), CameraStream("depth", "depth")};
   std::string error;
   ASSERT_TRUE(runtime.Initialize(*core, config, &error)) << error;
 
@@ -747,10 +668,9 @@ TEST(SensorRuntimeTest, SerializationExceptionErrorsOnlyThatCameraOutput) {
   const auto depth = StreamStatusFor(runtime, "depth");
   ASSERT_TRUE(rgb.has_value());
   ASSERT_TRUE(depth.has_value());
-  EXPECT_EQ(rgb->state(), mujoco_sim::v3::STREAM_ERROR);
-  EXPECT_NE(rgb->message().find("injected serialization exception"),
-            std::string::npos);
-  EXPECT_EQ(depth->state(), mujoco_sim::v3::STREAM_RUNNING);
+  EXPECT_EQ(rgb->state(), mujoco_sim::v4::STREAM_ERROR);
+  EXPECT_NE(rgb->message().find("injected serialization exception"), std::string::npos);
+  EXPECT_EQ(depth->state(), mujoco_sim::v4::STREAM_RUNNING);
 }
 
 TEST(SensorRuntimeTest, PublisherExceptionErrorsOnlyThatCameraOutput) {
@@ -768,8 +688,7 @@ TEST(SensorRuntimeTest, PublisherExceptionErrorsOnlyThatCameraOutput) {
   };
   SensorRuntime runtime(std::move(hooks));
   ServerConfig config = BaseConfig();
-  config.sensor_streams = {CameraStream("rgb", "rgb"),
-                           CameraStream("depth", "depth")};
+  config.sensor_streams = {CameraStream("rgb", "rgb"), CameraStream("depth", "depth")};
   std::string error;
   ASSERT_TRUE(runtime.Initialize(*core, config, &error)) << error;
 
@@ -781,28 +700,23 @@ TEST(SensorRuntimeTest, PublisherExceptionErrorsOnlyThatCameraOutput) {
   const auto depth = StreamStatusFor(runtime, "depth");
   ASSERT_TRUE(rgb.has_value());
   ASSERT_TRUE(depth.has_value());
-  EXPECT_EQ(rgb->state(), mujoco_sim::v3::STREAM_ERROR);
-  EXPECT_NE(rgb->message().find("injected publisher exception"),
-            std::string::npos);
-  EXPECT_EQ(depth->state(), mujoco_sim::v3::STREAM_RUNNING);
+  EXPECT_EQ(rgb->state(), mujoco_sim::v4::STREAM_ERROR);
+  EXPECT_NE(rgb->message().find("injected publisher exception"), std::string::npos);
+  EXPECT_EQ(depth->state(), mujoco_sim::v4::STREAM_RUNNING);
 }
 
 TEST(SensorRuntimeTest, SubscriberReplacementDuringSendIsRetryable) {
   auto core = LoadCore();
   FakePublisherBus bus;
-  SensorRuntime runtime({[&bus](const std::string& topic) {
-                           return bus.MakePublisher(topic);
-                         },
-                         {}});
+  SensorRuntime runtime(
+      {[&bus](const std::string& topic) { return bus.MakePublisher(topic); }, {}});
   ServerConfig config = BaseConfig();
   config.sensor_streams = {LidarStream()};
   std::string error;
   ASSERT_TRUE(runtime.Initialize(*core, config, &error)) << error;
-  const std::string topic =
-      mujoco_sim::protocol::SensorStreamTopicName("sensor-test", "lidar");
+  const std::string topic = mujoco_sim::protocol::SensorStreamTopicName("sensor-test", "lidar");
   const auto channel = bus.GetOrCreate(topic);
-  channel->replace_subscriber_on_send.store(true,
-                                             std::memory_order_relaxed);
+  channel->replace_subscriber_on_send.store(true, std::memory_order_relaxed);
 
   ASSERT_TRUE(Advance(core.get(), &runtime));
   ASSERT_TRUE(WaitUntil([&] {
@@ -811,7 +725,7 @@ TEST(SensorRuntimeTest, SubscriberReplacementDuringSendIsRetryable) {
   }));
   auto status = StreamStatusFor(runtime, "lidar");
   ASSERT_TRUE(status.has_value());
-  EXPECT_EQ(status->state(), mujoco_sim::v3::STREAM_RUNNING);
+  EXPECT_EQ(status->state(), mujoco_sim::v4::STREAM_RUNNING);
   EXPECT_EQ(status->subscriber_count(), 1U);
 
   ASSERT_TRUE(Advance(core.get(), &runtime));
@@ -825,16 +739,13 @@ TEST(SensorRuntimeTest, SubscriberReplacementDuringSendIsRetryable) {
 TEST(SensorRuntimeTest, SubscriberDisconnectDuringSendIsNotAStreamError) {
   auto core = LoadCore();
   FakePublisherBus bus;
-  SensorRuntime runtime({[&bus](const std::string& topic) {
-                           return bus.MakePublisher(topic);
-                         },
-                         {}});
+  SensorRuntime runtime(
+      {[&bus](const std::string& topic) { return bus.MakePublisher(topic); }, {}});
   ServerConfig config = BaseConfig();
   config.sensor_streams = {LidarStream()};
   std::string error;
   ASSERT_TRUE(runtime.Initialize(*core, config, &error)) << error;
-  const std::string topic =
-      mujoco_sim::protocol::SensorStreamTopicName("sensor-test", "lidar");
+  const std::string topic = mujoco_sim::protocol::SensorStreamTopicName("sensor-test", "lidar");
   const auto channel = bus.GetOrCreate(topic);
   channel->disconnect_on_send.store(true, std::memory_order_relaxed);
 
@@ -847,8 +758,8 @@ TEST(SensorRuntimeTest, SubscriberDisconnectDuringSendIsNotAStreamError) {
   ASSERT_TRUE(Advance(core.get(), &runtime));
   ASSERT_TRUE(WaitUntil([&] {
     const auto status = StreamStatusFor(runtime, "lidar");
-    return status && status->state() == mujoco_sim::v3::STREAM_IDLE &&
-           status->captures() == 1 && status->subscriber_count() == 0;
+    return status && status->state() == mujoco_sim::v4::STREAM_IDLE && status->captures() == 1 &&
+           status->subscriber_count() == 0;
   }));
   const auto disconnected = StreamStatusFor(runtime, "lidar");
   ASSERT_TRUE(disconnected.has_value());
@@ -860,31 +771,27 @@ TEST(SensorRuntimeTest, SubscriberDisconnectDuringSendIsNotAStreamError) {
   ASSERT_TRUE(bus.WaitForFrames(topic, 1));
   ASSERT_TRUE(WaitUntil([&] {
     const auto status = StreamStatusFor(runtime, "lidar");
-    return status && status->state() == mujoco_sim::v3::STREAM_RUNNING;
+    return status && status->state() == mujoco_sim::v4::STREAM_RUNNING;
   }));
 }
 
 TEST(SensorRuntimeTest, LazyStreamReturnsToIdleAfterLastSubscriberLeaves) {
   auto core = LoadCore();
   FakePublisherBus bus;
-  SensorRuntime runtime({[&bus](const std::string& topic) {
-                           return bus.MakePublisher(topic);
-                         },
-                         {}});
+  SensorRuntime runtime(
+      {[&bus](const std::string& topic) { return bus.MakePublisher(topic); }, {}});
   ServerConfig config = BaseConfig();
-  config.sensor_streams = {
-      LidarStream("lidar", "latest", 1, "drop_oldest", 1.0)};
+  config.sensor_streams = {LidarStream("lidar", "latest", 1, "drop_oldest", 1.0)};
   std::string error;
   ASSERT_TRUE(runtime.Initialize(*core, config, &error)) << error;
-  const std::string topic =
-      mujoco_sim::protocol::SensorStreamTopicName("sensor-test", "lidar");
+  const std::string topic = mujoco_sim::protocol::SensorStreamTopicName("sensor-test", "lidar");
   const auto channel = bus.GetOrCreate(topic);
 
   ASSERT_TRUE(Advance(core.get(), &runtime));
   ASSERT_TRUE(bus.WaitForFrames(topic, 1));
   ASSERT_TRUE(WaitUntil([&] {
     const auto status = StreamStatusFor(runtime, "lidar");
-    return status && status->state() == mujoco_sim::v3::STREAM_RUNNING;
+    return status && status->state() == mujoco_sim::v4::STREAM_RUNNING;
   }));
 
   channel->subscribers.store(0, std::memory_order_relaxed);
@@ -892,7 +799,7 @@ TEST(SensorRuntimeTest, LazyStreamReturnsToIdleAfterLastSubscriberLeaves) {
   ASSERT_TRUE(Advance(core.get(), &runtime));
   const auto status = StreamStatusFor(runtime, "lidar");
   ASSERT_TRUE(status.has_value());
-  EXPECT_EQ(status->state(), mujoco_sim::v3::STREAM_IDLE);
+  EXPECT_EQ(status->state(), mujoco_sim::v4::STREAM_IDLE);
   EXPECT_EQ(status->subscriber_count(), 0U);
   EXPECT_EQ(status->captures(), 1U);
 }
@@ -900,16 +807,15 @@ TEST(SensorRuntimeTest, LazyStreamReturnsToIdleAfterLastSubscriberLeaves) {
 TEST(SensorRuntimeTest, CameraCaptureFailureErrorsItsGroupButNotOtherWorkers) {
   auto core = LoadCore();
   FakePublisherBus bus;
-  SensorRuntime runtime({
-      [&bus](const std::string& topic) { return bus.MakePublisher(topic); },
-      [](const std::string& source) {
-        if (source == "test_camera") {
-          throw std::runtime_error("injected camera failure");
-        }
-      }});
+  SensorRuntime runtime({[&bus](const std::string& topic) { return bus.MakePublisher(topic); },
+                         [](const std::string& source) {
+                           if (source == "test_camera") {
+                             throw std::runtime_error("injected camera failure");
+                           }
+                         }});
   ServerConfig config = BaseConfig();
-  config.sensor_streams = {CameraStream("rgb", "rgb"),
-                           CameraStream("depth", "depth"), LidarStream()};
+  config.sensor_streams = {CameraStream("rgb", "rgb"), CameraStream("depth", "depth"),
+                           LidarStream()};
   std::string error;
   ASSERT_TRUE(runtime.Initialize(*core, config, &error)) << error;
 
@@ -920,23 +826,21 @@ TEST(SensorRuntimeTest, CameraCaptureFailureErrorsItsGroupButNotOtherWorkers) {
   ASSERT_TRUE(WaitUntil([&] {
     const auto rgb = StreamStatusFor(runtime, "rgb");
     const auto depth = StreamStatusFor(runtime, "depth");
-    return rgb && depth && rgb->state() == mujoco_sim::v3::STREAM_ERROR &&
-           depth->state() == mujoco_sim::v3::STREAM_ERROR;
+    return rgb && depth && rgb->state() == mujoco_sim::v4::STREAM_ERROR &&
+           depth->state() == mujoco_sim::v4::STREAM_ERROR;
   }));
   const auto lidar = StreamStatusFor(runtime, "lidar");
   ASSERT_TRUE(lidar.has_value());
-  EXPECT_EQ(lidar->state(), mujoco_sim::v3::STREAM_RUNNING);
+  EXPECT_EQ(lidar->state(), mujoco_sim::v4::STREAM_RUNNING);
 }
 
 TEST(SensorRuntimeTest, NoSubscribersAvoidCaptureWork) {
   auto core = LoadCore();
   FakePublisherBus bus(0);
   std::atomic<std::size_t> captures{0};
-  SensorRuntime runtime({
-      [&bus](const std::string& topic) { return bus.MakePublisher(topic); },
-      [&captures](const std::string&) {
-        captures.fetch_add(1, std::memory_order_relaxed);
-      }});
+  SensorRuntime runtime(
+      {[&bus](const std::string& topic) { return bus.MakePublisher(topic); },
+       [&captures](const std::string&) { captures.fetch_add(1, std::memory_order_relaxed); }});
   ServerConfig config = BaseConfig();
   config.sensor_streams = {LidarStream()};
   std::string error;
@@ -955,10 +859,8 @@ TEST(SensorRuntimeTest, NoSubscribersAvoidCaptureWork) {
 TEST(SensorRuntimeTest, InitializationFailureRollsBackStartedWorkers) {
   auto core = LoadCore();
   FakePublisherBus bus;
-  SensorRuntime runtime({[&bus](const std::string& topic) {
-                           return bus.MakePublisher(topic);
-                         },
-                         {}});
+  SensorRuntime runtime(
+      {[&bus](const std::string& topic) { return bus.MakePublisher(topic); }, {}});
   ServerConfig config = BaseConfig();
   auto invalid = LidarStream("invalid");
   invalid.source = "missing_site";
@@ -966,12 +868,10 @@ TEST(SensorRuntimeTest, InitializationFailureRollsBackStartedWorkers) {
   std::string error;
   ASSERT_FALSE(runtime.Initialize(*core, config, &error));
   EXPECT_NE(error.find("missing_site"), std::string::npos);
-  EXPECT_EQ(runtime.GetCatalog(CatalogRequest()).code(),
-            mujoco_sim::v3::FAILED_PRECONDITION);
+  EXPECT_EQ(runtime.GetCatalog(CatalogRequest()).code(), mujoco_sim::v4::FAILED_PRECONDITION);
   EXPECT_TRUE(Advance(core.get(), &runtime));
   EXPECT_FALSE(bus.WaitForFrames(
-      mujoco_sim::protocol::SensorStreamTopicName("sensor-test", "valid"), 1,
-      50ms));
+      mujoco_sim::protocol::SensorStreamTopicName("sensor-test", "valid"), 1, 50ms));
 }
 
 TEST(SensorRuntimeTest, InitializationExceptionIsReportedWithoutHanging) {
@@ -989,8 +889,7 @@ TEST(SensorRuntimeTest, InitializationExceptionIsReportedWithoutHanging) {
   config.sensor_streams = {LidarStream()};
   std::string error;
   EXPECT_FALSE(runtime.Initialize(*core, config, &error));
-  EXPECT_NE(error.find("injected initialization exception"),
-            std::string::npos);
+  EXPECT_NE(error.find("injected initialization exception"), std::string::npos);
 }
 
 TEST(SensorRuntimeTest, PublisherFactoryExceptionIsReported) {
@@ -1004,17 +903,14 @@ TEST(SensorRuntimeTest, PublisherFactoryExceptionIsReported) {
   config.sensor_streams = {LidarStream()};
   std::string error;
   EXPECT_FALSE(runtime.Initialize(*core, config, &error));
-  EXPECT_NE(error.find("injected publisher factory exception"),
-            std::string::npos);
+  EXPECT_NE(error.find("injected publisher factory exception"), std::string::npos);
 }
 
 TEST(SensorRuntimeTest, RejectsUnsafeDirectConfigurationBeforeAllocation) {
   auto core = LoadCore();
   FakePublisherBus bus;
-  SensorRuntime runtime({[&bus](const std::string& topic) {
-                           return bus.MakePublisher(topic);
-                         },
-                         {}});
+  SensorRuntime runtime(
+      {[&bus](const std::string& topic) { return bus.MakePublisher(topic); }, {}});
   ServerConfig config = BaseConfig();
   auto stream = LidarStream();
   stream.queue_mode = "fifo";
@@ -1054,8 +950,7 @@ TEST(SensorRuntimeTest, RejectsUnsafeDirectConfigurationBeforeAllocation) {
 
   config = BaseConfig();
   stream = LidarStream();
-  stream.vertical_fov_min_deg =
-      std::numeric_limits<double>::quiet_NaN();
+  stream.vertical_fov_min_deg = std::numeric_limits<double>::quiet_NaN();
   config.sensor_streams = {stream};
   EXPECT_FALSE(runtime.Initialize(*core, config, &error));
   EXPECT_NE(error.find("vertical_fov_min_deg"), std::string::npos);
@@ -1082,15 +977,13 @@ TEST(SensorRuntimeTest, RejectsUnsafeDirectConfigurationBeforeAllocation) {
   EXPECT_NE(error.find("range"), std::string::npos);
 
   config = BaseConfig();
-  config.sensor_streams = {LidarStream("duplicate"),
-                           LidarStream("duplicate")};
+  config.sensor_streams = {LidarStream("duplicate"), LidarStream("duplicate")};
   EXPECT_FALSE(runtime.Initialize(*core, config, &error));
   EXPECT_NE(error.find("duplicate"), std::string::npos);
 }
 
 TEST(SensorRuntimeTest, RejectsOversizedStreamShapesAtConfigBoundary) {
-  const auto expect_invalid = [](ServerConfig config,
-                                 const std::string& expected_error) {
+  const auto expect_invalid = [](ServerConfig config, const std::string& expected_error) {
     std::string error;
     EXPECT_FALSE(ValidateServerConfig(config, &error));
     EXPECT_NE(error.find(expected_error), std::string::npos) << error;
@@ -1139,8 +1032,7 @@ TEST(SensorRuntimeTest, RejectsOversizedStreamShapesAtConfigBoundary) {
   expect_invalid(config, "payload limits");
 
   lidar = LidarStream();
-  lidar.max_range_m =
-      static_cast<double>(std::numeric_limits<float>::max()) * 2.0;
+  lidar.max_range_m = static_cast<double>(std::numeric_limits<float>::max()) * 2.0;
   config.sensor_streams = {lidar};
   expect_invalid(config, "float range");
 }

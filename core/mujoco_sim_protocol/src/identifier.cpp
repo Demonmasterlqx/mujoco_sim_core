@@ -5,23 +5,24 @@ namespace {
 
 const char* KindName(IdentifierKind kind) {
   switch (kind) {
-    case IdentifierKind::kServer: return "server_name";
-    case IdentifierKind::kAdapter: return "adapter_id";
-    case IdentifierKind::kStream: return "stream_name";
+    case IdentifierKind::kServer:
+      return "server_name";
+    case IdentifierKind::kAdapter:
+      return "adapter_id";
+    case IdentifierKind::kStream:
+      return "stream_name";
   }
   return "identifier";
 }
 
 bool IsAlphanumeric(unsigned char value) {
-  return (value >= 'A' && value <= 'Z') ||
-         (value >= 'a' && value <= 'z') ||
+  return (value >= 'A' && value <= 'Z') || (value >= 'a' && value <= 'z') ||
          (value >= '0' && value <= '9');
 }
 
 }  // namespace
 
-bool ValidateIdentifier(std::string_view value, IdentifierKind kind,
-                        std::string* error_message) {
+bool ValidateIdentifier(std::string_view value, IdentifierKind kind, std::string* error_message) {
   const auto fail = [&](const char* reason) {
     if (error_message != nullptr) {
       *error_message = std::string(KindName(kind)) + " " + reason;

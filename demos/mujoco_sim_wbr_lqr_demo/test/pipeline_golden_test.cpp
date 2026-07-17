@@ -53,8 +53,7 @@ TEST(PipelineGoldenTest, NormalStepRawTorqueMatchesUpstreamSequence) {
   EXPECT_NEAR(normal.left.length, 0.200398296F, 1e-6F);
   EXPECT_NEAR(normal.left.alpha, 0.0F, 1e-6F);
   EXPECT_NEAR(normal.pendulum.N, 82.4239273F, 1e-4F);
-  const float expected[6] = {3.54397225F, -3.54397154F, -0.0F,
-                             -3.54397225F, 3.54397154F, -0.0F};
+  const float expected[6] = {3.54397225F, -3.54397154F, -0.0F, -3.54397225F, 3.54397154F, -0.0F};
   for (std::size_t i = 0; i < normal.raw_torque.size(); ++i) {
     EXPECT_NEAR(normal.raw_torque[i], expected[i], 2e-5F) << i;
   }
@@ -62,12 +61,10 @@ TEST(PipelineGoldenTest, NormalStepRawTorqueMatchesUpstreamSequence) {
 
 TEST(PipelineGoldenTest, LqrTableMatchesPinnedUpstreamOutput) {
   control::lqr_solver solver;
-  const float reference[10] = {0.1F, -0.2F, 0.3F, -0.4F, 0.05F,
-                               0.1F, -0.1F, 0.2F, -0.05F, 0.15F};
-  const float observation[10] = {-0.2F, 0.4F, -0.1F, 0.3F, -0.2F,
-                                 0.5F, 0.25F, -0.35F, 0.1F, -0.45F};
-  solver.update(0.21F, 0.29F, reference, observation,
-                demo::MakeUpstreamWbrChassisConfig());
+  const float reference[10] = {0.1F, -0.2F, 0.3F, -0.4F, 0.05F, 0.1F, -0.1F, 0.2F, -0.05F, 0.15F};
+  const float observation[10] = {-0.2F, 0.4F,  -0.1F,  0.3F, -0.2F,
+                                 0.5F,  0.25F, -0.35F, 0.1F, -0.45F};
+  solver.update(0.21F, 0.29F, reference, observation, demo::MakeUpstreamWbrChassisConfig());
 
   EXPECT_NEAR(solver.tout[0], -0.467866302F, 1e-5F);
   EXPECT_NEAR(solver.tout[1], 0.623082042F, 1e-5F);

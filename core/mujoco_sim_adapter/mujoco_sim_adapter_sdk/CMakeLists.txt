@@ -14,15 +14,13 @@ option(MUJOCO_SIM_BUILD_DOCS
 
 add_library(${PROJECT_NAME}
   src/adapter_domain.cpp
+  src/controller_client.cpp
   src/ecal_runtime.cpp
   src/internal/adapter_transport.cpp
   src/observer_client.cpp
   src/observer_client_receive.cpp
   src/sensor_stream_client.cpp
   src/sensor_stream_client_receive.cpp
-  src/sync_adapter_client.cpp
-  src/sync_adapter_client_receive.cpp
-  src/sync_adapter_client_wait_commit.cpp
 )
 add_library(mujoco_sim::adapter_sdk ALIAS ${PROJECT_NAME})
 target_compile_features(${PROJECT_NAME} PUBLIC cxx_std_20)
@@ -70,10 +68,10 @@ include(CTest)
 if(BUILD_TESTING)
   find_package(GTest REQUIRED)
   add_executable(adapter_sdk_test
+    test/controller_client_test.cpp
     test/internal_primitives_test.cpp
     test/observer_client_test.cpp
     test/sensor_stream_client_test.cpp
-    test/sync_adapter_client_test.cpp
   )
   target_include_directories(adapter_sdk_test PRIVATE
     "${CMAKE_CURRENT_SOURCE_DIR}/src"
@@ -128,25 +126,6 @@ if(BUILD_TESTING)
     TIMEOUT 20
   )
 
-  add_executable(server_terminal_state_ecal_test
-    test/server_terminal_state_ecal_test.cpp
-  )
-  target_compile_definitions(server_terminal_state_ecal_test PRIVATE
-    MUJOCO_SIM_SDK_TERMINAL_MODEL="${CMAKE_CURRENT_SOURCE_DIR}/../../mujoco_sim_server/test/testdata/sensor_runtime_scene.xml"
-  )
-  target_link_libraries(server_terminal_state_ecal_test PRIVATE
-    ${PROJECT_NAME}
-    mujoco_sim::server
-    GTest::gtest_main
-  )
-  add_test(NAME server_terminal_state_ecal_test
-    COMMAND server_terminal_state_ecal_test
-  )
-  set_tests_properties(server_terminal_state_ecal_test PROPERTIES
-    ENVIRONMENT "DISPLAY=;WAYLAND_DISPLAY="
-    TIMEOUT 20
-  )
-
   add_executable(adapter_sdk_lifecycle_probe
     test/adapter_sdk_lifecycle_probe.cpp
   )
@@ -162,34 +141,6 @@ if(BUILD_TESTING)
   )
   set_tests_properties(adapter_sdk_lifecycle_e2e PROPERTIES TIMEOUT 20)
 
-  add_executable(sensor_observer_e2e_probe
-    test/sensor_observer_e2e_probe.cpp
-  )
-  target_link_libraries(sensor_observer_e2e_probe PRIVATE ${PROJECT_NAME})
-  add_test(
-    NAME sensor_observer_e2e
-    COMMAND
-      bash
-      "${CMAKE_CURRENT_SOURCE_DIR}/test/sensor_observer_e2e.sh"
-      "$<TARGET_FILE:mujoco_sim::mujoco-sim-server>"
-      "$<TARGET_FILE:sensor_observer_e2e_probe>"
-      "${CMAKE_CURRENT_SOURCE_DIR}/../../mujoco_sim_server/test/testdata/sensor_runtime_scene.xml"
-      "${CMAKE_CURRENT_SOURCE_DIR}/test/sensor_observer_e2e_server.yaml"
-  )
-  set_tests_properties(sensor_observer_e2e PROPERTIES TIMEOUT 50)
-
-  add_executable(message_rate_e2e_probe test/message_rate_e2e_probe.cpp)
-  target_link_libraries(message_rate_e2e_probe PRIVATE ${PROJECT_NAME})
-  add_test(
-    NAME message_rate_e2e
-    COMMAND bash
-      "${CMAKE_CURRENT_SOURCE_DIR}/test/message_rate_e2e.sh"
-      "$<TARGET_FILE:mujoco_sim::mujoco-sim-server>"
-      "$<TARGET_FILE:message_rate_e2e_probe>"
-      "${CMAKE_CURRENT_SOURCE_DIR}/../../mujoco_sim_core/test/testdata/simple_actuator.xml"
-      "${CMAKE_CURRENT_SOURCE_DIR}/test/message_rate_e2e_server.yaml"
-  )
-  set_tests_properties(message_rate_e2e PROPERTIES TIMEOUT 45)
 endif()
 
 if(MUJOCO_SIM_ENABLE_QUALITY_GATES)

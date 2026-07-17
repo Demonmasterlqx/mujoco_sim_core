@@ -38,9 +38,6 @@ fields:
         default: perimeter_controller
         non_empty: true
         cli: [--adapter-id]
-      commit_timeout_ms: {type: uint32, default: 5000, min: 1}
-      session_timeout_ms: {type: uint32, default: 5000, min: 1}
-      heartbeat_period_ms: {type: uint32, default: 500, min: 100}
       log_every_ticks: {type: uint64, default: 250}
       max_simulation_time_s:
         type: double

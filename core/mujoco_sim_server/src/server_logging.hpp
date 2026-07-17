@@ -45,8 +45,7 @@ class WarningLimiter {
   explicit WarningLimiter(std::chrono::steady_clock::duration period);
 
   WarningDecision Admit(std::string_view key);
-  WarningDecision AdmitAt(std::string_view key,
-                          std::chrono::steady_clock::time_point now);
+  WarningDecision AdmitAt(std::string_view key, std::chrono::steady_clock::time_point now);
 
  private:
   struct Entry {

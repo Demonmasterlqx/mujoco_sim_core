@@ -8,8 +8,7 @@
 
 namespace mujoco_sim::wbr_lqr_demo {
 
-InputScript::InputScript(std::vector<InputInterval> intervals)
-    : intervals_(std::move(intervals)) {
+InputScript::InputScript(std::vector<InputInterval> intervals) : intervals_(std::move(intervals)) {
   std::sort(intervals_.begin(), intervals_.end(),
             [](const InputInterval& lhs, const InputInterval& rhs) {
               if (lhs.begin_tick != rhs.begin_tick) {
@@ -32,16 +31,13 @@ InputScript::InputScript(std::vector<InputInterval> intervals)
 control::input_snapshot_t InputScript::InputAt(std::uint64_t tick_id) const {
   const auto next = std::upper_bound(
       intervals_.begin(), intervals_.end(), tick_id,
-      [](std::uint64_t tick, const InputInterval& interval) {
-        return tick < interval.begin_tick;
-      });
+      [](std::uint64_t tick, const InputInterval& interval) { return tick < interval.begin_tick; });
   if (next == intervals_.begin()) {
     return {};
   }
 
   const auto& candidate = *std::prev(next);
-  return tick_id < candidate.end_tick ? candidate.input
-                                      : control::input_snapshot_t{};
+  return tick_id < candidate.end_tick ? candidate.input : control::input_snapshot_t{};
 }
 
 }  // namespace mujoco_sim::wbr_lqr_demo

@@ -14,8 +14,7 @@ namespace demo = mujoco_sim::sensor_demo;
 int main(int argc, char** argv) {
   demo::AppConfig app_config;
   std::string message;
-  const auto parse_result = demo::ParseAppConfig(argc, argv, &app_config,
-                                                  &message);
+  const auto parse_result = demo::ParseAppConfig(argc, argv, &app_config, &message);
   if (parse_result == demo::ParseAppConfigResult::kHelp) {
     std::cout << message;
     return 0;
@@ -34,25 +33,20 @@ int main(int argc, char** argv) {
     return 1;
   }
   const demo::StateDecoder decoder(client.layout(), config.interfaces);
-  std::cout << "sensor-demo state observer ready adapter="
-            << config.observer.observer_id << std::endl;
+  std::cout << "sensor-demo state observer ready adapter=" << config.observer.observer_id
+            << std::endl;
 
   std::uint64_t frames = 0;
   int result = 0;
-  while (!demo::ProcessStopRequested() &&
-         (config.max_frames == 0 || frames < config.max_frames)) {
+  while (!demo::ProcessStopRequested() && (config.max_frames == 0 || frames < config.max_frames)) {
     mujoco_sim::adapter_sdk::ObservationLease frame;
     const auto wait_result = client.WaitForObservation(
         std::chrono::milliseconds(config.wait_timeout_ms), &frame, &message);
-    if (wait_result ==
-        mujoco_sim::adapter_sdk::ObservationWaitResult::kTimeout) {
+    if (wait_result == mujoco_sim::adapter_sdk::ObservationWaitResult::kTimeout) {
       continue;
     }
-    if (wait_result !=
-        mujoco_sim::adapter_sdk::ObservationWaitResult::kReceived) {
-      std::cerr << (message.empty() ? "state observation stream stopped"
-                                    : message)
-                << '\n';
+    if (wait_result != mujoco_sim::adapter_sdk::ObservationWaitResult::kReceived) {
+      std::cerr << (message.empty() ? "state observation stream stopped" : message) << '\n';
       result = 1;
       break;
     }
@@ -63,10 +57,8 @@ int main(int argc, char** argv) {
       break;
     }
     ++frames;
-    if (config.log_every_frames > 0 &&
-        frames % config.log_every_frames == 0) {
-      std::cout << "sensor-demo state frame=" << frames
-                << " sim_time=" << sample.simulation_time
+    if (config.log_every_frames > 0 && frames % config.log_every_frames == 0) {
+      std::cout << "sensor-demo state frame=" << frames << " sim_time=" << sample.simulation_time
                 << " wheel_velocity=" << sample.wheel_velocities[0]
                 << " imu_w=" << sample.imu_quaternion[0] << '\n';
     }
@@ -74,8 +66,7 @@ int main(int argc, char** argv) {
 
   std::string unregister_error;
   if (!client.Unregister(&unregister_error)) {
-    std::cerr << "state observer unregister failed: " << unregister_error
-              << '\n';
+    std::cerr << "state observer unregister failed: " << unregister_error << '\n';
     if (result == 0 && !demo::ProcessStopRequested()) result = 1;
   }
   std::cout << "sensor-demo state observer summary frames=" << frames

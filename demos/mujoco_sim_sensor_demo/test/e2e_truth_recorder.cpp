@@ -17,7 +17,9 @@ using namespace std::chrono_literals;
 
 volatile std::sig_atomic_t stop_requested = 0;
 
-void HandleSignal(int) { stop_requested = 1; }
+void HandleSignal(int) {
+  stop_requested = 1;
+}
 
 }  // namespace
 
@@ -49,8 +51,7 @@ int main(int argc, char** argv) {
 
   const auto position = observer.layout().Observation("base_position");
   const auto quaternion = observer.layout().Observation("imu_quat");
-  if (!position || !quaternion || position->count != 3 ||
-      quaternion->count != 4) {
+  if (!position || !quaternion || position->count != 3 || quaternion->count != 4) {
     std::cerr << "truth observation layout is invalid\n";
     return 1;
   }
@@ -62,46 +63,37 @@ int main(int argc, char** argv) {
     return 1;
   }
   output.imbue(std::locale::classic());
-  output << std::setprecision(17)
-         << "timestamp,x,y,z,qx,qy,qz,qw\n";
+  output << std::setprecision(17) << "timestamp,x,y,z,qx,qy,qz,qw\n";
 
   std::uint64_t samples = 0;
   while (stop_requested == 0) {
     mujoco_sim::adapter_sdk::ObservationLease frame;
     const auto result = observer.WaitForObservation(500ms, &frame, &error);
-    if (result ==
-        mujoco_sim::adapter_sdk::ObservationWaitResult::kTimeout) {
+    if (result == mujoco_sim::adapter_sdk::ObservationWaitResult::kTimeout) {
       continue;
     }
-    if (result ==
-        mujoco_sim::adapter_sdk::ObservationWaitResult::kStopped) {
+    if (result == mujoco_sim::adapter_sdk::ObservationWaitResult::kStopped) {
       break;
     }
-    if (result !=
-        mujoco_sim::adapter_sdk::ObservationWaitResult::kReceived) {
+    if (result != mujoco_sim::adapter_sdk::ObservationWaitResult::kReceived) {
       std::cerr << "truth observer stopped with error: " << error << '\n';
       return 1;
     }
     const auto values = frame.observations();
-    output << frame.simulation_time_s() << ','
-           << values[position->offset] << ',' << values[position->offset + 1]
-           << ',' << values[position->offset + 2] << ','
-           << values[quaternion->offset + 1] << ','
-           << values[quaternion->offset + 2] << ','
-           << values[quaternion->offset + 3] << ','
-           << values[quaternion->offset] << '\n';
+    output << frame.simulation_time_s() << ',' << values[position->offset] << ','
+           << values[position->offset + 1] << ',' << values[position->offset + 2] << ','
+           << values[quaternion->offset + 1] << ',' << values[quaternion->offset + 2] << ','
+           << values[quaternion->offset + 3] << ',' << values[quaternion->offset] << '\n';
     ++samples;
   }
   std::string unregister_error;
   if (!observer.Unregister(&unregister_error)) {
-    std::cerr << "truth observer unregister failed: " << unregister_error
-              << '\n';
+    std::cerr << "truth observer unregister failed: " << unregister_error << '\n';
     return 1;
   }
   output.close();
   if (!output || samples < 20) {
-    std::cerr << "truth recorder produced too few samples: " << samples
-              << '\n';
+    std::cerr << "truth recorder produced too few samples: " << samples << '\n';
     return 1;
   }
   std::cout << "truth recorder summary samples=" << samples << '\n';

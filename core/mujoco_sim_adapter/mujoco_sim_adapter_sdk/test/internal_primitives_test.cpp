@@ -69,8 +69,9 @@ TEST(BlockingMailboxTest, DropsOldestAtCapacity) {
   std::unique_lock lock(mutex);
   int output = 0;
   std::string error;
-  EXPECT_EQ(mailbox.Wait(lock, condition, 0ms, [] { return false; },
-                         [] { return std::string{}; }, &output, &error),
+  EXPECT_EQ(mailbox.Wait(
+                lock, condition, 0ms, [] { return false; }, [] { return std::string{}; }, &output,
+                &error),
             MailboxWaitResult::kReceived);
   EXPECT_EQ(output, 2);
 }
@@ -83,9 +84,9 @@ TEST(BlockingMailboxTest, TerminalErrorPrecedesStopAndQueuedData) {
   std::unique_lock lock(mutex);
   int output = 0;
   std::string error;
-  EXPECT_EQ(mailbox.Wait(lock, condition, 0ms, [] { return true; },
-                         [] { return std::string{"terminal"}; }, &output,
-                         &error),
+  EXPECT_EQ(mailbox.Wait(
+                lock, condition, 0ms, [] { return true; }, [] { return std::string{"terminal"}; },
+                &output, &error),
             MailboxWaitResult::kError);
   EXPECT_EQ(error, "terminal");
   EXPECT_EQ(output, 0);
@@ -131,9 +132,8 @@ TEST(CallbackGateTest, WaitsForCallbackOnAnotherThread) {
   leased.get_future().wait();
   TestCallbackGate::Disable(state);
 
-  auto waiter = std::async(std::launch::async, [state] {
-    TestCallbackGate::WaitForOtherCallbacks(state);
-  });
+  auto waiter =
+      std::async(std::launch::async, [state] { TestCallbackGate::WaitForOtherCallbacks(state); });
   EXPECT_EQ(waiter.wait_for(20ms), std::future_status::timeout);
   release.set_value();
   EXPECT_EQ(waiter.wait_for(1s), std::future_status::ready);

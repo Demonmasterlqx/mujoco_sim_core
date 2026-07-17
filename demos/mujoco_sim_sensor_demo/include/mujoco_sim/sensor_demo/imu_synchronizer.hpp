@@ -23,8 +23,7 @@ class ImuSynchronizer {
   // Samples must be strictly time ordered. Invalid input leaves the buffer
   // unchanged.
   bool Add(TimedOrientation sample, std::string* error_message);
-  std::optional<TimedOrientation> FindNearest(double simulation_time,
-                                               double maximum_age_s) const;
+  std::optional<TimedOrientation> FindNearest(double simulation_time, double maximum_age_s) const;
 
   std::size_t size() const noexcept;
   void Clear() noexcept;

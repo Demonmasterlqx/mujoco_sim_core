@@ -33,7 +33,6 @@ TEST(InputScriptTest, SortsIntervalsAndReturnsIdleInGaps) {
 
 TEST(InputScriptTest, RejectsEmptyAndOverlappingIntervals) {
   EXPECT_THROW((demo::InputScript({{4, 4, {}}})), std::invalid_argument);
-  EXPECT_THROW((demo::InputScript({{4, 8, {}}, {7, 9, {}}})),
-               std::invalid_argument);
+  EXPECT_THROW((demo::InputScript({{4, 8, {}}, {7, 9, {}}})), std::invalid_argument);
   EXPECT_NO_THROW((demo::InputScript({{4, 8, {}}, {8, 9, {}}})));
 }

@@ -26,7 +26,6 @@ server_args=(
   --config "${server_config}"
   --server-name "${instance_name}"
   --max-ticks 0
-  --tick-timeout-ms 5000
 )
 if [[ "${mode}" == "headless" ]]; then
   env -u DISPLAY -u WAYLAND_DISPLAY "${server_bin}" \
@@ -73,7 +72,7 @@ if [[ "${server_status}" -ne 143 ]]; then
   exit 1
 fi
 
-for event in server_starting model_loaded server_started \
+for event in server_starting server_started \
              adapter_registered adapter_activated \
              adapter_unregistered; do
   if ! grep -Fq "event=${event}" "${server_log}"; then
@@ -82,12 +81,12 @@ for event in server_starting model_loaded server_started \
     exit 1
   fi
 done
-if grep -Eq "event=(tick_published|commit_accepted)" "${server_log}"; then
-  echo "info server logging contains per-Tick or per-Commit traffic" >&2
+if grep -Eq "event=(state_published|command_accepted)" "${server_log}"; then
+  echo "info server logging contains per-State or per-Command traffic" >&2
   exit 1
 fi
-if grep -Fq "event=commit_duplicate" "${server_log}"; then
-  echo "normal idempotent Commit replay leaked into info logs" >&2
+if grep -Fq "event=command_duplicate" "${server_log}"; then
+  echo "normal duplicate Command rejection leaked into info logs" >&2
   exit 1
 fi
 

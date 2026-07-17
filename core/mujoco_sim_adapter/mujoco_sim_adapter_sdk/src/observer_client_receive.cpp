@@ -22,8 +22,7 @@ bool ObserverClient::Impl::StartObservationReception(std::string* error) {
     const auto state = callback_state_;
     const auto weak_self = weak_from_this();
     observation_subscriber_ = std::make_unique<eCAL::CSubscriber>(
-        mujoco_sim::protocol::ObservationTopicName(options_.server_name,
-                                                   options_.observer_id));
+        mujoco_sim::protocol::ObservationTopicName(options_.server_name, options_.observer_id));
     observation_subscriber_->SetReceiveCallback(
         [state, weak_self](const auto&, const auto&, const auto& data) {
           const auto self = weak_self.lock();
@@ -33,8 +32,7 @@ bool ObserverClient::Impl::StartObservationReception(std::string* error) {
             internal::InvokeCallbackBoundary(
                 [&] { self->HandleObservationBytes(data.buffer, data.buffer_size); },
                 [&](const char* message) {
-                  self->SetTerminalError(
-                      std::string("observation callback failed: ") + message);
+                  self->SetTerminalError(std::string("observation callback failed: ") + message);
                 });
           }
         });
@@ -49,8 +47,7 @@ bool ObserverClient::Impl::StartObservationReception(std::string* error) {
             internal::InvokeCallbackBoundary(
                 [&] { self->HandleStatusBytes(data.buffer, data.buffer_size); },
                 [&](const char* message) {
-                  self->SetTerminalError(
-                      std::string("status callback failed: ") + message);
+                  self->SetTerminalError(std::string("status callback failed: ") + message);
                 });
           }
         });
@@ -61,23 +58,22 @@ bool ObserverClient::Impl::StartObservationReception(std::string* error) {
   return true;
 }
 
-void ObserverClient::Impl::HandleObservationBytes(const void* data,
-                                                   std::size_t size) {
+void ObserverClient::Impl::HandleObservationBytes(const void* data, std::size_t size) {
   if (data == nullptr || size == 0) return;
   mujoco_sim::protocol::ParsedDataFrame parsed;
   mujoco_sim::protocol::DataFrameError parse_error;
   const std::string_view bytes(static_cast<const char*>(data), size);
   if (!mujoco_sim::protocol::ParseDataFrame(bytes, &parsed, &parse_error) ||
       parsed.header.kind != mujoco_sim::protocol::DataFrameKind::kObservation ||
-      parsed.header.sequence == 0) return;
+      parsed.header.sequence == 0)
+    return;
   internal::SessionIdentity session;
   {
     std::lock_guard lock(mutex_);
     if (!session_.has_session()) return;
     session = session_.identity();
   }
-  if (parsed.header.session_id != session.session_id ||
-      parsed.header.epoch != session.epoch ||
+  if (parsed.header.session_id != session.session_id || parsed.header.epoch != session.epoch ||
       parsed.header.layout != layout_fingerprint_ ||
       parsed.scalar_count != registration_.layout.observation_scalar_count()) {
     return;
@@ -85,17 +81,15 @@ void ObserverClient::Impl::HandleObservationBytes(const void* data,
   auto frame = std::make_shared<ObservationLease::Data>();
   frame->header = parsed.header;
   frame->scalars.resize(parsed.scalar_count);
-  if (!mujoco_sim::protocol::DecodeDataFrameScalars(
-          parsed, frame->scalars, &parse_error)) return;
+  if (!mujoco_sim::protocol::DecodeDataFrameScalars(parsed, frame->scalars, &parse_error)) return;
   HandleObservation(std::move(frame));
 }
 
-void ObserverClient::Impl::HandleObservation(
-    std::shared_ptr<const ObservationLease::Data> frame) {
+void ObserverClient::Impl::HandleObservation(std::shared_ptr<const ObservationLease::Data> frame) {
   {
     std::lock_guard lock(mutex_);
-    if (!session_.accepting_data() || stop_requested_ ||
-        frame->header.sequence <= last_sequence_) return;
+    if (!session_.accepting_data() || stop_requested_ || frame->header.sequence <= last_sequence_)
+      return;
     if (last_sequence_ > 0 && frame->header.sequence > last_sequence_ + 1)
       dropped_frames_ += frame->header.sequence - last_sequence_ - 1;
     last_sequence_ = frame->header.sequence;
@@ -105,11 +99,11 @@ void ObserverClient::Impl::HandleObservation(
   condition_.notify_all();
 }
 
-void ObserverClient::Impl::HandleStatusBytes(const void* data,
-                                              std::size_t size) {
+void ObserverClient::Impl::HandleStatusBytes(const void* data, std::size_t size) {
   if (data == nullptr || size == 0 ||
-      size > static_cast<std::size_t>(std::numeric_limits<int>::max())) return;
-  mujoco_sim::v3::ServerStatus status;
+      size > static_cast<std::size_t>(std::numeric_limits<int>::max()))
+    return;
+  mujoco_sim::v4::ServerStatus status;
   if (!status.ParseFromArray(data, static_cast<int>(size))) return;
   internal::SessionIdentity identity;
   {
@@ -117,12 +111,13 @@ void ObserverClient::Impl::HandleStatusBytes(const void* data,
     if (!session_.has_session()) return;
     identity = session_.identity();
   }
-  auto decision = internal::EvaluateAdapterStatus(
-      status, options_.server_name, identity.epoch, options_.observer_id,
-      identity.session_id, mujoco_sim::v3::OBSERVER, true);
+  auto decision = internal::EvaluateAdapterStatus(status, options_.server_name, identity.epoch,
+                                                  options_.observer_id, identity.session_id,
+                                                  mujoco_sim::v4::OBSERVER, true);
   if (decision.message == "server replaced adapter session")
     decision.message = "server replaced observer session";
-  if (decision.action == internal::StatusAction::kStopped) TransitionToStopped();
+  if (decision.action == internal::StatusAction::kStopped)
+    TransitionToStopped();
   else if (decision.action == internal::StatusAction::kError)
     SetTerminalError(decision.message);
 }
@@ -132,7 +127,8 @@ void ObserverClient::Impl::SetTerminalError(const std::string& error) {
     std::lock_guard lock(mutex_);
     session_.Fail();
     if (terminal_error_.empty()) terminal_error_ = error;
-    if (lifecycle_warning_.empty()) lifecycle_warning_ = error;
+    if (lifecycle_warning_.empty())
+      lifecycle_warning_ = error;
     else if (lifecycle_warning_.find(error) == std::string::npos)
       lifecycle_warning_ += "; " + error;
   }
@@ -174,9 +170,8 @@ void ObserverClient::Impl::HeartbeatLoop() {
   const auto period = std::chrono::milliseconds(options_.heartbeat_period_ms);
   std::unique_lock lock(mutex_);
   while (!stop_requested_) {
-    heartbeat_condition_.wait_for(lock, period, [this] {
-      return stop_requested_.load() || !session_.has_session();
-    });
+    heartbeat_condition_.wait_for(
+        lock, period, [this] { return stop_requested_.load() || !session_.has_session(); });
     if (stop_requested_) break;
     if (!session_.active()) continue;
     const auto heartbeat = BuildHeartbeat();
@@ -186,8 +181,8 @@ void ObserverClient::Impl::HeartbeatLoop() {
   }
 }
 
-mujoco_sim::v3::SessionHeartbeat ObserverClient::Impl::BuildHeartbeat() const {
-  mujoco_sim::v3::SessionHeartbeat heartbeat;
+mujoco_sim::v4::SessionHeartbeat ObserverClient::Impl::BuildHeartbeat() const {
+  mujoco_sim::v4::SessionHeartbeat heartbeat;
   heartbeat.set_session_id(session_.identity().session_id);
   heartbeat.set_epoch(session_.identity().epoch);
   heartbeat.set_last_seen(last_sequence_);

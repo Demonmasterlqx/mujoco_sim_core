@@ -27,9 +27,9 @@ is not held while joining threads, waiting for Sensor capture, publishing eCAL
 messages, or invoking Core.
 
 Published and queued values own their data. Parsed protobuf events own their
-messages, completed-step effects own Observer frames, Sensor jobs own snapshots,
-and Tick publication uses `shared_ptr<const IssuedTick>`. Tick invalidation
-marks an issued identity non-current without destroying an in-flight handle.
+messages, completed-step results own immutable State and Observer frames, and
+Sensor jobs own snapshots. Each Controller Inbox slot owns only its latest
+decoded Command.
 
 Blocking Sensor fences intentionally pause the sole Core writer after a step.
 This means registry RPCs queued during the fence wait until it completes; they

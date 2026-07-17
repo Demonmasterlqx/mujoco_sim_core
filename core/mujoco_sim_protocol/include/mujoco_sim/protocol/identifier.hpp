@@ -11,7 +11,6 @@ enum class IdentifierKind {
   kStream,
 };
 
-bool ValidateIdentifier(std::string_view value, IdentifierKind kind,
-                        std::string* error_message);
+bool ValidateIdentifier(std::string_view value, IdentifierKind kind, std::string* error_message);
 
 }  // namespace mujoco_sim::protocol

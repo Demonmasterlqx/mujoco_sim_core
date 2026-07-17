@@ -22,9 +22,12 @@ std::vector<ResourceSpec> ObservationSpecs(const InterfaceConfig& config) {
       {config.imu.angular_velocity, 3},
   };
   specs.reserve(kObservationResourceCount);
-  for (const auto& motor : config.motors) specs.push_back({motor.position_state, 1});
-  for (const auto& motor : config.motors) specs.push_back({motor.velocity_state, 1});
-  for (const auto& motor : config.motors) specs.push_back({motor.effort_state, 1});
+  for (const auto& motor : config.motors)
+    specs.push_back({motor.position_state, 1});
+  for (const auto& motor : config.motors)
+    specs.push_back({motor.velocity_state, 1});
+  for (const auto& motor : config.motors)
+    specs.push_back({motor.effort_state, 1});
   return specs;
 }
 
@@ -52,31 +55,25 @@ void ValidateInterfaceConfig(const InterfaceConfig& config) {
 }
 
 const mujoco_sim::adapter_sdk::ResourceInfo& FindResource(
-    const std::vector<mujoco_sim::adapter_sdk::ResourceInfo>& resources,
-    std::string_view name) {
+    const std::vector<mujoco_sim::adapter_sdk::ResourceInfo>& resources, std::string_view name) {
   const auto found = std::find_if(resources.begin(), resources.end(),
-                                  [name](const auto& resource) {
-                                    return resource.name == name;
-                                  });
+                                  [name](const auto& resource) { return resource.name == name; });
   if (found == resources.end()) {
     throw InterfaceError("missing registered resource: " + std::string(name));
   }
   return *found;
 }
 
-float FiniteFloat(double value, std::string_view resource,
-                  std::size_t component) {
+float FiniteFloat(double value, std::string_view resource, std::size_t component) {
   if (!std::isfinite(value) ||
       std::fabs(value) > static_cast<double>(std::numeric_limits<float>::max())) {
-    throw InterfaceError("invalid observation value in " +
-                         std::string(resource) + "[" +
+    throw InterfaceError("invalid observation value in " + std::string(resource) + "[" +
                          std::to_string(component) + "]");
   }
   return static_cast<float>(value);
 }
 
-double Scalar(std::span<const double> values,
-              mujoco_sim::adapter_sdk::ScalarSpan span,
+double Scalar(std::span<const double> values, mujoco_sim::adapter_sdk::ScalarSpan span,
               std::string_view resource) {
   if (span.count != 1 || span.offset >= values.size()) {
     throw InterfaceError("invalid scalar span for " + std::string(resource));
@@ -93,7 +90,8 @@ std::vector<std::string> WbrObservationNames() {
 std::vector<std::string> WbrObservationNames(const InterfaceConfig& config) {
   ValidateInterfaceConfig(config);
   std::vector<std::string> names;
-  for (const auto& spec : ObservationSpecs(config)) names.push_back(spec.name);
+  for (const auto& spec : ObservationSpecs(config))
+    names.push_back(spec.name);
   return names;
 }
 
@@ -107,14 +105,12 @@ std::vector<std::string> WbrCommandNames(const InterfaceConfig& config) {
   return {names.begin(), names.end()};
 }
 
-void ValidateWbrLayout(
-    const mujoco_sim::adapter_sdk::ControllerLayout& layout) {
+void ValidateWbrLayout(const mujoco_sim::adapter_sdk::ControllerLayout& layout) {
   ValidateWbrLayout(MakeUpstreamWbrInterfaceConfig(), layout);
 }
 
-void ValidateWbrLayout(
-    const InterfaceConfig& config,
-    const mujoco_sim::adapter_sdk::ControllerLayout& layout) {
+void ValidateWbrLayout(const InterfaceConfig& config,
+                       const mujoco_sim::adapter_sdk::ControllerLayout& layout) {
   ValidateInterfaceConfig(config);
   const auto specs = ObservationSpecs(config);
   if (layout.observations().size() != specs.size()) {
@@ -133,21 +129,18 @@ void ValidateWbrLayout(
   for (const auto& name : commands) {
     const auto& resource = FindResource(layout.commands(), name);
     if (resource.scalars.count != 1 || !resource.has_command_range ||
-        !std::isfinite(resource.command_min) ||
-        !std::isfinite(resource.command_max) ||
+        !std::isfinite(resource.command_min) || !std::isfinite(resource.command_max) ||
         resource.command_min > resource.command_max) {
       throw InterfaceError("invalid command layout for " + name);
     }
   }
 }
 
-TickDecoder::TickDecoder(
-    const mujoco_sim::adapter_sdk::ControllerLayout& layout)
-    : TickDecoder(MakeUpstreamWbrInterfaceConfig(), layout) {}
+StateDecoder::StateDecoder(const mujoco_sim::adapter_sdk::ControllerLayout& layout)
+    : StateDecoder(MakeUpstreamWbrInterfaceConfig(), layout) {}
 
-TickDecoder::TickDecoder(
-    InterfaceConfig config,
-    const mujoco_sim::adapter_sdk::ControllerLayout& layout)
+StateDecoder::StateDecoder(InterfaceConfig config,
+                           const mujoco_sim::adapter_sdk::ControllerLayout& layout)
     : config_(std::move(config)) {
   ValidateWbrLayout(config_, layout);
   quaternion_ = *layout.Observation(config_.imu.quaternion);
@@ -160,46 +153,40 @@ TickDecoder::TickDecoder(
   }
 }
 
-control::msg_raw_state_t TickDecoder::Decode(
-    const mujoco_sim::adapter_sdk::TickLease& tick) const {
-  return Decode(tick.observations(), tick.simulation_time_s());
+control::msg_raw_state_t StateDecoder::Decode(
+    const mujoco_sim::adapter_sdk::StateLease& state) const {
+  return Decode(state.observations(), state.simulation_time_s());
 }
 
-control::msg_raw_state_t TickDecoder::Decode(
-    std::span<const double> values, double simulation_time_s) const {
+control::msg_raw_state_t StateDecoder::Decode(std::span<const double> values,
+                                              double simulation_time_s) const {
   control::msg_raw_state_t raw{};
   raw.time = simulation_time_s;
   for (std::size_t i = 0; i < quaternion_.count; ++i) {
-    raw.quat_gt[i] = FiniteFloat(values[quaternion_.offset + i],
-                                 config_.imu.quaternion, i);
+    raw.quat_gt[i] = FiniteFloat(values[quaternion_.offset + i], config_.imu.quaternion, i);
   }
   for (std::size_t i = 0; i < acceleration_.count; ++i) {
-    raw.accel[i] = FiniteFloat(values[acceleration_.offset + i],
-                               config_.imu.linear_acceleration, i);
-    raw.gyro[i] = FiniteFloat(values[angular_velocity_.offset + i],
-                              config_.imu.angular_velocity, i);
+    raw.accel[i] =
+        FiniteFloat(values[acceleration_.offset + i], config_.imu.linear_acceleration, i);
+    raw.gyro[i] =
+        FiniteFloat(values[angular_velocity_.offset + i], config_.imu.angular_velocity, i);
   }
   for (std::size_t i = 0; i < config_.motors.size(); ++i) {
-    raw.motors[i].q = FiniteFloat(Scalar(values, positions_[i],
-                                         config_.motors[i].position_state),
+    raw.motors[i].q = FiniteFloat(Scalar(values, positions_[i], config_.motors[i].position_state),
                                   config_.motors[i].position_state, 0);
-    raw.motors[i].dq = FiniteFloat(Scalar(values, velocities_[i],
-                                          config_.motors[i].velocity_state),
+    raw.motors[i].dq = FiniteFloat(Scalar(values, velocities_[i], config_.motors[i].velocity_state),
                                    config_.motors[i].velocity_state, 0);
-    raw.motors[i].tau = FiniteFloat(Scalar(values, efforts_[i],
-                                           config_.motors[i].effort_state),
+    raw.motors[i].tau = FiniteFloat(Scalar(values, efforts_[i], config_.motors[i].effort_state),
                                     config_.motors[i].effort_state, 0);
   }
   return raw;
 }
 
-TorqueCommandMapper::TorqueCommandMapper(
-    const mujoco_sim::adapter_sdk::ControllerLayout& layout)
+TorqueCommandMapper::TorqueCommandMapper(const mujoco_sim::adapter_sdk::ControllerLayout& layout)
     : TorqueCommandMapper(MakeUpstreamWbrInterfaceConfig(), layout) {}
 
-TorqueCommandMapper::TorqueCommandMapper(
-    InterfaceConfig config,
-    const mujoco_sim::adapter_sdk::ControllerLayout& layout) {
+TorqueCommandMapper::TorqueCommandMapper(InterfaceConfig config,
+                                         const mujoco_sim::adapter_sdk::ControllerLayout& layout) {
   ValidateWbrLayout(config, layout);
   const auto names = CommandNames(config);
   for (std::size_t i = 0; i < names.size(); ++i) {
@@ -209,18 +196,15 @@ TorqueCommandMapper::TorqueCommandMapper(
   }
 }
 
-std::vector<double> TorqueCommandMapper::Map(
-    const std::array<float, 6>& raw_torque) const {
+std::vector<double> TorqueCommandMapper::Map(const std::array<float, 6>& raw_torque) const {
   std::vector<double> commands(kCommandResourceCount);
   last_clamp_count_ = 0;
   for (std::size_t i = 0; i < raw_torque.size(); ++i) {
     if (!std::isfinite(raw_torque[i])) {
-      throw InterfaceError("non-finite raw torque at motor index " +
-                           std::to_string(i));
+      throw InterfaceError("non-finite raw torque at motor index " + std::to_string(i));
     }
     const double raw = raw_torque[i];
-    const double clamped = std::clamp(raw, ranges_[i].minimum,
-                                      ranges_[i].maximum);
+    const double clamped = std::clamp(raw, ranges_[i].minimum, ranges_[i].maximum);
     if (clamped != raw) ++last_clamp_count_;
     commands[scalar_offsets_[i]] = clamped;
   }

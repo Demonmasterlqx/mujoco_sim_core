@@ -35,19 +35,15 @@ void ValidateRawObservation(const control::msg_raw_state_t& raw) {
     RequireFinite(raw.quat_gt[i], "quat_gt[" + std::to_string(i) + "]");
   }
   for (int i = 0; i < 6; ++i) {
-    RequireFinite(raw.motors[i].q,
-                  "motors[" + std::to_string(i) + "].q");
-    RequireFinite(raw.motors[i].dq,
-                  "motors[" + std::to_string(i) + "].dq");
-    RequireFinite(raw.motors[i].tau,
-                  "motors[" + std::to_string(i) + "].tau");
+    RequireFinite(raw.motors[i].q, "motors[" + std::to_string(i) + "].q");
+    RequireFinite(raw.motors[i].dq, "motors[" + std::to_string(i) + "].dq");
+    RequireFinite(raw.motors[i].tau, "motors[" + std::to_string(i) + "].tau");
   }
 }
 
 void ValidateImu(const control::msg_ins_t& imu) {
   for (int i = 0; i < 4; ++i) {
-    RequireFinite(imu.quaternion[i],
-                  "imu.quaternion[" + std::to_string(i) + "]");
+    RequireFinite(imu.quaternion[i], "imu.quaternion[" + std::to_string(i) + "]");
   }
   RequireFinite(imu.roll, "imu.roll");
   RequireFinite(imu.pitch, "imu.pitch");
@@ -61,19 +57,22 @@ void ValidateImu(const control::msg_ins_t& imu) {
   }
 }
 
-LinkState SnapshotLink(const control::link_solver& link,
-                       const std::string& side) {
+LinkState SnapshotLink(const control::link_solver& link, const std::string& side) {
   LinkState state{
-      link.len_,       link.dlen_,     link.phi_,       link.dphi_,
-      link.alpha_,     link.dalpha_,   link.alpha_eq_,  link.n_,
-      link.fs_,        link.freal_,    link.treal_hip_,
+      link.len_,      link.dlen_, link.phi_, link.dphi_,  link.alpha_,     link.dalpha_,
+      link.alpha_eq_, link.n_,    link.fs_,  link.freal_, link.treal_hip_,
   };
   const float values[] = {
-      state.length,              state.length_rate,
-      state.phi,                 state.phi_rate,
-      state.alpha,               state.alpha_rate,
-      state.alpha_equilibrium,   state.normal_force,
-      state.spring_force,        state.estimated_leg_force,
+      state.length,
+      state.length_rate,
+      state.phi,
+      state.phi_rate,
+      state.alpha,
+      state.alpha_rate,
+      state.alpha_equilibrium,
+      state.normal_force,
+      state.spring_force,
+      state.estimated_leg_force,
       state.estimated_hip_torque,
   };
   for (std::size_t i = 0; i < std::size(values); ++i) {
@@ -83,21 +82,19 @@ LinkState SnapshotLink(const control::link_solver& link,
 }
 
 void ValidateCommand(const control::msg_cmd_t& command) {
-  const float values[] = {command.x,     command.v,    command.len,
-                          command.dlen,  command.yaw,  command.dyaw,
-                          command.roll,  command.tri_spd};
+  const float values[] = {command.x,   command.v,    command.len,  command.dlen,
+                          command.yaw, command.dyaw, command.roll, command.tri_spd};
   for (std::size_t i = 0; i < std::size(values); ++i) {
     RequireFinite(values[i], "command field " + std::to_string(i));
   }
 }
 
-control::msg_ins_t BuildImu(control::mahony_filter& mahony,
-                            control::imu_mode mode,
+control::msg_ins_t BuildImu(control::mahony_filter& mahony, control::imu_mode mode,
                             const control::msg_raw_state_t& raw) {
   control::msg_ins_t imu{};
   if (mode == control::imu_mode::mahony) {
-    mahony.update(raw.gyro[0], raw.gyro[1], raw.gyro[2], raw.accel[0],
-                  raw.accel[1], raw.accel[2], kControlDtSeconds);
+    mahony.update(raw.gyro[0], raw.gyro[1], raw.gyro[2], raw.accel[0], raw.accel[1], raw.accel[2],
+                  kControlDtSeconds);
     for (int i = 0; i < 4; ++i) {
       imu.quaternion[i] = mahony.attitude.q[i];
     }
@@ -159,12 +156,10 @@ ControllerPipeline::ControllerPipeline(PipelineConfig config)
 
 ControllerPipeline::~ControllerPipeline() = default;
 ControllerPipeline::ControllerPipeline(ControllerPipeline&&) noexcept = default;
-ControllerPipeline& ControllerPipeline::operator=(ControllerPipeline&&) noexcept =
-    default;
+ControllerPipeline& ControllerPipeline::operator=(ControllerPipeline&&) noexcept = default;
 
-PipelineOutput ControllerPipeline::Step(
-    const control::msg_raw_state_t& observation,
-    const control::input_snapshot_t& input) {
+PipelineOutput ControllerPipeline::Step(const control::msg_raw_state_t& observation,
+                                        const control::input_snapshot_t& input) {
   ValidateRawObservation(observation);
 
   PipelineOutput output{};
@@ -172,8 +167,8 @@ PipelineOutput ControllerPipeline::Step(
   output.fusion_pendulum = impl_->previous_pendulum;
   output.imu = BuildImu(impl_->mahony, impl_->config.imu_mode, observation);
 
-  impl_->fusion.update(input, impl_->previous_pendulum, output.imu,
-                       impl_->config.chassis, kControlDtSeconds);
+  impl_->fusion.update(input, impl_->previous_pendulum, output.imu, impl_->config.chassis,
+                       kControlDtSeconds);
   output.command = impl_->fusion.msg();
   ValidateCommand(output.command);
 
@@ -181,46 +176,40 @@ PipelineOutput ControllerPipeline::Step(
   const float pitch_rate = output.imu.gyro_p;
   const float yaw = output.imu.total_yaw;
   const float yaw_rate = output.imu.gyro_y;
-  const float left_velocity = observation.motors[2].dq *
-                              impl_->config.chassis.rwheel *
-                              impl_->left.wheel_sign();
-  const float right_velocity = observation.motors[5].dq *
-                               impl_->config.chassis.rwheel *
-                               impl_->right.wheel_sign();
+  const float left_velocity =
+      observation.motors[2].dq * impl_->config.chassis.rwheel * impl_->left.wheel_sign();
+  const float right_velocity =
+      observation.motors[5].dq * impl_->config.chassis.rwheel * impl_->right.wheel_sign();
 
-  impl_->left.link().solve(pitch, pitch_rate, 0.0F,
-                           observation.motors[0], observation.motors[1]);
-  impl_->right.link().solve(pitch, pitch_rate, 0.0F,
-                            observation.motors[3], observation.motors[4]);
+  impl_->left.link().solve(pitch, pitch_rate, 0.0F, observation.motors[0], observation.motors[1]);
+  impl_->right.link().solve(pitch, pitch_rate, 0.0F, observation.motors[3], observation.motors[4]);
   SnapshotLink(impl_->left.link(), "left first solve");
   SnapshotLink(impl_->right.link(), "right first solve");
 
   impl_->odometry.update(output.imu.quaternion, output.imu.accel,
-                         (left_velocity + right_velocity) * 0.5F, yaw,
-                         kControlDtSeconds);
-  output.odometry = {impl_->odometry.x, impl_->odometry.v,
-                     impl_->odometry.az};
+                         (left_velocity + right_velocity) * 0.5F, yaw, kControlDtSeconds);
+  output.odometry = {impl_->odometry.x, impl_->odometry.v, impl_->odometry.az};
   RequireFinite(output.odometry.x, "odometry.x");
   RequireFinite(output.odometry.v, "odometry.v");
   RequireFinite(output.odometry.a_z, "odometry.a_z");
 
-  impl_->left.link().solve(pitch, pitch_rate, impl_->odometry.az,
-                           observation.motors[0], observation.motors[1]);
-  impl_->right.link().solve(pitch, pitch_rate, impl_->odometry.az,
-                            observation.motors[3], observation.motors[4]);
+  impl_->left.link().solve(pitch, pitch_rate, impl_->odometry.az, observation.motors[0],
+                           observation.motors[1]);
+  impl_->right.link().solve(pitch, pitch_rate, impl_->odometry.az, observation.motors[3],
+                            observation.motors[4]);
   output.left = SnapshotLink(impl_->left.link(), "left second solve");
   output.right = SnapshotLink(impl_->right.link(), "right second solve");
 
   output.observed_state = {
-      impl_->odometry.x, impl_->odometry.v, yaw, yaw_rate,
-      output.left.alpha, output.left.alpha_rate,
-      output.right.alpha, output.right.alpha_rate, pitch, pitch_rate,
+      impl_->odometry.x,  impl_->odometry.v,       yaw,
+      yaw_rate,           output.left.alpha,       output.left.alpha_rate,
+      output.right.alpha, output.right.alpha_rate, pitch,
+      pitch_rate,
   };
 
-  control::fsm_inputs fsm_input{output.imu, output.command, output.odometry,
-                                impl_->left, impl_->right};
-  std::memcpy(fsm_input.observed_x, output.observed_state.data(),
-              sizeof(fsm_input.observed_x));
+  control::fsm_inputs fsm_input{output.imu, output.command, output.odometry, impl_->left,
+                                impl_->right};
+  std::memcpy(fsm_input.observed_x, output.observed_state.data(), sizeof(fsm_input.observed_x));
   fsm_input.n_total = output.left.normal_force + output.right.normal_force;
   fsm_input.chassis_dead = false;
 
@@ -231,8 +220,7 @@ PipelineOutput ControllerPipeline::Step(
   }
 
   for (std::size_t i = 0; i < output.raw_torque.size(); ++i) {
-    RequireFinite(fsm_output.motor.tau[i],
-                  "raw_torque[" + std::to_string(i) + "]");
+    RequireFinite(fsm_output.motor.tau[i], "raw_torque[" + std::to_string(i) + "]");
     output.raw_torque[i] = fsm_output.motor.tau[i];
   }
   output.pendulum = fsm_output.pendulum;

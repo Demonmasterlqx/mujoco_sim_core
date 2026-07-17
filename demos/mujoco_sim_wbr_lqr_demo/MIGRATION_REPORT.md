@@ -10,9 +10,9 @@
 - Made the model timestep explicit at `0.001` seconds.
 - Added Core named-keyframe loading and start the WBR model from `home`.
 - Replaced the upstream four-thread/shared-memory topology with one
-  deterministic `ControllerPipeline::Step` per SDK-delivered Tick. Normal
-  `ACTIVE` lockstep delivers every protocol Tick; timeout recovery may coalesce
-  intermediate Tick values in the SDK mailbox.
+  deterministic `ControllerPipeline::Step` per SDK-delivered State. The SDK
+  exposes the latest completed-step State through a depth-1 mailbox, so a slow
+  Controller may coalesce intermediate States without blocking the Server.
 - Preserved upstream IMU, command fusion, dual leg solve, odometry, FSM,
   VMC/LQR, motor ordering, signs, gains, and coefficient tables.
 - Added a generated YAML/CLI configuration and the executable
@@ -21,7 +21,9 @@
   configurable. Six semantic motor names preserve control-slot meaning even
   when YAML items and protocol layouts are reordered.
 - Added strict layout/value validation, finite float conversion, registered
-  actuator range clamping, and clamp statistics.
+  actuator range clamping, and clamp statistics. The public integration surface
+  uses `StateDecoder` and `WbrController::ComputeCommand()` to match the
+  asynchronous State/Command protocol terminology.
 - Added deterministic half-open input scripts and translated the upstream
   Space/E/Q sequence.
 - Added source-tree and installed-layout server configurations. Relative model
@@ -42,17 +44,18 @@
 | Shipped runtime YAML files | 2 |
 | CTest targets in the demo package | 9 |
 
-The automated headless CTest completes the default 6000 real lockstep Ticks,
-and asserts the Space/E/Q command effects at Ticks 1, 2000, and 4000. Separate
-tests run a 200-Tick GUI/Xvfb loop, capture a nonblank WBR render, and execute
+The automated headless CTest completes the default 6000 real simulation Steps,
+and asserts the Space/E/Q command effects at Steps 1, 2000, and 4000. Separate
+tests run a 200-Step GUI/Xvfb loop, capture a nonblank WBR render, and execute
 the staged adapter/config/model from a different working directory.
 
 ## Deliberate Differences
 
 1. Upstream used independent threads and latest-value message reads. The port
-   processes exactly one observation snapshot and produces one command set per
-   SDK-delivered Tick. During normal `ACTIVE` lockstep this is every simulator
-   Tick; during timeout recovery the SDK may coalesce intermediate Tick values.
+   processes one observation snapshot and produces one command set per
+   SDK-delivered State. State delivery follows the granted cadence, and the SDK
+   may coalesce intermediate States when the Controller is slower than the
+   Server.
 2. Upstream optional IMU noise injection lived in shared-memory I/O and was not
    migrated. Mahony and ground-truth quaternion bypass modes remain
    configurable.
@@ -62,23 +65,23 @@ the staged adapter/config/model from a different working directory.
    protocol boundary.
 4. Invalid layouts, values, and controller outputs are explicit process errors
    instead of propagating non-finite data.
-5. Keyboard input is represented by deterministic configured Tick intervals.
+5. Keyboard input is represented by deterministic configured Step intervals.
    The server GUI does not currently forward interactive keys to adapters.
 
 ## Migration Friction And Next-Stage Goals
 
 ### Resolved: Adapter Callback Coupling
 
-The initial port ran decoder/controller code inside the SDK's eCAL Tick
-callback and forced command creation and Commit publication into one return
-path. That made thread ownership, delayed Commit, and controller exceptions
+The initial port ran decoder/controller code inside the SDK's eCAL State
+callback and forced command creation and publication into one return path.
+That made thread ownership, delayed commands, and controller exceptions
 awkward.
 
-The SDK now exposes explicit `Activate()`, `WaitForTick()`, and `Commit()`
-operations. The WBR pipeline runs only on its business thread, and failures
-stop and unregister the local session without publishing an empty error
-Commit. Tick retransmission and latest-value timeout recovery remain SDK
-transport responsibilities.
+The SDK now exposes explicit `Activate()`, `WaitForNewState()`, and
+`SetCommand()` operations. The WBR pipeline runs only on its business thread,
+and failures report a Fault or stop and unregister the local session. A
+publisher thread sends new command generations and keepalives while preserving
+the same sequence and bytes across send retries.
 
 ### P0: Typed Semantic Interface Binding
 
@@ -89,13 +92,13 @@ configuration validates shape, but it cannot express that object-sequence
 
 Target improvement: add reusable typed interface declarations that bind a
 semantic key to state/command resources, generate required-set/uniqueness
-validation, and flatten them into `AdapterOptions` automatically.
+validation, and flatten them into `ControllerOptions` automatically.
 
 ### P1: Cross-Field Configuration Validation
 
 `mujoco_sim_config` handles field-local constraints but application code still
 implements cross-field rules: semantic set equality, non-overlapping input
-intervals, one-Tick Space pulses, and float narrowing.
+intervals, one-Step Space pulses, and float narrowing.
 
 Target improvement: support generated custom validators or declarative
 cross-field constraints while keeping business-specific conversion code
@@ -104,7 +107,7 @@ separate from YAML/CLI parsing.
 ### P1: Shared Launch Configuration
 
 Server and adapter require separate YAML files that duplicate server name,
-Tick limits, timeouts, and startup ordering. End-to-end scripts currently
+Step limits, timeouts, and startup ordering. End-to-end scripts currently
 coordinate two processes manually.
 
 Target improvement: add a launch/composition manifest that resolves installed
@@ -121,14 +124,14 @@ Target improvement: expose timestep and available keyframes in resource/model
 metadata, allow adapters to declare timing requirements, and reject mismatches
 before activation.
 
-### P2: Repeated Layout Transport And Validation
+### P2: Layout Diagnostics
 
-Every Tick carries the full resource layout, and the adapter compares it with
-registration on every callback. This is robust but repetitive for static V1
-sessions.
+Protocol V4 identifies the immutable registered layout in every State by its
+layout ID. The adapter validates that ID before decoding values, but layout
+mismatch diagnostics are still local to the process.
 
-Target improvement: identify immutable layouts by epoch/layout ID, send the full
-layout at registration or on change, and keep Tick payloads focused on values.
+Target improvement: expose layout mismatch counters and the active layout ID in
+status diagnostics without expanding the high-frequency State payload.
 
 ### P2: Interactive Input Channel
 
@@ -137,7 +140,7 @@ is suitable for tests but does not provide operator control through the server
 GUI.
 
 Target improvement: define a separate operator-input topic/API with explicit
-timestamp/Tick semantics, then choose whether live input replaces or composes
+timestamp/Step semantics, then choose whether live input replaces or composes
 with scripted input.
 
 ### P2: Adapter Diagnostics
@@ -146,7 +149,8 @@ Clamp counts and FSM state are only process logs. They are not visible through
 `mujoco-sim-status`.
 
 Target improvement: add optional controller diagnostic fields or a dedicated
-diagnostic topic without placing non-barrier telemetry in Commit.
+diagnostic topic without placing high-frequency telemetry in the State/Command
+data path.
 
 ## Verification
 
@@ -158,7 +162,7 @@ The package tests cover:
 - generated configuration merge/validation and transactional conversion
 - scripted input boundaries and pulse constraints
 - Core model loading from keyframe `home`
-- real eCAL headless and GUI/Xvfb lockstep execution
+- real eCAL headless and GUI/Xvfb asynchronous execution
 
 All imported provenance and byte-identity details are recorded in
 [UPSTREAM.md](UPSTREAM.md).

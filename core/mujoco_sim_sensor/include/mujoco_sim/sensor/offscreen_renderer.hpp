@@ -31,14 +31,11 @@ std::string_view ToString(OffscreenBackend backend) noexcept;
 class OffscreenRenderer {
  public:
   static std::unique_ptr<OffscreenRenderer> Create(
-      const mujoco_sim::core::SimulationSnapshot& snapshot,
-      CameraProfile profile,
-      OffscreenRendererOptions options,
-      std::string* error_message);
+      const mujoco_sim::core::SimulationSnapshot& snapshot, CameraProfile profile,
+      OffscreenRendererOptions options, std::string* error_message);
 
   static std::unique_ptr<OffscreenRenderer> Create(
-      const mujoco_sim::core::SimulationSnapshot& snapshot,
-      CameraProfile profile,
+      const mujoco_sim::core::SimulationSnapshot& snapshot, CameraProfile profile,
       std::string* error_message) {
     return Create(snapshot, std::move(profile), {}, error_message);
   }
@@ -51,13 +48,11 @@ class OffscreenRenderer {
   OffscreenRenderer& operator=(const OffscreenRenderer&) = delete;
 
   const CameraProfile& profile() const noexcept;
-  const std::vector<mujoco_sim::v3::StreamDescriptor>& descriptors()
-      const noexcept;
+  const std::vector<mujoco_sim::v4::StreamDescriptor>& descriptors() const noexcept;
   OffscreenBackend backend() const noexcept;
 
   bool Capture(const mujoco_sim::core::SimulationSnapshot& snapshot,
-               const CaptureMetadata& metadata,
-               std::vector<RawFrame>* frames,
+               const CaptureMetadata& metadata, std::vector<RawFrame>* frames,
                std::string* error_message);
 
  private:

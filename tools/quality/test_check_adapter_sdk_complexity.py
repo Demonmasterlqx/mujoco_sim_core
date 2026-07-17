@@ -30,7 +30,7 @@ class AdapterSdkComplexityGateTest(unittest.TestCase):
             root = Path(directory)
             source = root / ANALYZED_PATH / "large.cpp"
             source.parent.mkdir(parents=True)
-            source.write_text("line\n" * 501, encoding="utf-8")
+            source.write_text("line\n" * 801, encoding="utf-8")
             failures = find_source_size_failures(root)
         self.assertEqual(len(failures), 1)
 

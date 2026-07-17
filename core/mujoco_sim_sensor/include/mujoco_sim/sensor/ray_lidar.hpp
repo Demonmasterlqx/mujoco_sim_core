@@ -9,10 +9,8 @@ namespace mujoco_sim::sensor {
 
 class RayLidar {
  public:
-  static std::unique_ptr<RayLidar> Create(
-      const mujoco_sim::core::SimulationSnapshot& snapshot,
-      RayLidarProfile profile,
-      std::string* error_message);
+  static std::unique_ptr<RayLidar> Create(const mujoco_sim::core::SimulationSnapshot& snapshot,
+                                          RayLidarProfile profile, std::string* error_message);
 
   ~RayLidar();
   RayLidar(RayLidar&&) noexcept;
@@ -22,12 +20,10 @@ class RayLidar {
   RayLidar& operator=(const RayLidar&) = delete;
 
   const RayLidarProfile& profile() const noexcept;
-  const mujoco_sim::v3::StreamDescriptor& descriptor() const noexcept;
+  const mujoco_sim::v4::StreamDescriptor& descriptor() const noexcept;
 
   bool Capture(const mujoco_sim::core::SimulationSnapshot& snapshot,
-               const CaptureMetadata& metadata,
-               RawFrame* frame,
-               std::string* error_message) const;
+               const CaptureMetadata& metadata, RawFrame* frame, std::string* error_message) const;
 
  private:
   struct Impl;

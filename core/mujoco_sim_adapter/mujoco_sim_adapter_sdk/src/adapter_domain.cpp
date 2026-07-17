@@ -4,9 +4,10 @@
 
 namespace mujoco_sim::adapter_sdk {
 
-ControllerLayout::ControllerLayout(
-    std::vector<ResourceInfo> observations, std::vector<ResourceInfo> commands,
-    std::size_t observation_scalar_count, std::size_t command_scalar_count)
+ControllerLayout::ControllerLayout(std::vector<ResourceInfo> observations,
+                                   std::vector<ResourceInfo> commands,
+                                   std::size_t observation_scalar_count,
+                                   std::size_t command_scalar_count)
     : observations_(std::move(observations)),
       commands_(std::move(commands)),
       observation_scalar_count_(observation_scalar_count),
@@ -19,18 +20,14 @@ ControllerLayout::ControllerLayout(
   }
 }
 
-std::optional<ScalarSpan> ControllerLayout::Observation(
-    std::string_view name) const {
+std::optional<ScalarSpan> ControllerLayout::Observation(std::string_view name) const {
   const auto found = observation_index_.find(std::string(name));
-  return found == observation_index_.end() ? std::nullopt
-                                            : std::optional(found->second);
+  return found == observation_index_.end() ? std::nullopt : std::optional(found->second);
 }
 
-std::optional<ScalarSpan> ControllerLayout::Command(
-    std::string_view name) const {
+std::optional<ScalarSpan> ControllerLayout::Command(std::string_view name) const {
   const auto found = command_index_.find(std::string(name));
-  return found == command_index_.end() ? std::nullopt
-                                        : std::optional(found->second);
+  return found == command_index_.end() ? std::nullopt : std::optional(found->second);
 }
 
 std::size_t ControllerLayout::observation_scalar_count() const noexcept {

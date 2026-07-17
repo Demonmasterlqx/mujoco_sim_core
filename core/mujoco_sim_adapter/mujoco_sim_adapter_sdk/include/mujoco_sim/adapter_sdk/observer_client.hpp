@@ -89,10 +89,8 @@ class ObserverClient {
   bool Activate(std::string* error_message);
   /// Waits for one frame. Only one waiter is allowed per client.
   /// Output is changed only when kReceived is returned.
-  ObservationWaitResult WaitForObservation(
-      std::chrono::milliseconds timeout,
-      ObservationLease* frame,
-      std::string* error_message);
+  ObservationWaitResult WaitForObservation(std::chrono::milliseconds timeout,
+                                           ObservationLease* frame, std::string* error_message);
   /// Cancels local waits and heartbeat without contacting the Server.
   void Stop();
   /// Removes the remote session; failures preserve it for a later retry.

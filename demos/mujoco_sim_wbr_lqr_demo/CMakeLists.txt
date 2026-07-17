@@ -12,7 +12,7 @@ add_library(${PROJECT_NAME}
   src/controller_pipeline.cpp
   src/input_script.cpp
   src/interface_mapping.cpp
-  src/tick_controller.cpp
+  src/controller.cpp
 )
 add_library(mujoco_sim::wbr_lqr_demo ALIAS ${PROJECT_NAME})
 target_compile_features(${PROJECT_NAME} PUBLIC cxx_std_20)
@@ -166,40 +166,46 @@ if(BUILD_TESTING)
   )
   set_tests_properties(wbr_lqr_e2e PROPERTIES TIMEOUT 60)
 
-  set(MUJOCO_SIM_WBR_GUI_TEST_PREFIX)
-  if(NOT DEFINED ENV{DISPLAY} OR "$ENV{DISPLAY}" STREQUAL "")
-    find_program(XVFB_RUN_EXECUTABLE NAMES xvfb-run REQUIRED)
-    set(MUJOCO_SIM_WBR_GUI_TEST_PREFIX "${XVFB_RUN_EXECUTABLE}" -a)
+  get_target_property(MUJOCO_SIM_SERVER_DEFINITIONS
+    mujoco_sim::server INTERFACE_COMPILE_DEFINITIONS)
+  if("MUJOCO_SIM_HAS_GUI=1" IN_LIST MUJOCO_SIM_SERVER_DEFINITIONS OR
+     "MUJOCO_SIM_HAS_GUI=$<BOOL:ON>" IN_LIST MUJOCO_SIM_SERVER_DEFINITIONS)
+    find_package(PNG REQUIRED)
+    set(MUJOCO_SIM_WBR_GUI_TEST_PREFIX)
+    if(NOT DEFINED ENV{DISPLAY} OR "$ENV{DISPLAY}" STREQUAL "")
+      find_program(XVFB_RUN_EXECUTABLE NAMES xvfb-run REQUIRED)
+      set(MUJOCO_SIM_WBR_GUI_TEST_PREFIX "${XVFB_RUN_EXECUTABLE}" -a)
+    endif()
+
+    add_executable(wbr_gui_render_test test/gui_render_test.cpp)
+    target_include_directories(wbr_gui_render_test PRIVATE
+      "${CMAKE_CURRENT_SOURCE_DIR}/../../core/mujoco_sim_server/src"
+    )
+    target_link_libraries(wbr_gui_render_test PRIVATE
+      mujoco_sim::server
+      GTest::gtest_main
+      PNG::PNG
+    )
+    target_compile_definitions(wbr_gui_render_test PRIVATE
+      WBR_LQR_MJCF_DIR="${CMAKE_CURRENT_SOURCE_DIR}/mjcf"
+    )
+    add_test(
+      NAME wbr_gui_render_test
+      COMMAND ${MUJOCO_SIM_WBR_GUI_TEST_PREFIX}
+              $<TARGET_FILE:wbr_gui_render_test>
+    )
+    set_tests_properties(wbr_gui_render_test PROPERTIES TIMEOUT 20)
+
+    add_test(
+      NAME wbr_lqr_gui_e2e
+      COMMAND ${MUJOCO_SIM_WBR_GUI_TEST_PREFIX}
+              bash "${CMAKE_CURRENT_SOURCE_DIR}/test/e2e_wbr_lqr.sh"
+              "$<TARGET_FILE:mujoco_sim::mujoco-sim-server>"
+              "$<TARGET_FILE:mujoco-sim-wbr-lqr-adapter>"
+              "${CMAKE_CURRENT_SOURCE_DIR}/config/wbr_server.yaml"
+              "${CMAKE_CURRENT_SOURCE_DIR}/config/wbr_lqr.yaml"
+              gui 200
+    )
+    set_tests_properties(wbr_lqr_gui_e2e PROPERTIES TIMEOUT 60)
   endif()
-
-  add_executable(wbr_gui_render_test test/gui_render_test.cpp)
-  target_include_directories(wbr_gui_render_test PRIVATE
-    "${CMAKE_CURRENT_SOURCE_DIR}/../../core/mujoco_sim_server/src"
-  )
-  target_link_libraries(wbr_gui_render_test PRIVATE
-    mujoco_sim::server
-    GTest::gtest_main
-    PNG::PNG
-  )
-  target_compile_definitions(wbr_gui_render_test PRIVATE
-    WBR_LQR_MJCF_DIR="${CMAKE_CURRENT_SOURCE_DIR}/mjcf"
-  )
-  add_test(
-    NAME wbr_gui_render_test
-    COMMAND ${MUJOCO_SIM_WBR_GUI_TEST_PREFIX}
-            $<TARGET_FILE:wbr_gui_render_test>
-  )
-  set_tests_properties(wbr_gui_render_test PROPERTIES TIMEOUT 20)
-
-  add_test(
-    NAME wbr_lqr_gui_e2e
-    COMMAND ${MUJOCO_SIM_WBR_GUI_TEST_PREFIX}
-            bash "${CMAKE_CURRENT_SOURCE_DIR}/test/e2e_wbr_lqr.sh"
-            "$<TARGET_FILE:mujoco_sim::mujoco-sim-server>"
-            "$<TARGET_FILE:mujoco-sim-wbr-lqr-adapter>"
-            "${CMAKE_CURRENT_SOURCE_DIR}/config/wbr_server.yaml"
-            "${CMAKE_CURRENT_SOURCE_DIR}/config/wbr_lqr.yaml"
-            gui 200
-  )
-  set_tests_properties(wbr_lqr_gui_e2e PROPERTIES TIMEOUT 60)
 endif()

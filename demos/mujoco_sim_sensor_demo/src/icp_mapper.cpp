@@ -25,34 +25,25 @@ void RequireFinite(double value, const std::string& field) {
 
 void ValidateConfig(const SimpleIcpMapperConfig& config) {
   RequireFinite(config.voxel_size, "voxel_size");
-  RequireFinite(config.max_correspondence_distance,
-                "max_correspondence_distance");
+  RequireFinite(config.max_correspondence_distance, "max_correspondence_distance");
   RequireFinite(config.transformation_epsilon, "transformation_epsilon");
-  RequireFinite(config.euclidean_fitness_epsilon,
-                "euclidean_fitness_epsilon");
+  RequireFinite(config.euclidean_fitness_epsilon, "euclidean_fitness_epsilon");
   RequireFinite(config.maximum_fitness_score, "maximum_fitness_score");
   RequireFinite(config.minimum_inlier_ratio, "minimum_inlier_ratio");
-  RequireFinite(config.maximum_translation_step_m,
-                "maximum_translation_step_m");
-  RequireFinite(config.maximum_rotation_step_rad,
-                "maximum_rotation_step_rad");
-  if (config.voxel_size <= 0.0 ||
-      config.max_correspondence_distance <= 0.0 ||
-      config.max_iterations <= 0 || config.local_map_scans == 0 ||
-      config.minimum_points < 3 || config.transformation_epsilon < 0.0 ||
-      config.euclidean_fitness_epsilon < 0.0 ||
-      config.maximum_fitness_score < 0.0 ||
-      config.minimum_inlier_ratio < 0.0 ||
-      config.minimum_inlier_ratio > 1.0 ||
-      config.maximum_translation_step_m <= 0.0 ||
+  RequireFinite(config.maximum_translation_step_m, "maximum_translation_step_m");
+  RequireFinite(config.maximum_rotation_step_rad, "maximum_rotation_step_rad");
+  if (config.voxel_size <= 0.0 || config.max_correspondence_distance <= 0.0 ||
+      config.max_iterations <= 0 || config.local_map_scans == 0 || config.minimum_points < 3 ||
+      config.transformation_epsilon < 0.0 || config.euclidean_fitness_epsilon < 0.0 ||
+      config.maximum_fitness_score < 0.0 || config.minimum_inlier_ratio < 0.0 ||
+      config.minimum_inlier_ratio > 1.0 || config.maximum_translation_step_m <= 0.0 ||
       config.maximum_rotation_step_rad <= 0.0 ||
       config.maximum_rotation_step_rad > std::numbers::pi) {
     throw IcpMapperError("invalid ICP mapper configuration");
   }
 }
 
-Eigen::Quaterniond NormalizeQuaternion(
-    const Eigen::Quaterniond& quaternion) {
+Eigen::Quaterniond NormalizeQuaternion(const Eigen::Quaterniond& quaternion) {
   RequireFinite(quaternion.w(), "IMU quaternion.w");
   RequireFinite(quaternion.x(), "IMU quaternion.x");
   RequireFinite(quaternion.y(), "IMU quaternion.y");
@@ -63,8 +54,8 @@ Eigen::Quaterniond NormalizeQuaternion(
   if (!std::isfinite(norm) || norm < kMinimumQuaternionNorm) {
     throw IcpMapperError("IMU quaternion has near-zero norm");
   }
-  return Eigen::Quaterniond(quaternion.w() / norm, quaternion.x() / norm,
-                            quaternion.y() / norm, quaternion.z() / norm);
+  return Eigen::Quaterniond(quaternion.w() / norm, quaternion.x() / norm, quaternion.y() / norm,
+                            quaternion.z() / norm);
 }
 
 void ValidateCloud(const PointCloud& cloud, std::size_t minimum_points) {
@@ -73,16 +64,14 @@ void ValidateCloud(const PointCloud& cloud, std::size_t minimum_points) {
   }
   for (std::size_t index = 0; index < cloud.size(); ++index) {
     const pcl::PointXYZ& point = cloud[index];
-    if (!std::isfinite(point.x) || !std::isfinite(point.y) ||
-        !std::isfinite(point.z)) {
+    if (!std::isfinite(point.x) || !std::isfinite(point.y) || !std::isfinite(point.z)) {
       throw IcpMapperError("point cloud contains a non-finite point at index " +
                            std::to_string(index));
     }
   }
 }
 
-PointCloud::Ptr Downsample(const PointCloud& cloud,
-                           const SimpleIcpMapperConfig& config) {
+PointCloud::Ptr Downsample(const PointCloud& cloud, const SimpleIcpMapperConfig& config) {
   auto input = pcl::make_shared<PointCloud>(cloud);
   auto output = pcl::make_shared<PointCloud>();
   pcl::VoxelGrid<pcl::PointXYZ> voxel_filter;
@@ -97,8 +86,7 @@ PointCloud::Ptr Downsample(const PointCloud& cloud,
   return output;
 }
 
-PointCloud::Ptr BuildLocalTarget(
-    const std::deque<PointCloud::ConstPtr>& local_scans) {
+PointCloud::Ptr BuildLocalTarget(const std::deque<PointCloud::ConstPtr>& local_scans) {
   auto target = pcl::make_shared<PointCloud>();
   std::size_t point_count = 0;
   for (const auto& scan : local_scans) {
@@ -126,47 +114,40 @@ bool IsFiniteRigidTransform(const Eigen::Matrix4d& transform) {
 }
 
 double FiniteFitness(double fitness) {
-  return std::isfinite(fitness) ? fitness
-                                : std::numeric_limits<double>::max();
+  return std::isfinite(fitness) ? fitness : std::numeric_limits<double>::max();
 }
 
-double ComputeInlierRatio(const PointCloud& aligned,
-                          const PointCloud::ConstPtr& target,
+double ComputeInlierRatio(const PointCloud& aligned, const PointCloud::ConstPtr& target,
                           double maximum_distance) {
   if (aligned.empty() || !target || target->empty()) {
     return 0.0;
   }
   pcl::KdTreeFLANN<pcl::PointXYZ> tree;
   tree.setInputCloud(target);
-  const float maximum_squared_distance = static_cast<float>(
-      maximum_distance * maximum_distance);
+  const float maximum_squared_distance = static_cast<float>(maximum_distance * maximum_distance);
   std::vector<int> nearest_index(1);
   std::vector<float> nearest_squared_distance(1);
   std::size_t inliers = 0;
   for (const auto& point : aligned) {
-    if (tree.nearestKSearch(point, 1, nearest_index,
-                            nearest_squared_distance) == 1 &&
+    if (tree.nearestKSearch(point, 1, nearest_index, nearest_squared_distance) == 1 &&
         nearest_squared_distance[0] <= maximum_squared_distance) {
       ++inliers;
     }
   }
-  return static_cast<double>(inliers) /
-         static_cast<double>(aligned.size());
+  return static_cast<double>(inliers) / static_cast<double>(aligned.size());
 }
 
 }  // namespace
 
 struct SimpleIcpMapper::Impl {
   explicit Impl(SimpleIcpMapperConfig mapper_config)
-      : config(std::move(mapper_config)),
-        global_map(pcl::make_shared<PointCloud>()) {
+      : config(std::move(mapper_config)), global_map(pcl::make_shared<PointCloud>()) {
     ValidateConfig(config);
   }
 
   SimpleIcpMapperConfig config;
   Eigen::Isometry3d pose = Eigen::Isometry3d::Identity();
-  Eigen::Quaterniond previous_imu_orientation =
-      Eigen::Quaterniond::Identity();
+  Eigen::Quaterniond previous_imu_orientation = Eigen::Quaterniond::Identity();
   double previous_timestamp = 0.0;
   PointCloud::Ptr global_map;
   std::deque<PointCloud::ConstPtr> local_scans;
@@ -178,19 +159,16 @@ SimpleIcpMapper::SimpleIcpMapper(SimpleIcpMapperConfig config)
 
 SimpleIcpMapper::~SimpleIcpMapper() = default;
 SimpleIcpMapper::SimpleIcpMapper(SimpleIcpMapper&&) noexcept = default;
-SimpleIcpMapper& SimpleIcpMapper::operator=(SimpleIcpMapper&&) noexcept =
-    default;
+SimpleIcpMapper& SimpleIcpMapper::operator=(SimpleIcpMapper&&) noexcept = default;
 
-IcpUpdateResult SimpleIcpMapper::AddScan(
-    double timestamp, const PointCloud& cloud,
-    const Eigen::Quaterniond& imu_orientation) {
+IcpUpdateResult SimpleIcpMapper::AddScan(double timestamp, const PointCloud& cloud,
+                                         const Eigen::Quaterniond& imu_orientation) {
   RequireFinite(timestamp, "timestamp");
   if (!impl_->trajectory.empty() && timestamp <= impl_->previous_timestamp) {
     throw IcpMapperError("scan timestamps must increase strictly");
   }
   ValidateCloud(cloud, impl_->config.minimum_points);
-  const Eigen::Quaterniond normalized_imu =
-      NormalizeQuaternion(imu_orientation);
+  const Eigen::Quaterniond normalized_imu = NormalizeQuaternion(imu_orientation);
   PointCloud::Ptr downsampled = Downsample(cloud, impl_->config);
 
   IcpUpdateResult result;
@@ -203,8 +181,7 @@ IcpUpdateResult SimpleIcpMapper::AddScan(
     std::deque<PointCloud::ConstPtr> next_local_scans;
     next_local_scans.push_back(downsampled);
     MapperTrajectory next_trajectory;
-    next_trajectory.push_back(
-        {timestamp, Eigen::Isometry3d::Identity(), 0.0});
+    next_trajectory.push_back({timestamp, Eigen::Isometry3d::Identity(), 0.0});
 
     impl_->pose = Eigen::Isometry3d::Identity();
     impl_->previous_imu_orientation = normalized_imu;
@@ -226,20 +203,17 @@ IcpUpdateResult SimpleIcpMapper::AddScan(
   Eigen::Quaterniond relative_rotation =
       impl_->previous_imu_orientation.conjugate() * normalized_imu;
   relative_rotation.normalize();
-  initial_guess.linear() =
-      impl_->pose.linear() * relative_rotation.toRotationMatrix();
+  initial_guess.linear() = impl_->pose.linear() * relative_rotation.toRotationMatrix();
   initial_guess.translation() = impl_->pose.translation();
 
   if (impl_->trajectory.size() >= 2) {
     const MapperTrajectoryPoint& latest = impl_->trajectory.back();
-    const MapperTrajectoryPoint& preceding =
-        impl_->trajectory[impl_->trajectory.size() - 2];
+    const MapperTrajectoryPoint& preceding = impl_->trajectory[impl_->trajectory.size() - 2];
     const double velocity_interval = latest.timestamp - preceding.timestamp;
     const double prediction_interval = timestamp - latest.timestamp;
     if (velocity_interval > 0.0) {
       const Eigen::Vector3d velocity =
-          (latest.pose.translation() - preceding.pose.translation()) /
-          velocity_interval;
+          (latest.pose.translation() - preceding.pose.translation()) / velocity_interval;
       initial_guess.translation() += velocity * prediction_interval;
     }
   }
@@ -251,23 +225,20 @@ IcpUpdateResult SimpleIcpMapper::AddScan(
   pcl::IterativeClosestPoint<pcl::PointXYZ, pcl::PointXYZ> icp;
   icp.setInputSource(downsampled);
   icp.setInputTarget(local_target);
-  icp.setMaxCorrespondenceDistance(
-      impl_->config.max_correspondence_distance);
+  icp.setMaxCorrespondenceDistance(impl_->config.max_correspondence_distance);
   icp.setMaximumIterations(impl_->config.max_iterations);
   icp.setTransformationEpsilon(impl_->config.transformation_epsilon);
-  icp.setEuclideanFitnessEpsilon(
-      impl_->config.euclidean_fitness_epsilon);
+  icp.setEuclideanFitnessEpsilon(impl_->config.euclidean_fitness_epsilon);
   icp.setRANSACIterations(0);
 
   PointCloud aligned;
   icp.align(aligned, initial_guess.matrix().cast<float>());
   const double fitness = FiniteFitness(icp.getFitnessScore());
-  const Eigen::Matrix4d final_matrix =
-      icp.getFinalTransformation().cast<double>();
+  const Eigen::Matrix4d final_matrix = icp.getFinalTransformation().cast<double>();
   const bool valid_transform = IsFiniteRigidTransform(final_matrix);
 
-  result.converged = icp.hasConverged() && valid_transform &&
-                     fitness < std::numeric_limits<double>::max();
+  result.converged =
+      icp.hasConverged() && valid_transform && fitness < std::numeric_limits<double>::max();
   result.fitness = fitness;
   result.pose = initial_guess;
   result.global_map_points = impl_->global_map->size();
@@ -284,14 +255,11 @@ IcpUpdateResult SimpleIcpMapper::AddScan(
   final_rotation.normalize();
   final_pose.linear() = final_rotation.toRotationMatrix();
   final_pose.translation() = final_matrix.topRightCorner<3, 1>();
-  result.inlier_ratio = ComputeInlierRatio(
-      aligned, local_target, impl_->config.max_correspondence_distance);
-  result.translation_step_m =
-      (final_pose.translation() - impl_->pose.translation()).norm();
+  result.inlier_ratio =
+      ComputeInlierRatio(aligned, local_target, impl_->config.max_correspondence_distance);
+  result.translation_step_m = (final_pose.translation() - impl_->pose.translation()).norm();
   result.rotation_step_rad =
-      Eigen::AngleAxisd(impl_->pose.rotation().transpose() *
-                        final_pose.rotation())
-          .angle();
+      Eigen::AngleAxisd(impl_->pose.rotation().transpose() * final_pose.rotation()).angle();
   if (fitness > impl_->config.maximum_fitness_score) {
     result.pose = final_pose;
     result.rejection_reason = "fitness score exceeds configured maximum";
@@ -302,8 +270,7 @@ IcpUpdateResult SimpleIcpMapper::AddScan(
     result.rejection_reason = "inlier ratio is below configured minimum";
     return result;
   }
-  if (result.translation_step_m >
-      impl_->config.maximum_translation_step_m) {
+  if (result.translation_step_m > impl_->config.maximum_translation_step_m) {
     result.pose = final_pose;
     result.rejection_reason = "translation step exceeds configured maximum";
     return result;
@@ -314,8 +281,7 @@ IcpUpdateResult SimpleIcpMapper::AddScan(
     return result;
   }
   auto world_scan = pcl::make_shared<PointCloud>();
-  pcl::transformPointCloud(*downsampled, *world_scan,
-                           final_pose.matrix().cast<float>());
+  pcl::transformPointCloud(*downsampled, *world_scan, final_pose.matrix().cast<float>());
   ValidateCloud(*world_scan, impl_->config.minimum_points);
   world_scan->is_dense = true;
 
@@ -343,9 +309,8 @@ IcpUpdateResult SimpleIcpMapper::AddScan(
   return result;
 }
 
-IcpUpdateResult SimpleIcpMapper::AddScan(
-    double timestamp, const PointCloud::ConstPtr& cloud,
-    const Eigen::Quaterniond& imu_orientation) {
+IcpUpdateResult SimpleIcpMapper::AddScan(double timestamp, const PointCloud::ConstPtr& cloud,
+                                         const Eigen::Quaterniond& imu_orientation) {
   if (!cloud) {
     throw IcpMapperError("point cloud pointer is null");
   }
@@ -361,7 +326,9 @@ const SimpleIcpMapperConfig& SimpleIcpMapper::config() const noexcept {
   return impl_->config;
 }
 
-Eigen::Isometry3d SimpleIcpMapper::pose() const { return impl_->pose; }
+Eigen::Isometry3d SimpleIcpMapper::pose() const {
+  return impl_->pose;
+}
 
 PointCloud::ConstPtr SimpleIcpMapper::global_map() const noexcept {
   return impl_->global_map;

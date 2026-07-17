@@ -17,28 +17,23 @@ namespace {
 
 constexpr double kPi = 3.14159265358979323846264338327950288;
 
-bool IsCameraFormat(mujoco_sim::v3::StreamFormat format) {
-  return format == mujoco_sim::v3::RGB8 ||
-         format == mujoco_sim::v3::DEPTH32F ||
-         format == mujoco_sim::v3::SEGMENTATION32U ||
-         format == mujoco_sim::v3::XYZ32F;
+bool IsCameraFormat(mujoco_sim::v4::StreamFormat format) {
+  return format == mujoco_sim::v4::RGB8 || format == mujoco_sim::v4::DEPTH32F ||
+         format == mujoco_sim::v4::SEGMENTATION32U || format == mujoco_sim::v4::XYZ32F;
 }
 
-bool ValidateSnapshot(const core::SimulationSnapshot& snapshot,
-                      std::string* error_message) {
+bool ValidateSnapshot(const core::SimulationSnapshot& snapshot, std::string* error_message) {
   if (snapshot.model() == nullptr || snapshot.data() == nullptr) {
     return Fail("simulation snapshot has no model or data", error_message);
   }
   return true;
 }
 
-bool ComputePinholeIntrinsics(const mjModel* model, int camera_id,
-                              std::uint32_t width, std::uint32_t height,
-                              mujoco_sim::v3::CameraIntrinsics* intrinsics,
+bool ComputePinholeIntrinsics(const mjModel* model, int camera_id, std::uint32_t width,
+                              std::uint32_t height, mujoco_sim::v4::CameraIntrinsics* intrinsics,
                               std::string* error_message) {
   if (model->cam_projection[camera_id] != mjPROJ_PERSPECTIVE) {
-    return Fail("orthographic MuJoCo cameras are not supported",
-                error_message);
+    return Fail("orthographic MuJoCo cameras are not supported", error_message);
   }
 
   double fx = 0.0;
@@ -49,35 +44,26 @@ bool ComputePinholeIntrinsics(const mjModel* model, int camera_id,
   const double sensor_height = model->cam_sensorsize[2 * camera_id + 1];
   if (sensor_width > 0.0 || sensor_height > 0.0) {
     const float* intrinsic = model->cam_intrinsic + 4 * camera_id;
-    if (!std::isfinite(sensor_width) || !std::isfinite(sensor_height) ||
-        sensor_width <= 0.0 || sensor_height <= 0.0 ||
-        !std::isfinite(intrinsic[0]) || !std::isfinite(intrinsic[1]) ||
-        !std::isfinite(intrinsic[2]) || !std::isfinite(intrinsic[3]) ||
-        intrinsic[0] <= 0.0F || intrinsic[1] <= 0.0F) {
-      return Fail("camera has invalid compiled intrinsic parameters",
-                  error_message);
+    if (!std::isfinite(sensor_width) || !std::isfinite(sensor_height) || sensor_width <= 0.0 ||
+        sensor_height <= 0.0 || !std::isfinite(intrinsic[0]) || !std::isfinite(intrinsic[1]) ||
+        !std::isfinite(intrinsic[2]) || !std::isfinite(intrinsic[3]) || intrinsic[0] <= 0.0F ||
+        intrinsic[1] <= 0.0F) {
+      return Fail("camera has invalid compiled intrinsic parameters", error_message);
     }
     fx = intrinsic[0] / sensor_width * static_cast<double>(width);
     fy = intrinsic[1] / sensor_height * static_cast<double>(height);
-    cx = (0.5 - intrinsic[2] / sensor_width) *
-             static_cast<double>(width) -
-         0.5;
-    cy = (0.5 - intrinsic[3] / sensor_height) *
-             static_cast<double>(height) -
-         0.5;
+    cx = (0.5 - intrinsic[2] / sensor_width) * static_cast<double>(width) - 0.5;
+    cy = (0.5 - intrinsic[3] / sensor_height) * static_cast<double>(height) - 0.5;
   } else {
     const double fovy_degrees = model->cam_fovy[camera_id];
-    if (!std::isfinite(fovy_degrees) || fovy_degrees <= 0.0 ||
-        fovy_degrees >= 180.0) {
-      return Fail("camera has an invalid perspective field of view",
-                  error_message);
+    if (!std::isfinite(fovy_degrees) || fovy_degrees <= 0.0 || fovy_degrees >= 180.0) {
+      return Fail("camera has an invalid perspective field of view", error_message);
     }
-    fy = 0.5 * static_cast<double>(height) /
-         std::tan(0.5 * fovy_degrees * kPi / 180.0);
+    fy = 0.5 * static_cast<double>(height) / std::tan(0.5 * fovy_degrees * kPi / 180.0);
     fx = fy;
   }
-  if (!std::isfinite(fx) || !std::isfinite(fy) || !std::isfinite(cx) ||
-      !std::isfinite(cy) || fx <= 0.0 || fy <= 0.0) {
+  if (!std::isfinite(fx) || !std::isfinite(fy) || !std::isfinite(cx) || !std::isfinite(cy) ||
+      fx <= 0.0 || fy <= 0.0) {
     return Fail("camera intrinsics are not finite", error_message);
   }
 
@@ -88,13 +74,10 @@ bool ComputePinholeIntrinsics(const mjModel* model, int camera_id,
   return true;
 }
 
-void PopulateDescriptorCommon(mujoco_sim::v3::StreamDescriptor* descriptor,
-                              std::string_view name,
-                              mujoco_sim::v3::StreamFormat format,
-                              std::uint32_t width, std::uint32_t height,
-                              const StreamShape& shape,
-                              std::string_view frame_id,
-                              mujoco_sim::v3::FrameConvention convention,
+void PopulateDescriptorCommon(mujoco_sim::v4::StreamDescriptor* descriptor, std::string_view name,
+                              mujoco_sim::v4::StreamFormat format, std::uint32_t width,
+                              std::uint32_t height, const StreamShape& shape,
+                              std::string_view frame_id, mujoco_sim::v4::FrameConvention convention,
                               std::string_view source_name, double rate_hz) {
   descriptor->set_name(name.data(), name.size());
   descriptor->set_format(format);
@@ -110,32 +93,29 @@ void PopulateDescriptorCommon(mujoco_sim::v3::StreamDescriptor* descriptor,
 
 }  // namespace
 
-bool StreamShapeFor(mujoco_sim::v3::StreamFormat format,
-                    std::uint32_t width, std::uint32_t height,
+bool StreamShapeFor(mujoco_sim::v4::StreamFormat format, std::uint32_t width, std::uint32_t height,
                     StreamShape* shape, std::string* error_message) {
   if (shape == nullptr) {
     return Fail("stream shape output is null", error_message);
   }
   if (width == 0 || height == 0) {
-    return Fail("stream width and height must be greater than zero",
-                error_message);
+    return Fail("stream width and height must be greater than zero", error_message);
   }
   if (width > static_cast<std::uint32_t>(std::numeric_limits<int>::max()) ||
       height > static_cast<std::uint32_t>(std::numeric_limits<int>::max())) {
-    return Fail("stream dimensions exceed renderer integer limits",
-                error_message);
+    return Fail("stream dimensions exceed renderer integer limits", error_message);
   }
 
   std::uint64_t bytes_per_pixel = 0;
   switch (format) {
-    case mujoco_sim::v3::RGB8:
+    case mujoco_sim::v4::RGB8:
       bytes_per_pixel = 3;
       break;
-    case mujoco_sim::v3::DEPTH32F:
-    case mujoco_sim::v3::SEGMENTATION32U:
+    case mujoco_sim::v4::DEPTH32F:
+    case mujoco_sim::v4::SEGMENTATION32U:
       bytes_per_pixel = 4;
       break;
-    case mujoco_sim::v3::XYZ32F:
+    case mujoco_sim::v4::XYZ32F:
       bytes_per_pixel = 12;
       break;
     default:
@@ -149,8 +129,7 @@ bool StreamShapeFor(mujoco_sim::v3::StreamFormat format,
       !CheckedMultiply(stride, height, &payload) ||
       payload > protocol::kMaximumStreamPayloadBytes ||
       payload > std::numeric_limits<std::size_t>::max()) {
-    return Fail("stream shape exceeds supported payload limits",
-                error_message);
+    return Fail("stream shape exceeds supported payload limits", error_message);
   }
 
   shape->row_stride_bytes = static_cast<std::uint32_t>(stride);
@@ -158,18 +137,16 @@ bool StreamShapeFor(mujoco_sim::v3::StreamFormat format,
   return true;
 }
 
-bool ValidateCaptureMetadata(const CaptureMetadata& metadata,
-                             std::string* error_message) {
+bool ValidateCaptureMetadata(const CaptureMetadata& metadata, std::string* error_message) {
   if (!std::isfinite(metadata.simulation_time_s)) {
     return Fail("capture simulation time must be finite", error_message);
   }
   return true;
 }
 
-bool BuildCameraDescriptors(
-    const core::SimulationSnapshot& snapshot, const CameraProfile& profile,
-    std::vector<mujoco_sim::v3::StreamDescriptor>* descriptors,
-    int* camera_id, std::string* error_message) {
+bool BuildCameraDescriptors(const core::SimulationSnapshot& snapshot, const CameraProfile& profile,
+                            std::vector<mujoco_sim::v4::StreamDescriptor>* descriptors,
+                            int* camera_id, std::string* error_message) {
   ClearError(error_message);
   if (descriptors == nullptr || camera_id == nullptr) {
     return Fail("camera descriptor output is null", error_message);
@@ -186,8 +163,7 @@ bool BuildCameraDescriptors(
     return Fail("camera frame_id must not be empty", error_message);
   }
   if (!std::isfinite(profile.rate_hz) || profile.rate_hz <= 0.0) {
-    return Fail("camera rate_hz must be finite and greater than zero",
-                error_message);
+    return Fail("camera rate_hz must be finite and greater than zero", error_message);
   }
   if (profile.outputs.empty()) {
     return Fail("camera must select at least one output", error_message);
@@ -196,19 +172,18 @@ bool BuildCameraDescriptors(
   const auto* model = snapshot.model();
   const int id = mj_name2id(model, mjOBJ_CAMERA, profile.camera_name.c_str());
   if (id < 0) {
-    return Fail("MuJoCo camera '" + profile.camera_name + "' was not found",
-                error_message);
+    return Fail("MuJoCo camera '" + profile.camera_name + "' was not found", error_message);
   }
 
-  mujoco_sim::v3::CameraIntrinsics intrinsics;
-  if (!ComputePinholeIntrinsics(model, id, profile.width, profile.height,
-                                &intrinsics, error_message)) {
+  mujoco_sim::v4::CameraIntrinsics intrinsics;
+  if (!ComputePinholeIntrinsics(model, id, profile.width, profile.height, &intrinsics,
+                                error_message)) {
     return false;
   }
 
   std::set<int> formats;
   std::set<std::string> stream_names;
-  std::vector<mujoco_sim::v3::StreamDescriptor> built_descriptors;
+  std::vector<mujoco_sim::v4::StreamDescriptor> built_descriptors;
   built_descriptors.reserve(profile.outputs.size());
   for (const CameraOutput& output : profile.outputs) {
     if (!IsCameraFormat(output.format)) {
@@ -225,18 +200,16 @@ bool BuildCameraDescriptors(
     }
 
     StreamShape shape;
-    if (!mujoco_sim::sensor::detail::StreamShapeFor(
-            output.format, profile.width, profile.height, &shape,
-            error_message)) {
+    if (!mujoco_sim::sensor::detail::StreamShapeFor(output.format, profile.width, profile.height,
+                                                    &shape, error_message)) {
       return false;
     }
     auto& descriptor = built_descriptors.emplace_back();
-    PopulateDescriptorCommon(&descriptor, output.stream_name, output.format,
-                             profile.width, profile.height, shape,
-                             profile.frame_id, mujoco_sim::v3::ROS_OPTICAL,
+    PopulateDescriptorCommon(&descriptor, output.stream_name, output.format, profile.width,
+                             profile.height, shape, profile.frame_id, mujoco_sim::v4::ROS_OPTICAL,
                              profile.camera_name, profile.rate_hz);
     *descriptor.mutable_camera_intrinsics() = intrinsics;
-    if (output.format == mujoco_sim::v3::SEGMENTATION32U) {
+    if (output.format == mujoco_sim::v4::SEGMENTATION32U) {
       for (int geom_id = 0; geom_id < model->ngeom; ++geom_id) {
         auto* label = descriptor.add_segmentation_labels();
         label->set_value(static_cast<std::uint32_t>(geom_id) + 1U);
@@ -255,14 +228,13 @@ bool BuildCameraDescriptors(
   return true;
 }
 
-bool BuildRayLidarDescriptor(
-    const core::SimulationSnapshot& snapshot, const RayLidarProfile& profile,
-    mujoco_sim::v3::StreamDescriptor* descriptor,
-    std::vector<double>* vertical_angles, int* site_id,
-    std::string* error_message) {
+bool BuildRayLidarDescriptor(const core::SimulationSnapshot& snapshot,
+                             const RayLidarProfile& profile,
+                             mujoco_sim::v4::StreamDescriptor* descriptor,
+                             std::vector<double>* vertical_angles, int* site_id,
+                             std::string* error_message) {
   ClearError(error_message);
-  if (descriptor == nullptr || vertical_angles == nullptr ||
-      site_id == nullptr) {
+  if (descriptor == nullptr || vertical_angles == nullptr || site_id == nullptr) {
     return Fail("ray lidar descriptor output is null", error_message);
   }
   descriptor->Clear();
@@ -281,50 +253,41 @@ bool BuildRayLidarDescriptor(
     return Fail("lidar frame_id must not be empty", error_message);
   }
   if (profile.horizontal_samples == 0) {
-    return Fail("lidar horizontal_samples must be greater than zero",
-                error_message);
+    return Fail("lidar horizontal_samples must be greater than zero", error_message);
   }
-  if (!std::isfinite(profile.min_range_m) ||
-      !std::isfinite(profile.max_range_m) || profile.min_range_m < 0.0 ||
-      profile.max_range_m <= profile.min_range_m ||
+  if (!std::isfinite(profile.min_range_m) || !std::isfinite(profile.max_range_m) ||
+      profile.min_range_m < 0.0 || profile.max_range_m <= profile.min_range_m ||
       profile.max_range_m > std::numeric_limits<float>::max()) {
-    return Fail("lidar range limits must be finite with 0 <= min < max",
-                error_message);
+    return Fail("lidar range limits must be finite with 0 <= min < max", error_message);
   }
   if (!std::isfinite(profile.rate_hz) || profile.rate_hz <= 0.0) {
-    return Fail("lidar rate_hz must be finite and greater than zero",
-                error_message);
+    return Fail("lidar rate_hz must be finite and greater than zero", error_message);
   }
 
   const bool has_angles = !profile.vertical_angles_rad.empty();
   const bool has_fov = profile.vertical_fov.has_value();
   if (has_angles == has_fov) {
-    return Fail("lidar must set exactly one vertical angle mode",
-                error_message);
+    return Fail("lidar must set exactly one vertical angle mode", error_message);
   }
 
   std::size_t ring_count = profile.vertical_angles_rad.size();
   if (has_fov) {
     const VerticalFieldOfView& fov = *profile.vertical_fov;
     if (fov.samples == 0 || !std::isfinite(fov.min_angle_rad) ||
-        !std::isfinite(fov.max_angle_rad) ||
-        fov.min_angle_rad > fov.max_angle_rad ||
-        fov.min_angle_rad < -0.5 * kPi ||
-        fov.max_angle_rad > 0.5 * kPi) {
+        !std::isfinite(fov.max_angle_rad) || fov.min_angle_rad > fov.max_angle_rad ||
+        fov.min_angle_rad < -0.5 * kPi || fov.max_angle_rad > 0.5 * kPi) {
       return Fail("lidar vertical FOV is invalid", error_message);
     }
     ring_count = fov.samples;
   }
-  if (ring_count >
-      static_cast<std::size_t>(std::numeric_limits<std::uint32_t>::max())) {
+  if (ring_count > static_cast<std::size_t>(std::numeric_limits<std::uint32_t>::max())) {
     return Fail("lidar ring count exceeds descriptor limits", error_message);
   }
 
   const auto rings = static_cast<std::uint32_t>(ring_count);
   StreamShape shape;
   if (!mujoco_sim::sensor::detail::StreamShapeFor(
-          mujoco_sim::v3::XYZ32F, profile.horizontal_samples, rings, &shape,
-          error_message)) {
+          mujoco_sim::v4::XYZ32F, profile.horizontal_samples, rings, &shape, error_message)) {
     return false;
   }
   std::uint64_t ray_count = 0;
@@ -335,11 +298,8 @@ bool BuildRayLidarDescriptor(
 
   if (has_angles) {
     for (double angle : profile.vertical_angles_rad) {
-      if (!std::isfinite(angle) || angle < -0.5 * kPi ||
-          angle > 0.5 * kPi) {
-        return Fail(
-            "lidar vertical angles must be finite and within +/-pi/2",
-            error_message);
+      if (!std::isfinite(angle) || angle < -0.5 * kPi || angle > 0.5 * kPi) {
+        return Fail("lidar vertical angles must be finite and within +/-pi/2", error_message);
       }
     }
   }
@@ -347,8 +307,7 @@ bool BuildRayLidarDescriptor(
   const auto* model = snapshot.model();
   const int id = mj_name2id(model, mjOBJ_SITE, profile.site_name.c_str());
   if (id < 0) {
-    return Fail("MuJoCo site '" + profile.site_name + "' was not found",
-                error_message);
+    return Fail("MuJoCo site '" + profile.site_name + "' was not found", error_message);
   }
 
   std::vector<double> built_angles;
@@ -360,28 +319,24 @@ bool BuildRayLidarDescriptor(
     if (fov.samples == 1) {
       built_angles[0] = 0.5 * (fov.min_angle_rad + fov.max_angle_rad);
     } else {
-      const double step = (fov.max_angle_rad - fov.min_angle_rad) /
-                          static_cast<double>(fov.samples - 1U);
+      const double step =
+          (fov.max_angle_rad - fov.min_angle_rad) / static_cast<double>(fov.samples - 1U);
       for (std::uint32_t ring = 0; ring < fov.samples; ++ring) {
-        built_angles[ring] =
-            fov.min_angle_rad + step * static_cast<double>(ring);
+        built_angles[ring] = fov.min_angle_rad + step * static_cast<double>(ring);
       }
     }
   }
 
-  PopulateDescriptorCommon(descriptor, profile.stream_name,
-                           mujoco_sim::v3::XYZ32F,
-                           profile.horizontal_samples, rings, shape,
-                           profile.frame_id, mujoco_sim::v3::ROS_BODY,
-                           profile.site_name, profile.rate_hz);
+  PopulateDescriptorCommon(descriptor, profile.stream_name, mujoco_sim::v4::XYZ32F,
+                           profile.horizontal_samples, rings, shape, profile.frame_id,
+                           mujoco_sim::v4::ROS_BODY, profile.site_name, profile.rate_hz);
   *vertical_angles = std::move(built_angles);
   *site_id = id;
   return true;
 }
 
-RawFrame MakeRawFrame(const mujoco_sim::v3::StreamDescriptor& descriptor,
-                      const CaptureMetadata& metadata,
-                      std::vector<std::byte> payload) {
+RawFrame MakeRawFrame(const mujoco_sim::v4::StreamDescriptor& descriptor,
+                      const CaptureMetadata& metadata, std::vector<std::byte> payload) {
   RawFrame frame;
   frame.header.set_epoch(metadata.epoch);
   frame.header.set_tick_id(metadata.tick_id);
@@ -403,29 +358,25 @@ RawFrame MakeRawFrame(const mujoco_sim::v3::StreamDescriptor& descriptor,
 
 }  // namespace detail
 
-bool StreamShapeFor(mujoco_sim::v3::StreamFormat format,
-                    std::uint32_t width, std::uint32_t height,
+bool StreamShapeFor(mujoco_sim::v4::StreamFormat format, std::uint32_t width, std::uint32_t height,
                     StreamShape* shape, std::string* error_message) {
   return detail::StreamShapeFor(format, width, height, shape, error_message);
 }
 
-bool DescribeCameraStreams(
-    const core::SimulationSnapshot& snapshot, const CameraProfile& profile,
-    std::vector<mujoco_sim::v3::StreamDescriptor>* descriptors,
-    std::string* error_message) {
+bool DescribeCameraStreams(const core::SimulationSnapshot& snapshot, const CameraProfile& profile,
+                           std::vector<mujoco_sim::v4::StreamDescriptor>* descriptors,
+                           std::string* error_message) {
   int camera_id = -1;
-  return detail::BuildCameraDescriptors(snapshot, profile, descriptors,
-                                        &camera_id, error_message);
+  return detail::BuildCameraDescriptors(snapshot, profile, descriptors, &camera_id, error_message);
 }
 
-bool DescribeRayLidarStream(
-    const core::SimulationSnapshot& snapshot, const RayLidarProfile& profile,
-    mujoco_sim::v3::StreamDescriptor* descriptor,
-    std::string* error_message) {
+bool DescribeRayLidarStream(const core::SimulationSnapshot& snapshot,
+                            const RayLidarProfile& profile,
+                            mujoco_sim::v4::StreamDescriptor* descriptor,
+                            std::string* error_message) {
   std::vector<double> vertical_angles;
   int site_id = -1;
-  return detail::BuildRayLidarDescriptor(snapshot, profile, descriptor,
-                                         &vertical_angles, &site_id,
+  return detail::BuildRayLidarDescriptor(snapshot, profile, descriptor, &vertical_angles, &site_id,
                                          error_message);
 }
 

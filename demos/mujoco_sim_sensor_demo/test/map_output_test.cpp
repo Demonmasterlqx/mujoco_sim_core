@@ -25,8 +25,7 @@ class TemporaryDirectory {
  public:
   TemporaryDirectory() {
     static std::atomic<std::uint64_t> sequence{0};
-    const auto ticks =
-        std::chrono::steady_clock::now().time_since_epoch().count();
+    const auto ticks = std::chrono::steady_clock::now().time_since_epoch().count();
     path_ = std::filesystem::temp_directory_path() /
             ("mujoco_sensor_map_output_test_" + std::to_string(ticks) + "_" +
              std::to_string(sequence.fetch_add(1)));
@@ -51,10 +50,9 @@ demo::PointCloud MakeMap() {
     for (int height = 0; height < 16; ++height) {
       for (int facet = 0; facet < 10; ++facet) {
         const double angle = facet * 0.2 * std::numbers::pi;
-        map.emplace_back(
-            static_cast<float>(center_x + 0.2 * std::cos(angle)),
-            static_cast<float>(center_y + 0.2 * std::sin(angle)),
-            static_cast<float>(0.1 + 0.1 * height));
+        map.emplace_back(static_cast<float>(center_x + 0.2 * std::cos(angle)),
+                         static_cast<float>(center_y + 0.2 * std::sin(angle)),
+                         static_cast<float>(0.1 + 0.1 * height));
       }
     }
   }
@@ -68,9 +66,7 @@ demo::MapperTrajectory MakeTrajectory() {
   demo::MapperTrajectory trajectory;
   for (int index = 0; index < 3; ++index) {
     Eigen::Isometry3d pose = Eigen::Isometry3d::Identity();
-    pose.linear() = Eigen::AngleAxisd(0.1 * index,
-                                      Eigen::Vector3d::UnitZ())
-                        .toRotationMatrix();
+    pose.linear() = Eigen::AngleAxisd(0.1 * index, Eigen::Vector3d::UnitZ()).toRotationMatrix();
     pose.translation() = Eigen::Vector3d(0.4 * index, 0.2 * index, 0.0);
     trajectory.push_back({0.1 * index, pose, 0.001 * index});
   }
@@ -79,8 +75,7 @@ demo::MapperTrajectory MakeTrajectory() {
 
 std::vector<char> ReadFile(const std::filesystem::path& path) {
   std::ifstream input(path, std::ios::binary);
-  return {std::istreambuf_iterator<char>(input),
-          std::istreambuf_iterator<char>()};
+  return {std::istreambuf_iterator<char>(input), std::istreambuf_iterator<char>()};
 }
 
 demo::PointCloud ReadBinaryPcd(const std::filesystem::path& path) {
@@ -150,17 +145,13 @@ TEST(MapOutputTest, WritesReloadablePcdCsvAndRgbTopDownPng) {
 
   png_image image{};
   image.version = PNG_IMAGE_VERSION;
-  ASSERT_NE(png_image_begin_read_from_file(
-                &image, paths.top_down_png.string().c_str()),
-            0)
+  ASSERT_NE(png_image_begin_read_from_file(&image, paths.top_down_png.string().c_str()), 0)
       << image.message;
   EXPECT_EQ(image.width, config.image_width);
   EXPECT_EQ(image.height, config.image_height);
   image.format = PNG_FORMAT_RGB;
   std::vector<std::uint8_t> pixels(PNG_IMAGE_SIZE(image));
-  ASSERT_NE(png_image_finish_read(&image, nullptr, pixels.data(), 0, nullptr),
-            0)
-      << image.message;
+  ASSERT_NE(png_image_finish_read(&image, nullptr, pixels.data(), 0, nullptr), 0) << image.message;
   png_image_free(&image);
   bool has_rendered_pixel = false;
   for (std::uint8_t channel : pixels) {
@@ -173,8 +164,7 @@ TEST(MapOutputTest, NonFiniteInputLeavesFilesystemUnchanged) {
   TemporaryDirectory temporary;
   const demo::PointCloud map = MakeMap();
   const demo::MapperTrajectory trajectory = MakeTrajectory();
-  const demo::MapOutputPaths paths =
-      demo::SaveMapOutputs(temporary.path(), map, trajectory);
+  const demo::MapOutputPaths paths = demo::SaveMapOutputs(temporary.path(), map, trajectory);
   const std::vector<char> original_pcd = ReadFile(paths.pcd);
   const std::vector<char> original_csv = ReadFile(paths.trajectory_csv);
   const std::vector<char> original_png = ReadFile(paths.top_down_png);
@@ -189,7 +179,6 @@ TEST(MapOutputTest, NonFiniteInputLeavesFilesystemUnchanged) {
 
   const std::filesystem::path new_directory = temporary.path() / "new";
   invalid_map[4].x = std::numeric_limits<float>::quiet_NaN();
-  EXPECT_THROW(demo::SaveMapOutputs(new_directory, invalid_map, trajectory),
-               demo::MapOutputError);
+  EXPECT_THROW(demo::SaveMapOutputs(new_directory, invalid_map, trajectory), demo::MapOutputError);
   EXPECT_FALSE(std::filesystem::exists(new_directory));
 }

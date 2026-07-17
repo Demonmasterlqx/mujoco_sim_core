@@ -11,7 +11,7 @@
 #include <utility>
 #include <vector>
 
-#include <mujoco_sim/v3/sync.pb.h>
+#include <mujoco_sim/v4/sync.pb.h>
 
 namespace mujoco_sim::adapter_sdk {
 
@@ -30,7 +30,7 @@ struct SensorStreamOptions {
 /// Owning stream header and payload suitable for cross-callback retention.
 struct OwnedStreamSample {
   /// Parsed metadata copied from the wire frame.
-  mujoco_sim::v3::StreamFrameHeader header;
+  mujoco_sim::v4::StreamFrameHeader header;
   /// Owned raw payload bytes described by header.
   std::vector<std::byte> payload;
 };
@@ -47,7 +47,7 @@ class StreamSampleView {
   StreamSampleView& operator=(const StreamSampleView&) = delete;
 
   /// Returns the owned header valid for the lifetime of this view.
-  const mujoco_sim::v3::StreamFrameHeader& header() const { return header_; }
+  const mujoco_sim::v4::StreamFrameHeader& header() const { return header_; }
   /// Returns borrowed payload bytes valid only during the callback.
   std::span<const std::byte> payload() const { return payload_; }
 
@@ -57,11 +57,10 @@ class StreamSampleView {
  private:
   friend class SensorStreamClient;
 
-  StreamSampleView(mujoco_sim::v3::StreamFrameHeader header,
-                   std::span<const std::byte> payload)
+  StreamSampleView(mujoco_sim::v4::StreamFrameHeader header, std::span<const std::byte> payload)
       : header_(std::move(header)), payload_(payload) {}
 
-  mujoco_sim::v3::StreamFrameHeader header_;
+  mujoco_sim::v4::StreamFrameHeader header_;
   std::span<const std::byte> payload_;
 };
 
@@ -105,16 +104,13 @@ class SensorStreamClient {
                    std::string* error_message);
   /// Selects blocking delivery and waits for one sample.
   /// Output is changed only when kReceived is returned.
-  SampleWaitResult WaitForSample(const std::string& stream_name,
-                                 std::chrono::milliseconds timeout,
-                                 OwnedStreamSample* sample,
-                                 std::string* error_message);
+  SampleWaitResult WaitForSample(const std::string& stream_name, std::chrono::milliseconds timeout,
+                                 OwnedStreamSample* sample, std::string* error_message);
   /// Cancels local delivery and wakes all waiters. The client is not restartable.
   void Stop();
 
   /// Returns the validated descriptor for a requested stream.
-  std::optional<mujoco_sim::v3::StreamDescriptor> descriptor(
-      const std::string& stream_name) const;
+  std::optional<mujoco_sim::v4::StreamDescriptor> descriptor(const std::string& stream_name) const;
   /// Returns transport gaps, Server drops, and local queue evictions.
   std::uint64_t dropped_samples(const std::string& stream_name) const;
   /// Returns the latest non-terminal diagnostic or sticky terminal error.
@@ -122,7 +118,7 @@ class SensorStreamClient {
 
   /// Returns the successful stream discovery response.
   /// Call only after Start() has completed and do not race this access with it.
-  const mujoco_sim::v3::GetSensorStreamsResponse& discovery() const;
+  const mujoco_sim::v4::GetSensorStreamsResponse& discovery() const;
 
  private:
   friend class SensorStreamClientTestPeer;

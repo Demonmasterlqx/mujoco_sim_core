@@ -14,36 +14,31 @@ namespace mujoco_sim::adapter_sdk {
 
 class FakeObserverTransport final : public internal::AdapterTransport {
  public:
-  bool Register(const mujoco_sim::v3::RegisterAdapterRequest&,
-                mujoco_sim::v3::RegisterAdapterResponse*, std::string*) override {
+  bool Register(const mujoco_sim::v4::RegisterAdapterRequest&,
+                mujoco_sim::v4::RegisterAdapterResponse*, std::string*) override {
     return false;
   }
-  bool Activate(const mujoco_sim::v3::ActivateAdapterRequest&,
-                mujoco_sim::v3::ActivateAdapterResponse* response,
-                std::string*) override {
-    response->set_code(mujoco_sim::v3::OK);
+  bool Activate(const mujoco_sim::v4::ActivateAdapterRequest&,
+                mujoco_sim::v4::ActivateAdapterResponse* response, std::string*) override {
+    response->set_code(mujoco_sim::v4::OK);
     return true;
   }
-  bool Unregister(const mujoco_sim::v3::UnregisterAdapterRequest& request,
-                  mujoco_sim::v3::UnregisterAdapterResponse* response,
-                  std::string*) override {
+  bool Unregister(const mujoco_sim::v4::UnregisterAdapterRequest& request,
+                  mujoco_sim::v4::UnregisterAdapterResponse* response, std::string*) override {
     last_unregister = request;
     response->set_code(unregister_code);
     return unregister_transport_ok;
   }
-  bool PublishCommit(std::string_view) override { return false; }
-  bool PublishFault(const mujoco_sim::v3::ControllerFault&) override {
-    return false;
-  }
-  void PublishHeartbeat(
-      const mujoco_sim::v3::SessionHeartbeat& heartbeat) override {
+  bool PublishCommand(std::string_view) override { return false; }
+  bool PublishFault(const mujoco_sim::v4::ControllerFault&) override { return false; }
+  void PublishHeartbeat(const mujoco_sim::v4::SessionHeartbeat& heartbeat) override {
     last_heartbeat = heartbeat;
   }
 
   bool unregister_transport_ok = true;
-  mujoco_sim::v3::ErrorCode unregister_code = mujoco_sim::v3::OK;
-  mujoco_sim::v3::UnregisterAdapterRequest last_unregister;
-  mujoco_sim::v3::SessionHeartbeat last_heartbeat;
+  mujoco_sim::v4::ErrorCode unregister_code = mujoco_sim::v4::OK;
+  mujoco_sim::v4::UnregisterAdapterRequest last_unregister;
+  mujoco_sim::v4::SessionHeartbeat last_heartbeat;
 };
 
 class ObserverClientTestPeer {
@@ -52,8 +47,8 @@ class ObserverClientTestPeer {
     return client->impl_->ValidateOptions(error);
   }
 
-  static std::shared_ptr<FakeObserverTransport> Configure(
-      ObserverClient* client, std::size_t queue_capacity = 1) {
+  static std::shared_ptr<FakeObserverTransport> Configure(ObserverClient* client,
+                                                          std::size_t queue_capacity = 1) {
     auto transport = std::make_shared<FakeObserverTransport>();
     client->impl_->stop_requested_ = false;
     std::lock_guard lock(client->impl_->mutex_);
@@ -62,9 +57,7 @@ class ObserverClientTestPeer {
     client->impl_->registration_.session_id = 42;
     client->impl_->registration_.epoch = 7;
     client->impl_->registration_.layout = ControllerLayout(
-        {{"position", {0, 1}, false, 0.0, 0.0},
-         {"velocity", {1, 1}, false, 0.0, 0.0}},
-        {}, 2, 0);
+        {{"position", {0, 1}, false, 0.0, 0.0}, {"velocity", {1, 1}, false, 0.0, 0.0}}, {}, 2, 0);
     client->impl_->layout_fingerprint_ = {11, 12};
     client->impl_->session_ = internal::AdapterSession{};
     client->impl_->session_.Registered({42, 7});
@@ -82,8 +75,7 @@ class ObserverClientTestPeer {
   }
 
   static void HandleFrame(ObserverClient* client, std::uint64_t sequence,
-                          std::uint64_t tick_id = 10,
-                          std::array<double, 2> scalars = {1.0, 2.0}) {
+                          std::uint64_t tick_id = 10, std::array<double, 2> scalars = {1.0, 2.0}) {
     mujoco_sim::protocol::DataFrameHeader header;
     header.kind = mujoco_sim::protocol::DataFrameKind::kObservation;
     header.session_id = 42;
@@ -94,13 +86,11 @@ class ObserverClientTestPeer {
     header.simulation_time_s = 0.25;
     std::string bytes;
     mujoco_sim::protocol::DataFrameError error;
-    ASSERT_TRUE(mujoco_sim::protocol::EncodeDataFrame(
-        header, scalars, &bytes, &error));
+    ASSERT_TRUE(mujoco_sim::protocol::EncodeDataFrame(header, scalars, &bytes, &error));
     client->impl_->HandleObservationBytes(bytes.data(), bytes.size());
   }
 
-  static mujoco_sim::v3::SessionHeartbeat BuildHeartbeat(
-      ObserverClient* client) {
+  static mujoco_sim::v4::SessionHeartbeat BuildHeartbeat(ObserverClient* client) {
     std::lock_guard lock(client->impl_->mutex_);
     return client->impl_->BuildHeartbeat();
   }
@@ -160,8 +150,7 @@ TEST(ObserverClientTest, DeliversDenseLeaseAndCountsDrops) {
 
   ObservationLease first;
   std::string error;
-  ASSERT_EQ(client.WaitForObservation(0ms, &first, &error),
-            ObservationWaitResult::kReceived);
+  ASSERT_EQ(client.WaitForObservation(0ms, &first, &error), ObservationWaitResult::kReceived);
   EXPECT_EQ(first.sequence(), 3U);
   EXPECT_EQ(first.tick_id(), 10U);
   ASSERT_EQ(first.observations().size(), 2U);
@@ -175,8 +164,7 @@ TEST(ObserverClientTest, StopWakesBlockingWaiter) {
   auto waiting = std::async(std::launch::async, [&] {
     ObservationLease frame;
     std::string error;
-    return client.WaitForObservation(std::chrono::milliseconds::max(),
-                                     &frame, &error);
+    return client.WaitForObservation(std::chrono::milliseconds::max(), &frame, &error);
   });
   std::this_thread::sleep_for(10ms);
   client.Stop();

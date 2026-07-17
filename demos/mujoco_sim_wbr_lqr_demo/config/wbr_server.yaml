@@ -2,6 +2,7 @@ server_name: wbr
 model_path: ../mjcf/scene.xml
 initial_keyframe: home
 max_ticks: 6000
-tick_timeout_ms: 5000
+command_timeout_ms: 5000
+command_keepalive_ms: 250
 status_period_ms: 100
 headless: false

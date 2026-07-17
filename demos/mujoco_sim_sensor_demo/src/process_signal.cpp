@@ -7,7 +7,9 @@ namespace {
 
 volatile std::sig_atomic_t stop_requested = 0;
 
-void HandleSignal(int) { stop_requested = 1; }
+void HandleSignal(int) {
+  stop_requested = 1;
+}
 
 }  // namespace
 
@@ -17,6 +19,8 @@ void InstallProcessSignalHandlers() {
   std::signal(SIGTERM, HandleSignal);
 }
 
-bool ProcessStopRequested() noexcept { return stop_requested != 0; }
+bool ProcessStopRequested() noexcept {
+  return stop_requested != 0;
+}
 
 }  // namespace mujoco_sim::sensor_demo

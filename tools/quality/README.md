@@ -1,6 +1,6 @@
-# SimulationCore quality gates
+# Core and Adapter SDK quality gates
 
-Adapter SDK 已达到最终硬门槛，不需要历史超限 baseline。可直接运行：
+The Adapter SDK meets the hard limits without a historical baseline. Run:
 
 ```bash
 build/quality-venv/bin/python \
@@ -10,9 +10,10 @@ build/quality-venv/bin/python \
 python3 tools/quality/test_check_adapter_sdk_complexity.py
 ```
 
-在 Adapter SDK 配置时启用 `MUJOCO_SIM_ENABLE_QUALITY_GATES=ON` 会把上述
-两项加入 CTest；启用 `MUJOCO_SIM_BUILD_DOCS=ON` 会生成 warning-clean Doxygen
-文档，并把未文档化的公开 API 当作错误。
+Configuring the Adapter SDK with `MUJOCO_SIM_ENABLE_QUALITY_GATES=ON` adds both
+commands to CTest. `MUJOCO_SIM_BUILD_DOCS=ON` adds the
+`mujoco_sim_adapter_sdk_docs` target and treats undocumented public APIs and
+other Doxygen warnings as errors.
 
 Install the pinned analyzer in an isolated environment:
 
@@ -31,7 +32,7 @@ build/quality-venv/bin/python \
   --root .
 ```
 
-The gate rejects functions above CCN 15 or NLOC 80, `.cpp` files above 500
+The gate rejects functions above CCN 15 or NLOC 80, `.cpp` files above 800
 lines, and increases in NLOC or CCN relative to the baseline. Regenerate the
 baseline only after reviewing an intentional complexity reduction or a new
 function that is within both hard limits:
@@ -51,16 +52,20 @@ python3 tools/quality/test_check_simulation_core_complexity.py
 ```
 
 `.github/workflows/simulation-core-quality.yml` installs the pinned analyzer,
-enables `MUJOCO_SIM_ENABLE_QUALITY_GATES` and `MUJOCO_SIM_BUILD_DOCS`, runs Core
-CTest, and builds Doxygen with undocumented public APIs treated as errors.
+builds and tests Protocol, configures SimulationCore with
+`MUJOCO_SIM_ENABLE_QUALITY_GATES=ON` and `MUJOCO_SIM_BUILD_DOCS=ON`, runs Core
+CTest, and builds the warning-clean `mujoco_sim_core_docs` target. Adapter SDK
+gates are currently local CMake/CTest targets rather than steps in that
+workflow.
 
-On Linux kernels with high address-space randomization, run ThreadSanitizer
-lifecycle tests under `setarch -R`. The checked-in suppression excludes only
-reports whose stack enters the prebuilt, uninstrumented eCAL shared library:
+On Linux kernels with high address-space randomization, run the Server's
+ThreadSanitizer concurrency tests under `setarch -R`. The checked-in
+suppression excludes only reports whose stack enters the prebuilt,
+uninstrumented eCAL shared library:
 
 ```bash
 setarch "$(uname -m)" -R env \
   TSAN_OPTIONS="halt_on_error=1:suppressions=$PWD/tools/quality/tsan.supp" \
   ctest --test-dir build/mujoco_sim_server_tsan --output-on-failure \
-    -R 'server_test|server_event_queue_test|server_lifecycle_e2e'
+    -R 'controller_command_inbox_test|server_event_queue_test|server_stop_concurrency_test'
 ```

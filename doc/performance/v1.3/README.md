@@ -1,5 +1,11 @@
 # Protocol V3 performance evidence
 
+> Historical archive: these measurements document the V1.2-to-V1.3
+> Tick/Commit implementation. The current runtime is Protocol V4 and no longer
+> provides the referenced Barrier APIs, benchmarks, or `message_rate_e2e`
+> target. Use this directory only to interpret the retained V1.3 result files;
+> current build and runtime instructions are in the repository root README.
+
 Both Core benchmark binaries were built with GCC 13.3 in `Release` and run five
 times sequentially with `taskset -c 0` on the same host. The baseline is the
 detached V1.2 commit `106e9f3`; V1.3 is the current worktree. Both use

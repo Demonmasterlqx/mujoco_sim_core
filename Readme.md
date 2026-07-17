@@ -5,11 +5,11 @@
 | 包 | 作用 | 文档 |
 |---|---|---|
 | `mujoco_sim_config` | 从 schema 在构建期生成 C++ 配置类型、严格 YAML/CLI 解析器 | [查看](core/mujoco_sim_config/README.md) |
-| `mujoco_sim_protocol` | 定义唯一 Protocol V3 控制面、稠密数据面、Sensor framing 和 eCAL 命名规则 | [查看](core/mujoco_sim_protocol/Readme.md) |
-| `mujoco_sim_core` | 管理 MuJoCo 状态、资源所有权和 lockstep 仿真 | [查看](core/mujoco_sim_core/Readme.md) |
+| `mujoco_sim_protocol` | 定义唯一 Protocol V4 控制面、稠密数据面、Sensor framing 和 eCAL 命名规则 | [查看](core/mujoco_sim_protocol/Readme.md) |
+| `mujoco_sim_core` | 管理 MuJoCo 状态、资源所有权和异步控制仿真 | [查看](core/mujoco_sim_core/Readme.md) |
 | `mujoco_sim_sensor` | 从隔离 Snapshot 捕获 headless camera 与 360 度 ray LiDAR | [查看](core/mujoco_sim_sensor/README.md) |
 | `mujoco_sim_server` | 提供 eCAL server、配置解析和图形界面 | [查看](core/mujoco_sim_server/Readme.md) |
-| `mujoco_sim_adapter_sdk` | 提供同步 Controller、非 Barrier Observer 与异步 Stream C++ Client | [查看](core/mujoco_sim_adapter/mujoco_sim_adapter_sdk/Readme.md) |
+| `mujoco_sim_adapter_sdk` | 提供异步 Controller、Observer 与 Sensor Stream C++ Client | [查看](core/mujoco_sim_adapter/mujoco_sim_adapter_sdk/Readme.md) |
 | `mujoco_sim_sample_adapter` | 展示固定 command adapter 和端到端联调 | [查看](core/mujoco_sim_adapter/mujoco_sim_sample_adapter/Readme.md) |
 | `mujoco_sim_wbr_lqr_demo` | 迁移 WBR LQR 抡腿机器人控制器，提供可配置接口和完整闭环示例 | [查看](demos/mujoco_sim_wbr_lqr_demo/README.md) |
 | `mujoco_sim_sensor_demo` | 四进程房间巡航、相机消费和 IMU/LiDAR ICP 建图示例 | [查看](demos/mujoco_sim_sensor_demo/README.md) |
@@ -35,18 +35,21 @@ colcon test-result --verbose
 
 ## 架构设计
 
+当前运行时契约见 [Protocol V4](doc/protocol/v4.md)，线程与边界设计见
+[Server runtime](doc/architecture/server_runtime.md)、
+[异步 Controller 时序](doc/architecture/async_controller_sequence.md) 和
+[Controller 生命周期](doc/architecture/controller_lifecycle.md)。`doc/plans`、
+`doc/refactor` 与 `doc/performance/v1.3` 是历史设计和基线证据，不是当前运行说明。
+
 以 `mujoco_sim_core` 为核心，MuJoCo server 掌管整个仿真进程，包括模型加载、仿真进度、仿真时间和 `mj_step()`。
 
-Protocol V3 使用 eCAL 作为 IPC 方案。外部控制器通过 adapter 接入，不直接访问 `mjModel` 或 `mjData`。
+Protocol V4 使用 eCAL 作为 IPC 方案。外部控制器（ROS 2/RTOS/裸机/native C++ 等）
+通过 adapter 接入，不直接访问 `mjModel` 或 `mjData`。
 
-外部控制器（ROS 2/RTOS/裸机/native C++ 等）通过 adapter 接入。
-
-MuJoCo server 会加载模型，然后通过同步 Tick/Commit 协议与各控制器通信。
-
-同步 Controller 的既有行为保持不变：`SyncAdapterClient` 仍在每个 Tick 中原子获得其声明的
-关节/IMU 等小 observation，计算后 Commit 才能完成 Barrier。只读小数据使用
-`ObserverClient`，它在 completed step 后按步数或仿真时间降采样，不参与 Barrier；RGB、
-深度、分割和点云使用 `SensorStreamClient` 消费独立异步 raw stream。
+Server 按配置持续执行 Step 并发布最新 Controller State。`ControllerClient` 消费 State、
+把最新 Command 写入 depth-1 mailbox；Server 在下一 Step 边界使用该 Command，没有新值时
+保持末值。Controller 计算、断开或发送失败都不会阻塞仿真。只读小数据使用
+`ObserverClient`；RGB、深度、分割和点云使用 `SensorStreamClient` 消费独立异步 raw stream。
 
 各程序的配置类型和解析器由 `mujoco_sim_config` 根据包内 schema 在构建期生成。启动参数
 使用 CLI11，配置文件使用 yaml-cpp 解析标准 YAML。配置优先级固定为
@@ -58,16 +61,22 @@ server_name: default
 model_path: robot.xml
 initial_keyframe: ""
 max_ticks: 0
-tick_timeout_ms: 1000
+pacing_mode: realtime
+realtime_factor: 1.0
+command_timeout_ms: 500
+command_keepalive_ms: 100
+offline_session_expire_ms: 0
+controller_state_every_n_steps: 1
+controller_state_period_s: 0.0
+controller_state_max_rate_hz: 1000
+startup_ctrl_policy: zero
+offline_ctrl_policy: hold_last
+error_ctrl_policy: zero
+release_ctrl_policy: zero
+controller_overrides: []
 session_timeout_ms: 1000
 activation_timeout_ms: 5000
-controller_heartbeat_period_ms: 250
 observer_heartbeat_period_ms: 250
-tick_retry_initial_ms: 5
-tick_retry_backoff_multiplier: 2.0
-tick_retry_max_delay_ms: 20
-tick_retry_max_attempts: 3
-allow_timed_out_adapter_replacement: true
 status_period_ms: 100
 status_min_interval_ms: 20
 observer_max_rate_hz: 500
@@ -75,6 +84,10 @@ allow_every_step_observer: false
 transport_subscriber_sample_period_ms: 1000
 sensor_subscriber_sample_period_ms: 200
 log_summary_period_ms: 1000
+log_level: info
+log_file: ""
+log_file_max_size_mb: 10
+log_file_max_files: 5
 headless: false
 render_backend: auto
 sensor_streams: []
@@ -82,17 +95,19 @@ sensor_streams: []
 
 YAML 中的相对路径按配置文件所在目录解析，CLI 路径按进程当前目录解析。使用
 `mujoco-sim-server --config server.yaml` 加载配置；`--model`、`--initial-keyframe`、
-`--server-name`、`--max-ticks`、`--tick-timeout-ms`、`--session-timeout-ms`、`--activation-timeout-ms` 和
-同名超时 adapter 替换开关可以覆盖对应 YAML 字段。默认启动 MuJoCo 官方
+`--server-name`、`--max-ticks` 和 `--activation-timeout-ms` 可以覆盖对应 YAML 字段；
+`--log-level`、`--log-file`、`--log-file-max-size-mb`、`--log-file-max-files` 及
+`--log-summary-period-ms` 也有 CLI 覆盖。其余未声明 CLI flag 的运行策略必须写入 YAML。
+默认启动 MuJoCo 官方
 `simulate` 图形界面；远程服务、CI 或无显示环境使用 `--headless`，该模式不会初始化
 GLFW viewer。若配置 camera Stream，sensor worker 仍会初始化 EGL 或 OSMesa offscreen
 OpenGL context。若 YAML 设置了 `headless: true`，可用 `--gui` 在命令行恢复图形模式。
 
 图形界面读取 Core 生成的隔离快照，支持官方相机旋转、平移、缩放、左右侧栏、
 渲染选项、传感器和性能面板。UI 不持有也不会修改真实 `mjModel/mjData`，控制器所有权
-和 Tick/Commit Barrier 行为在 GUI 与 headless 模式下完全一致。
+和异步 State/Command 行为在 GUI 与 headless 模式下完全一致。
 
-## Protocol V3 运行示例
+## Protocol V4 运行示例
 
 打开两个终端，并确保当前目录都是仓库根目录。终端 1 先启动 server：
 
@@ -122,9 +137,9 @@ mujoco-sim-server \
   --model core/mujoco_sim_core/test/testdata/simple_actuator.xml
 ```
 
-adapter 处理 5 个 Tick 后会尽力注销并退出，server 继续自主运行，使用 Ctrl-C 或关闭 GUI
+adapter 处理 5 个 State 后会尽力注销并退出，server 继续自主运行，使用 Ctrl-C 或关闭 GUI
 结束 server。若配置非零 `max_ticks`，它统计 server 启动以来的全部 `mj_step()`，包括 adapter
-注册前、注销后以及空 Barrier 的步进，因此不能把它当作某个 adapter 的处理 Tick 数。
+注册前和注销后的步进，因此不能把它当作某个 adapter 的 State 数。
 
 在 server 运行期间，可从第三个终端查询默认 server 的状态和模型资源：
 
@@ -137,16 +152,22 @@ mujoco-sim-status --server-name default --json
 ```
 
 `mujoco-sim-status` 默认收到一条有效 `ServerStatus` 后退出；统一 Adapter 表区分
-Controller/Observer，并保留 Controller 的 Commit/Barrier 诊断；Sensor Stream 表显示
+Controller/Observer，并显示 Controller 的异步会话状态；Sensor Stream 表显示
 subscriber、capture/publish/drop/error/blocking 指标。`--watch` 按
 指定间隔持续输出，断线后报告 stale 并等待同名 server 恢复。`--json --watch` 输出
 NDJSON，诊断信息始终写入 stderr。
 
-server 是唯一物理状态所有者。每个 Tick 打开时固定该 Tick 的 Barrier 集合；运行期新激活的
-adapter 从下一 Tick 加入。某个 adapter 超时或提交非法命令只隔离该 controller、清零其
-actuator 并让其余 Barrier 继续，不再把整个 server 置为错误暂停。server 会继续为
-`TIMED_OUT` adapter 生成 Tick 并尝试发布；一份合法 Commit 只作为恢复证明，它从下一 Tick
-才重新成为 `ACTIVE` Barrier 成员。
+Server 默认每 1000 ms 输出一次 `event=server_summary` 基本运行统计。字段
+`realtime_factor_rate` 是相邻两次汇总之间的仿真时间增量除以 steady-clock wall time
+增量，即 `delta simulation time / delta wall time`；它表示实际仿真推进倍率，不是配置的
+目标值；`step_rate_hz` 是同一窗口的 `interval_steps / interval_wall_s`。
+`target_realtime_factor` 单独记录 `realtime_factor` 配置；在 `unthrottled` 模式下实际倍率
+可以远高于该值。通过 `log_summary_period_ms` 调整周期，设为 `0` 可完全关闭周期汇总。
+
+server 是唯一物理状态所有者。Controller 激活后从下一次 cadence 到期的 completed Step
+接收首帧 State。超过 command timeout 后会进入 `OFFLINE`，但 Server 继续 Step 和发布 State；
+下一条有效 Command 会立即恢复 `ONLINE`。非法、stale 或 duplicate Command 仅被拒绝，不刷新
+liveness，也不会把会话置为 `ERROR`。
 
 ## WBR LQR Demo
 
@@ -170,13 +191,13 @@ mujoco-sim-wbr-lqr-adapter \
 
 随附 adapter YAML 的 `max_ticks: 0` 表示无限运行；这里也把 server 的全局 `max_ticks`
 覆盖为 `0`，因此正常交互运行需由操作者分别结束 adapter 和 server。需要有限验收时，
-使用 adapter 的 `--ticks` 设置本地 `ACTIVE` Tick 上限，不要把 server 的启动总 step 上限
+使用 adapter 的 `--ticks` 设置本地 State 上限，不要把 server 的启动总 step 上限
 当作 adapter 预算。21 个 state resource 和 6 个 command resource 均可在 adapter YAML
 中改名；控制器仍按六个固定语义槽位执行上游 LQR/FSM 逻辑。
 
 ## Sensor / Mapping Demo
 
-该 Demo 启动一个 Server 和四个独立 eCAL 进程，完成房间周界一圈控制、非 Barrier 状态
+该 Demo 启动一个 Server 和四个独立 eCAL 进程，完成房间周界一圈控制、异步状态
 Observer、四类 camera 流消费，以及 16 线 LiDAR + IMU 的 PCL ICP 建图：
 
 ```bash

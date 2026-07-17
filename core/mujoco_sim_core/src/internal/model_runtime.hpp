@@ -35,14 +35,13 @@ class ModelRuntime {
     std::unique_ptr<mjData_, DataDeleter> data;
   };
 
-  static std::optional<PreparedModel> Prepare(
-      const std::string& model_path, const ModelLoadOptions& options,
-      std::string* error_message);
+  static std::optional<PreparedModel> Prepare(const std::string& model_path,
+                                              const ModelLoadOptions& options,
+                                              std::string* error_message);
 
   void Commit(PreparedModel prepared);
   bool loaded() const noexcept;
-  void ApplyActuatorWrites(
-      const std::vector<ValidatedActuatorWrite>& writes);
+  void ApplyActuatorWrites(const std::vector<ValidatedActuatorWrite>& writes);
   void ZeroActuators(const std::vector<int>& actuator_ids);
   void ZeroAllControls();
   void Step();

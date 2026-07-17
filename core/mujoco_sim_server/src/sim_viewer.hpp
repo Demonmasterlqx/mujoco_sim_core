@@ -6,7 +6,7 @@
 namespace mujoco_sim::core {
 class SimulationCore;
 class SimulationSnapshot;
-}
+}  // namespace mujoco_sim::core
 
 namespace mujoco_sim::server {
 
@@ -20,11 +20,9 @@ class SimViewer {
 
   bool Initialize(std::string* error_message);
   bool QueueLoad(mujoco_sim::core::SimulationSnapshot& snapshot,
-                 const std::string& displayed_filename,
-                 std::string* error_message);
+                 const std::string& displayed_filename, std::string* error_message);
   bool Synchronize(mujoco_sim::core::SimulationCore& core,
-                   mujoco_sim::core::SimulationSnapshot& snapshot,
-                   std::string* error_message);
+                   mujoco_sim::core::SimulationSnapshot& snapshot, std::string* error_message);
   void RenderLoop();
   void RequestScreenshot();
   void RequestClose();

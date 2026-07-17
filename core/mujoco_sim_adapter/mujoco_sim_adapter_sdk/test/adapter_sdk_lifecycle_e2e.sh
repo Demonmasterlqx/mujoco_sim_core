@@ -22,7 +22,6 @@ env -u DISPLAY -u WAYLAND_DISPLAY "${server_bin}" \
   --server-name "${instance_name}" \
   --model "${model_path}" \
   --max-ticks 0 \
-  --tick-timeout-ms 50 \
   --activation-timeout-ms 1000 \
   --log-level debug \
   >"${work_dir}/server.out" 2>"${work_dir}/server.err" &
@@ -30,8 +29,7 @@ server_pid="$!"
 
 timeout 12s "${probe_bin}" "${instance_name}"
 
-for event in adapter_registered adapter_activated \
-             adapter_timed_out adapter_recovery_pending \
+for event in adapter_registered adapter_activated adapter_timed_out \
              adapter_recovered adapter_unregistered; do
   if ! grep -Fq "event=${event}" "${work_dir}/server.err"; then
     echo "server log is missing event=${event}" >&2

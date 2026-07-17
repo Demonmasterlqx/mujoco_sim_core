@@ -26,20 +26,15 @@ class AdapterSession {
  public:
   ClientPhase phase() const { return phase_; }
   bool started() const {
-    return phase_ == ClientPhase::kProvisional ||
-           phase_ == ClientPhase::kActivating ||
+    return phase_ == ClientPhase::kProvisional || phase_ == ClientPhase::kActivating ||
            phase_ == ClientPhase::kActive;
   }
   bool active() const { return phase_ == ClientPhase::kActive; }
-  bool accepting_data() const {
-    return phase_ == ClientPhase::kActivating || active();
-  }
+  bool accepting_data() const { return phase_ == ClientPhase::kActivating || active(); }
   bool has_session() const { return has_session_; }
   const SessionIdentity& identity() const { return identity_; }
   bool stopped() const { return phase_ == ClientPhase::kStopped; }
-  bool terminal_error() const {
-    return phase_ == ClientPhase::kTerminalError;
-  }
+  bool terminal_error() const { return phase_ == ClientPhase::kTerminalError; }
 
   bool Registered(SessionIdentity identity) {
     identity_ = identity;

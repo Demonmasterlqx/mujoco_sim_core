@@ -2,7 +2,7 @@ version: 1
 namespace: mujoco_sim::wbr_lqr_demo::generated
 name: WbrConfig
 program: mujoco-sim-wbr-lqr-adapter
-description: Run the synchronous WBR LQR controller adapter
+description: Run the asynchronous WBR LQR controller adapter
 fields:
   adapter:
     type: object
@@ -17,21 +17,6 @@ fields:
         default: wbr_lqr_controller
         non_empty: true
         cli: [--adapter-id]
-      commit_timeout_ms:
-        type: uint32
-        default: 5000
-        min: 1
-        cli: [--commit-timeout-ms]
-      session_timeout_ms:
-        type: uint32
-        default: 5000
-        min: 300
-        cli: [--session-timeout-ms]
-      heartbeat_period_ms:
-        type: uint32
-        default: 250
-        min: 1
-        cli: [--heartbeat-period-ms]
       service_timeout_ms:
         type: uint32
         default: 10000

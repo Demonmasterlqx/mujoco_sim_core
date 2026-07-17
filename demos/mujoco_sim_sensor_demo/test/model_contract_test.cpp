@@ -39,9 +39,7 @@ class TemporaryModelFile {
   explicit TemporaryModelFile(const std::string& contents)
       : path_(std::filesystem::temp_directory_path() /
               ("mujoco_sim_closed_roof_" +
-               std::to_string(std::chrono::steady_clock::now()
-                                  .time_since_epoch()
-                                  .count()) +
+               std::to_string(std::chrono::steady_clock::now().time_since_epoch().count()) +
                ".xml")) {
     std::ofstream output(path_);
     output << contents;
@@ -68,22 +66,18 @@ struct ArenaBounds {
 
 using FootprintPoint = std::array<double, 2>;
 
-std::vector<FootprintPoint> ClipFootprint(
-    const std::vector<FootprintPoint>& polygon, int axis, double boundary,
-    bool keep_greater) {
+std::vector<FootprintPoint> ClipFootprint(const std::vector<FootprintPoint>& polygon, int axis,
+                                          double boundary, bool keep_greater) {
   std::vector<FootprintPoint> clipped;
   if (polygon.empty()) return clipped;
   const auto inside = [=](const FootprintPoint& point) {
     return keep_greater ? point[axis] >= boundary : point[axis] <= boundary;
   };
-  const auto intersection = [=](const FootprintPoint& first,
-                                const FootprintPoint& second) {
-    const double fraction =
-        (boundary - first[axis]) / (second[axis] - first[axis]);
+  const auto intersection = [=](const FootprintPoint& first, const FootprintPoint& second) {
+    const double fraction = (boundary - first[axis]) / (second[axis] - first[axis]);
     FootprintPoint point = first;
     point[axis] = boundary;
-    point[1 - axis] +=
-        fraction * (second[1 - axis] - first[1 - axis]);
+    point[1 - axis] += fraction * (second[1 - axis] - first[1 - axis]);
     return point;
   };
 
@@ -101,8 +95,7 @@ std::vector<FootprintPoint> ClipFootprint(
   return clipped;
 }
 
-double ArenaOverlapArea(const std::array<FootprintPoint, 4>& footprint,
-                        const ArenaBounds& arena) {
+double ArenaOverlapArea(const std::array<FootprintPoint, 4>& footprint, const ArenaBounds& arena) {
   std::vector<FootprintPoint> polygon(footprint.begin(), footprint.end());
   polygon = ClipFootprint(polygon, 0, arena.min_x, true);
   polygon = ClipFootprint(polygon, 0, arena.max_x, false);
@@ -119,8 +112,8 @@ double ArenaOverlapArea(const std::array<FootprintPoint, 4>& footprint,
   return 0.5 * std::abs(twice_area);
 }
 
-bool IsLargeOverheadCover(const mjModel* model, const mjData* data,
-                          int geom_id, const ArenaBounds& arena) {
+bool IsLargeOverheadCover(const mjModel* model, const mjData* data, int geom_id,
+                          const ArenaBounds& arena) {
   const int body_id = model->geom_bodyid[geom_id];
   if (model->body_weldid[body_id] != 0) return false;
 
@@ -138,8 +131,7 @@ bool IsLargeOverheadCover(const mjModel* model, const mjData* data,
 
   int vertical_axis = 0;
   for (int axis = 1; axis < 3; ++axis) {
-    if (std::abs(rotation[6 + axis]) >
-        std::abs(rotation[6 + vertical_axis])) {
+    if (std::abs(rotation[6 + axis]) > std::abs(rotation[6 + vertical_axis])) {
       vertical_axis = axis;
     }
   }
@@ -156,17 +148,14 @@ bool IsLargeOverheadCover(const mjModel* model, const mjData* data,
       footprint_axes[footprint_axis_count++] = axis;
     }
   }
-  if (center_z - vertical_half_extent <=
-      arena.floor_top_z + kFloorSeparationTolerance) {
+  if (center_z - vertical_half_extent <= arena.floor_top_z + kFloorSeparationTolerance) {
     return false;
   }
 
   const int first_axis = footprint_axes[0];
   const int second_axis = footprint_axes[1];
-  const double first_half_size =
-      model->geom_size[3 * geom_id + first_axis];
-  const double second_half_size =
-      model->geom_size[3 * geom_id + second_axis];
+  const double first_half_size = model->geom_size[3 * geom_id + first_axis];
+  const double second_half_size = model->geom_size[3 * geom_id + second_axis];
   const double center_x = data->geom_xpos[3 * geom_id];
   const double center_y = data->geom_xpos[3 * geom_id + 1];
   const double first_x = rotation[first_axis] * first_half_size;
@@ -179,14 +168,12 @@ bool IsLargeOverheadCover(const mjModel* model, const mjData* data,
       {center_x + first_x + second_x, center_y + first_y + second_y},
       {center_x - first_x + second_x, center_y - first_y + second_y},
   }};
-  const double arena_area =
-      (arena.max_x - arena.min_x) * (arena.max_y - arena.min_y);
+  const double arena_area = (arena.max_x - arena.min_x) * (arena.max_y - arena.min_y);
   const double projected_footprint_area =
       4.0 * first_half_size * second_half_size * vertical_normal;
   constexpr double kMajorArenaFraction = 0.5;
   return projected_footprint_area >= kMajorArenaFraction * arena_area &&
-         ArenaOverlapArea(footprint, arena) >=
-             kMajorArenaFraction * arena_area;
+         ArenaOverlapArea(footprint, arena) >= kMajorArenaFraction * arena_area;
 }
 
 }  // namespace
@@ -205,12 +192,10 @@ TEST(ModelContractTest, RoofDetectorRejectsRenamedArenaCoverAtWallTop) {
 )");
   ModelHandle model(file.path());
   ASSERT_NE(model.get(), nullptr) << model.error();
-  std::unique_ptr<mjData, decltype(&mj_deleteData)> data(
-      mj_makeData(model.get()), mj_deleteData);
+  std::unique_ptr<mjData, decltype(&mj_deleteData)> data(mj_makeData(model.get()), mj_deleteData);
   ASSERT_NE(data, nullptr);
   mj_forward(model.get(), data.get());
-  const int roof =
-      mj_name2id(model.get(), mjOBJ_GEOM, "weather_shield");
+  const int roof = mj_name2id(model.get(), mjOBJ_GEOM, "weather_shield");
   ASSERT_GE(roof, 0);
   const ArenaBounds arena{-6.0, 6.0, -4.0, 4.0, 0.0};
   EXPECT_TRUE(IsLargeOverheadCover(model.get(), data.get(), roof, arena));
@@ -230,8 +215,7 @@ TEST(ModelContractTest, RoofDetectorRejectsCoverBelowWallTop) {
 )");
   ModelHandle model(file.path());
   ASSERT_NE(model.get(), nullptr) << model.error();
-  std::unique_ptr<mjData, decltype(&mj_deleteData)> data(
-      mj_makeData(model.get()), mj_deleteData);
+  std::unique_ptr<mjData, decltype(&mj_deleteData)> data(mj_makeData(model.get()), mj_deleteData);
   ASSERT_NE(data, nullptr);
   mj_forward(model.get(), data.get());
   const int roof = mj_name2id(model.get(), mjOBJ_GEOM, "low_shield");
@@ -251,8 +235,7 @@ TEST(ModelContractTest, RoofDetectorDoesNotTreatRotatedBeamAsArenaCover) {
 )");
   ModelHandle model(file.path());
   ASSERT_NE(model.get(), nullptr) << model.error();
-  std::unique_ptr<mjData, decltype(&mj_deleteData)> data(
-      mj_makeData(model.get()), mj_deleteData);
+  std::unique_ptr<mjData, decltype(&mj_deleteData)> data(mj_makeData(model.get()), mj_deleteData);
   ASSERT_NE(data, nullptr);
   mj_forward(model.get(), data.get());
   const int beam = mj_name2id(model.get(), mjOBJ_GEOM, "diagonal_beam");
@@ -262,8 +245,7 @@ TEST(ModelContractTest, RoofDetectorDoesNotTreatRotatedBeamAsArenaCover) {
 }
 
 TEST(ModelContractTest, RoomVehicleCameraAndLidarSourcesAreNamedAndStable) {
-  const std::filesystem::path scene =
-      std::filesystem::path(SENSOR_DEMO_MJCF_DIR) / "scene.xml";
+  const std::filesystem::path scene = std::filesystem::path(SENSOR_DEMO_MJCF_DIR) / "scene.xml";
   ModelHandle model(scene);
   ASSERT_NE(model.get(), nullptr) << model.error();
   EXPECT_DOUBLE_EQ(model.get()->opt.timestep, 0.01);
@@ -282,65 +264,46 @@ TEST(ModelContractTest, RoomVehicleCameraAndLidarSourcesAreNamedAndStable) {
   ASSERT_GE(south, 0);
   ASSERT_GE(north, 0);
   ASSERT_GE(floor, 0);
-  EXPECT_DOUBLE_EQ(model.get()->geom_pos[3 * west] +
-                       model.get()->geom_size[3 * west],
-                   -6.0);
-  EXPECT_DOUBLE_EQ(model.get()->geom_pos[3 * east] -
-                       model.get()->geom_size[3 * east],
-                   6.0);
-  EXPECT_DOUBLE_EQ(model.get()->geom_pos[3 * south + 1] +
-                       model.get()->geom_size[3 * south + 1],
+  EXPECT_DOUBLE_EQ(model.get()->geom_pos[3 * west] + model.get()->geom_size[3 * west], -6.0);
+  EXPECT_DOUBLE_EQ(model.get()->geom_pos[3 * east] - model.get()->geom_size[3 * east], 6.0);
+  EXPECT_DOUBLE_EQ(model.get()->geom_pos[3 * south + 1] + model.get()->geom_size[3 * south + 1],
                    -4.0);
-  EXPECT_DOUBLE_EQ(model.get()->geom_pos[3 * north + 1] -
-                       model.get()->geom_size[3 * north + 1],
+  EXPECT_DOUBLE_EQ(model.get()->geom_pos[3 * north + 1] - model.get()->geom_size[3 * north + 1],
                    4.0);
-  EXPECT_DOUBLE_EQ(model.get()->geom_pos[3 * floor + 2] +
-                       model.get()->geom_size[3 * floor + 2],
+  EXPECT_DOUBLE_EQ(model.get()->geom_pos[3 * floor + 2] + model.get()->geom_size[3 * floor + 2],
                    0.0);
 
   const std::array<int, 4> walls = {west, east, south, north};
-  const double wall_top_z = model.get()->geom_pos[3 * west + 2] +
-                            model.get()->geom_size[3 * west + 2];
+  const double wall_top_z =
+      model.get()->geom_pos[3 * west + 2] + model.get()->geom_size[3 * west + 2];
   for (const int wall : walls) {
-    EXPECT_DOUBLE_EQ(model.get()->geom_pos[3 * wall + 2] +
-                         model.get()->geom_size[3 * wall + 2],
+    EXPECT_DOUBLE_EQ(model.get()->geom_pos[3 * wall + 2] + model.get()->geom_size[3 * wall + 2],
                      wall_top_z);
   }
 
-  std::unique_ptr<mjData, decltype(&mj_deleteData)> data(
-      mj_makeData(model.get()), mj_deleteData);
+  std::unique_ptr<mjData, decltype(&mj_deleteData)> data(mj_makeData(model.get()), mj_deleteData);
   ASSERT_NE(data, nullptr);
   mj_forward(model.get(), data.get());
   ArenaBounds arena;
-  arena.min_x = model.get()->geom_pos[3 * west] +
-                model.get()->geom_size[3 * west];
-  arena.max_x = model.get()->geom_pos[3 * east] -
-                model.get()->geom_size[3 * east];
-  arena.min_y = model.get()->geom_pos[3 * south + 1] +
-                model.get()->geom_size[3 * south + 1];
-  arena.max_y = model.get()->geom_pos[3 * north + 1] -
-                model.get()->geom_size[3 * north + 1];
-  arena.floor_top_z = model.get()->geom_pos[3 * floor + 2] +
-                      model.get()->geom_size[3 * floor + 2];
+  arena.min_x = model.get()->geom_pos[3 * west] + model.get()->geom_size[3 * west];
+  arena.max_x = model.get()->geom_pos[3 * east] - model.get()->geom_size[3 * east];
+  arena.min_y = model.get()->geom_pos[3 * south + 1] + model.get()->geom_size[3 * south + 1];
+  arena.max_y = model.get()->geom_pos[3 * north + 1] - model.get()->geom_size[3 * north + 1];
+  arena.floor_top_z = model.get()->geom_pos[3 * floor + 2] + model.get()->geom_size[3 * floor + 2];
   for (int geom_id = 0; geom_id < model.get()->ngeom; ++geom_id) {
-    const char* geom_name =
-        mj_id2name(model.get(), mjOBJ_GEOM, geom_id);
-    EXPECT_FALSE(
-        IsLargeOverheadCover(model.get(), data.get(), geom_id, arena))
+    const char* geom_name = mj_id2name(model.get(), mjOBJ_GEOM, geom_id);
+    EXPECT_FALSE(IsLargeOverheadCover(model.get(), data.get(), geom_id, arena))
         << "static geom " << (geom_name == nullptr ? "<unnamed>" : geom_name)
         << " closes the open-top arena";
   }
 
   for (int index = 1; index <= 5; ++index) {
-    EXPECT_GE(mj_name2id(model.get(), mjOBJ_BODY,
-                         ("column_" + std::to_string(index)).c_str()),
-              0);
+    EXPECT_GE(mj_name2id(model.get(), mjOBJ_BODY, ("column_" + std::to_string(index)).c_str()), 0);
     for (int side = 0; side < 6; ++side) {
-      EXPECT_GE(mj_name2id(model.get(), mjOBJ_GEOM,
-                           ("column_" + std::to_string(index) + "_side_" +
-                            std::to_string(side))
-                               .c_str()),
-                0);
+      EXPECT_GE(
+          mj_name2id(model.get(), mjOBJ_GEOM,
+                     ("column_" + std::to_string(index) + "_side_" + std::to_string(side)).c_str()),
+          0);
     }
   }
   EXPECT_GE(mj_name2id(model.get(), mjOBJ_BODY, "base_link"), 0);
@@ -350,20 +313,24 @@ TEST(ModelContractTest, RoomVehicleCameraAndLidarSourcesAreNamedAndStable) {
 }
 
 TEST(ModelContractTest, ExposesExpectedSmallObservationsAndFourWheelCommands) {
-  const std::filesystem::path scene =
-      std::filesystem::path(SENSOR_DEMO_MJCF_DIR) / "scene.xml";
+  const std::filesystem::path scene = std::filesystem::path(SENSOR_DEMO_MJCF_DIR) / "scene.xml";
   ModelHandle model(scene);
   ASSERT_NE(model.get(), nullptr) << model.error();
   ASSERT_EQ(model.get()->nsensor, 12);
   ASSERT_EQ(model.get()->nu, 4);
 
-  const std::unordered_map<std::string, int> expected_dimensions = {
-      {"front_left_wheel_pos", 1},  {"front_left_wheel_vel", 1},
-      {"front_right_wheel_pos", 1}, {"front_right_wheel_vel", 1},
-      {"rear_left_wheel_pos", 1},   {"rear_left_wheel_vel", 1},
-      {"rear_right_wheel_pos", 1},  {"rear_right_wheel_vel", 1},
-      {"imu_accel", 3},             {"imu_gyro", 3},
-      {"imu_quat", 4},            {"base_position", 3}};
+  const std::unordered_map<std::string, int> expected_dimensions = {{"front_left_wheel_pos", 1},
+                                                                    {"front_left_wheel_vel", 1},
+                                                                    {"front_right_wheel_pos", 1},
+                                                                    {"front_right_wheel_vel", 1},
+                                                                    {"rear_left_wheel_pos", 1},
+                                                                    {"rear_left_wheel_vel", 1},
+                                                                    {"rear_right_wheel_pos", 1},
+                                                                    {"rear_right_wheel_vel", 1},
+                                                                    {"imu_accel", 3},
+                                                                    {"imu_gyro", 3},
+                                                                    {"imu_quat", 4},
+                                                                    {"base_position", 3}};
   for (const auto& [name, dimension] : expected_dimensions) {
     const int sensor = mj_name2id(model.get(), mjOBJ_SENSOR, name.c_str());
     ASSERT_GE(sensor, 0) << name;
@@ -371,11 +338,10 @@ TEST(ModelContractTest, ExposesExpectedSmallObservationsAndFourWheelCommands) {
   }
 
   const std::array<std::string, 4> commands = {
-      "front_left_wheel_actuator", "front_right_wheel_actuator",
-      "rear_left_wheel_actuator", "rear_right_wheel_actuator"};
+      "front_left_wheel_actuator", "front_right_wheel_actuator", "rear_left_wheel_actuator",
+      "rear_right_wheel_actuator"};
   for (std::size_t index = 0; index < commands.size(); ++index) {
-    const int actuator =
-        mj_name2id(model.get(), mjOBJ_ACTUATOR, commands[index].c_str());
+    const int actuator = mj_name2id(model.get(), mjOBJ_ACTUATOR, commands[index].c_str());
     ASSERT_EQ(actuator, static_cast<int>(index));
     EXPECT_TRUE(model.get()->actuator_ctrllimited[actuator]);
     EXPECT_DOUBLE_EQ(model.get()->actuator_ctrlrange[2 * actuator], -12.0);
@@ -384,8 +350,7 @@ TEST(ModelContractTest, ExposesExpectedSmallObservationsAndFourWheelCommands) {
 }
 
 TEST(ModelContractTest, CoreCatalogMatchesModelAndServerStreamCatalog) {
-  const std::filesystem::path scene =
-      std::filesystem::path(SENSOR_DEMO_MJCF_DIR) / "scene.xml";
+  const std::filesystem::path scene = std::filesystem::path(SENSOR_DEMO_MJCF_DIR) / "scene.xml";
   mujoco_sim::core::SimulationCore core;
   std::string error;
   const auto model_load = core.LoadModel(scene.string());
@@ -398,9 +363,8 @@ TEST(ModelContractTest, CoreCatalogMatchesModelAndServerStreamCatalog) {
   ASSERT_NE(snapshot, nullptr) << error;
 
   mujoco_sim::server::ServerConfig server_config;
-  ASSERT_TRUE(mujoco_sim::server::LoadConfigFile(
-      SENSOR_DEMO_CONFIG_DIR "/sensor_demo_server.yaml", &server_config,
-      &error))
+  ASSERT_TRUE(mujoco_sim::server::LoadConfigFile(SENSOR_DEMO_CONFIG_DIR "/sensor_demo_server.yaml",
+                                                 &server_config, &error))
       << error;
   EXPECT_EQ(server_config.sensor_streams.size(), 5U);
   EXPECT_FALSE(server_config.headless);

@@ -18,14 +18,13 @@ namespace {
 std::uint64_t ReadWord(std::string_view bytes, std::size_t offset) {
   std::uint64_t value = 0;
   for (std::size_t index = 0; index < 8; ++index) {
-    value |= static_cast<std::uint64_t>(
-                 static_cast<unsigned char>(bytes[offset + index]))
+    value |= static_cast<std::uint64_t>(static_cast<unsigned char>(bytes[offset + index]))
              << (8U * index);
   }
   return value;
 }
 
-ResourceInfo MapResource(const mujoco_sim::v3::ResourceSlot& slot) {
+ResourceInfo MapResource(const mujoco_sim::v4::ResourceSlot& slot) {
   ResourceInfo result;
   result.name = slot.resource().name();
   result.scalars = {slot.scalar_offset(), slot.resource().dimension()};
@@ -50,7 +49,9 @@ double ObservationLease::simulation_time_s() const noexcept {
 std::span<const double> ObservationLease::observations() const noexcept {
   return data_ ? std::span<const double>(data_->scalars) : std::span<const double>{};
 }
-ObservationLease::operator bool() const noexcept { return data_ != nullptr; }
+ObservationLease::operator bool() const noexcept {
+  return data_ != nullptr;
+}
 
 ObserverClient::Impl::Impl(ObserverOptions options)
     : options_(std::move(options)), callback_state_(std::make_shared<CallbackState>()) {
@@ -73,11 +74,10 @@ bool ObserverClient::Impl::ValidateOptions(std::string* error) const {
     return false;
   }
   if (!mujoco_sim::protocol::ValidateIdentifier(
-          options_.server_name, mujoco_sim::protocol::IdentifierKind::kServer,
-          error) ||
+          options_.server_name, mujoco_sim::protocol::IdentifierKind::kServer, error) ||
       !mujoco_sim::protocol::ValidateIdentifier(
-          options_.observer_id, mujoco_sim::protocol::IdentifierKind::kAdapter,
-          error)) return false;
+          options_.observer_id, mujoco_sim::protocol::IdentifierKind::kAdapter, error))
+    return false;
   if (options_.observation_names.empty() || options_.session_timeout_ms == 0 ||
       options_.heartbeat_period_ms < 100 ||
       options_.heartbeat_period_ms > options_.session_timeout_ms / 3 ||
@@ -90,8 +90,7 @@ bool ObserverClient::Impl::ValidateOptions(std::string* error) const {
     return false;
   }
   if ((options_.every_n_steps && *options_.every_n_steps == 0) ||
-      (options_.period_s &&
-       (!std::isfinite(*options_.period_s) || *options_.period_s <= 0.0))) {
+      (options_.period_s && (!std::isfinite(*options_.period_s) || *options_.period_s <= 0.0))) {
     *error = "observer delivery cadence must be positive";
     return false;
   }
@@ -114,15 +113,15 @@ bool ObserverClient::Impl::Start(std::string* error) {
     return false;
   }
   if (!ValidateOptions(error)) return false;
-  ecal_runtime_ = internal::AcquireEcalRuntime(
-      "mujoco-sim-observer-" + options_.observer_id, error);
+  ecal_runtime_ =
+      internal::AcquireEcalRuntime("mujoco-sim-observer-" + options_.observer_id, error);
   if (!ecal_runtime_) return false;
   if (!transport_) {
     transport_ = internal::MakeEcalAdapterTransport(
         options_.server_name, options_.service_timeout_ms, &stop_requested_, false);
   }
-  if (!Register(error) || !StartObservationReception(error) ||
-      !FinishStart(error) || !StartHeartbeat(error)) {
+  if (!Register(error) || !StartObservationReception(error) || !FinishStart(error) ||
+      !StartHeartbeat(error)) {
     AbortStart();
     return false;
   }
@@ -130,17 +129,18 @@ bool ObserverClient::Impl::Start(std::string* error) {
 }
 
 bool ObserverClient::Impl::Register(std::string* error) {
-  mujoco_sim::v3::RegisterAdapterRequest request;
+  mujoco_sim::v4::RegisterAdapterRequest request;
   request.set_adapter_id(options_.observer_id);
-  request.set_role(mujoco_sim::v3::OBSERVER);
+  request.set_role(mujoco_sim::v4::OBSERVER);
   request.set_session_timeout_ms(options_.session_timeout_ms);
-  for (const auto& name : options_.observation_names) request.add_observation_names(name);
+  for (const auto& name : options_.observation_names)
+    request.add_observation_names(name);
   if (options_.every_n_steps)
     request.mutable_delivery()->set_every_n_steps(*options_.every_n_steps);
   else
     request.mutable_delivery()->set_period_s(*options_.period_s);
   if (!transport_->Register(request, &wire_registration_, error)) return false;
-  if (wire_registration_.code() != mujoco_sim::v3::OK) {
+  if (wire_registration_.code() != mujoco_sim::v4::OK) {
     *error = wire_registration_.message();
     return false;
   }
@@ -155,21 +155,21 @@ bool ObserverClient::Impl::Register(std::string* error) {
 
 bool ObserverClient::Impl::ValidateRegistration(std::string* error) {
   const auto& wire = wire_registration_;
-  if (wire.adapter_id() != options_.observer_id ||
-      wire.role() != mujoco_sim::v3::OBSERVER || wire.session_id() == 0 ||
-      wire.epoch() == 0 || wire.state() != mujoco_sim::v3::PROVISIONAL ||
+  if (wire.adapter_id() != options_.observer_id || wire.role() != mujoco_sim::v4::OBSERVER ||
+      wire.session_id() == 0 || wire.epoch() == 0 || wire.state() != mujoco_sim::v4::PROVISIONAL ||
       !mujoco_sim::protocol::ValidateLayoutHash(wire.layout(), error) ||
       wire.layout().command_scalar_count() != 0) {
     if (error->empty()) *error = "invalid observer registration response";
     return false;
   }
   std::vector<ResourceInfo> observations;
-  for (const auto& slot : wire.layout().observations()) observations.push_back(MapResource(slot));
+  for (const auto& slot : wire.layout().observations())
+    observations.push_back(MapResource(slot));
   registration_.adapter_id = wire.adapter_id();
   registration_.session_id = wire.session_id();
   registration_.epoch = wire.epoch();
-  registration_.layout = ControllerLayout(
-      std::move(observations), {}, wire.layout().observation_scalar_count(), 0);
+  registration_.layout =
+      ControllerLayout(std::move(observations), {}, wire.layout().observation_scalar_count(), 0);
   layout_fingerprint_ = {ReadWord(wire.layout().layout_fingerprint(), 0),
                          ReadWord(wire.layout().layout_fingerprint(), 8)};
   return true;
@@ -215,16 +215,16 @@ bool ObserverClient::Impl::Activate(std::string* error) {
     *error = "observer activation was cancelled";
     return false;
   }
-  mujoco_sim::v3::ActivateAdapterRequest request;
+  mujoco_sim::v4::ActivateAdapterRequest request;
   request.set_session_id(session_.identity().session_id);
   request.set_epoch(session_.identity().epoch);
   {
     std::lock_guard lock(mutex_);
     session_.BeginActivation();
   }
-  mujoco_sim::v3::ActivateAdapterResponse response;
+  mujoco_sim::v4::ActivateAdapterResponse response;
   const bool called = transport_->Activate(request, &response, error);
-  if (!called || response.code() != mujoco_sim::v3::OK) {
+  if (!called || response.code() != mujoco_sim::v4::OK) {
     if (called) *error = response.message();
     std::lock_guard lock(mutex_);
     session_.ActivationRejected();
@@ -249,9 +249,9 @@ bool ObserverClient::Impl::WaitBeforeActivation(std::chrono::milliseconds delay)
   return !stop_requested_;
 }
 
-ObservationWaitResult ObserverClient::Impl::WaitForObservation(
-    std::chrono::milliseconds timeout, ObservationLease* frame,
-    std::string* error) {
+ObservationWaitResult ObserverClient::Impl::WaitForObservation(std::chrono::milliseconds timeout,
+                                                               ObservationLease* frame,
+                                                               std::string* error) {
   if (frame == nullptr || error == nullptr || timeout.count() < 0) {
     if (error) *error = "frame, error_message, and timeout must be valid";
     return ObservationWaitResult::kError;
@@ -295,23 +295,22 @@ bool ObserverClient::Impl::Unregister(std::string* error) {
 bool ObserverClient::Impl::UnregisterSession(std::string* error) {
   if (error == nullptr) return false;
   error->clear();
-  mujoco_sim::v3::UnregisterAdapterRequest request;
+  mujoco_sim::v4::UnregisterAdapterRequest request;
   {
     std::lock_guard lock(mutex_);
     if (!session_.has_session()) return true;
     request.set_session_id(session_.identity().session_id);
     request.set_epoch(session_.identity().epoch);
   }
-  mujoco_sim::v3::UnregisterAdapterResponse response;
+  mujoco_sim::v4::UnregisterAdapterResponse response;
   if (!transport_ || !transport_->Unregister(request, &response, error)) return false;
   return CompleteUnregister(response, error);
 }
 
 bool ObserverClient::Impl::CompleteUnregister(
-    const mujoco_sim::v3::UnregisterAdapterResponse& response, std::string* error) {
-  if (response.code() != mujoco_sim::v3::OK &&
-      response.code() != mujoco_sim::v3::NOT_FOUND &&
-      response.code() != mujoco_sim::v3::INVALID_SESSION) {
+    const mujoco_sim::v4::UnregisterAdapterResponse& response, std::string* error) {
+  if (response.code() != mujoco_sim::v4::OK && response.code() != mujoco_sim::v4::NOT_FOUND &&
+      response.code() != mujoco_sim::v4::INVALID_SESSION) {
     *error = response.message();
     return false;
   }
@@ -361,16 +360,29 @@ ObserverClient::~ObserverClient() {
   std::string ignored;
   impl_->Unregister(&ignored);
 }
-bool ObserverClient::Start(std::string* error) { return impl_->Start(error); }
-bool ObserverClient::Activate(std::string* error) { return impl_->Activate(error); }
-ObservationWaitResult ObserverClient::WaitForObservation(
-    std::chrono::milliseconds timeout, ObservationLease* frame, std::string* error) {
+bool ObserverClient::Start(std::string* error) {
+  return impl_->Start(error);
+}
+bool ObserverClient::Activate(std::string* error) {
+  return impl_->Activate(error);
+}
+ObservationWaitResult ObserverClient::WaitForObservation(std::chrono::milliseconds timeout,
+                                                         ObservationLease* frame,
+                                                         std::string* error) {
   return impl_->WaitForObservation(timeout, frame, error);
 }
-void ObserverClient::Stop() { impl_->Stop(); }
-bool ObserverClient::Unregister(std::string* error) { return impl_->Unregister(error); }
-std::uint64_t ObserverClient::dropped_frames() const { return impl_->dropped_frames(); }
-std::string ObserverClient::lifecycle_warning() const { return impl_->lifecycle_warning(); }
+void ObserverClient::Stop() {
+  impl_->Stop();
+}
+bool ObserverClient::Unregister(std::string* error) {
+  return impl_->Unregister(error);
+}
+std::uint64_t ObserverClient::dropped_frames() const {
+  return impl_->dropped_frames();
+}
+std::string ObserverClient::lifecycle_warning() const {
+  return impl_->lifecycle_warning();
+}
 const AdapterRegistration& ObserverClient::registration() const {
   return impl_->registration_;
 }

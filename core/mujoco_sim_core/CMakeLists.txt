@@ -33,23 +33,11 @@ else()
 endif()
 
 add_library(${PROJECT_NAME}
-  src/internal/adapter_lifecycle.cpp
-  src/internal/adapter_registration.cpp
-  src/internal/adapter_registry.cpp
-  src/internal/barrier_coordinator.cpp
-  src/internal/controller_state_machine.cpp
-  src/internal/commit_engine.cpp
-  src/internal/engine_effects.cpp
-  src/internal/lockstep_engine.cpp
+  src/internal/layout_fingerprint.cpp
   src/internal/model_runtime.cpp
-  src/internal/observation_scheduler.cpp
   src/internal/resource_catalog.cpp
-  src/internal/simulation_engine_model.cpp
   src/internal/snapshot_manager.cpp
-  src/internal/status_projection.cpp
-  src/internal/tick_store.cpp
   src/simulation_core.cpp
-  src/simulation_core_facade.cpp
 )
 add_library(mujoco_sim::core ALIAS ${PROJECT_NAME})
 
@@ -109,8 +97,7 @@ include(CTest)
 if(BUILD_TESTING)
   find_package(GTest REQUIRED)
   add_executable(core_test
-    test/controller_state_machine_test.cpp
-    test/simulation_core_test.cpp
+    test/async_simulation_core_test.cpp
   )
   target_include_directories(core_test PRIVATE src)
   target_link_libraries(core_test PRIVATE

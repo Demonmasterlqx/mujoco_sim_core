@@ -23,12 +23,12 @@ void SensorRuntime::OnStepCompleted(core::SimulationCore&) {}
 void SensorRuntime::CompleteBlockingEnqueues(std::stop_token) {}
 void SensorRuntime::RequestStop() {}
 void SensorRuntime::Stop() {}
-mujoco_sim::v3::GetSensorStreamsResponse SensorRuntime::GetCatalog(
-    const mujoco_sim::v3::GetSensorStreamsRequest&) const {
-  mujoco_sim::v3::GetSensorStreamsResponse response;
-  response.set_code(mujoco_sim::v3::OK);
+mujoco_sim::v4::GetSensorStreamsResponse SensorRuntime::GetCatalog(
+    const mujoco_sim::v4::GetSensorStreamsRequest&) const {
+  mujoco_sim::v4::GetSensorStreamsResponse response;
+  response.set_code(mujoco_sim::v4::OK);
   return response;
 }
-void SensorRuntime::AppendStatus(mujoco_sim::v3::ServerStatus*) const {}
+void SensorRuntime::AppendStatus(mujoco_sim::v4::ServerStatus*) const {}
 
 }  // namespace mujoco_sim::server

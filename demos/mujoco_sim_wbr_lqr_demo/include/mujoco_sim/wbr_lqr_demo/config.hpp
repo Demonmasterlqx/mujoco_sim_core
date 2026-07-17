@@ -44,9 +44,6 @@ struct PipelineConfig {
 struct AdapterConfig {
   std::string server_name = "default";
   std::string adapter_id = "wbr_lqr_controller";
-  std::uint32_t commit_timeout_ms = 1000;
-  std::uint32_t session_timeout_ms = 1000;
-  std::uint32_t heartbeat_period_ms = 250;
   std::uint32_t service_timeout_ms = 5000;
   std::uint64_t max_ticks = 0;
   InterfaceConfig interfaces = MakeUpstreamWbrInterfaceConfig();

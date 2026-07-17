@@ -56,8 +56,7 @@ struct Projection {
     const double image_x = offset_x + (x - left) * scale;
     const double image_y = offset_y + (y - bottom) * scale;
     const int pixel_x = static_cast<int>(std::llround(image_x));
-    const int pixel_y = static_cast<int>(height - 1) -
-                        static_cast<int>(std::llround(image_y));
+    const int pixel_y = static_cast<int>(height - 1) - static_cast<int>(std::llround(image_y));
     return {pixel_x, pixel_y};
   }
 };
@@ -90,39 +89,32 @@ void RequireFinite(double value, const std::string& field) {
   }
 }
 
-void ValidateLeafFilename(const std::string& filename,
-                          const std::string& field) {
+void ValidateLeafFilename(const std::string& filename, const std::string& field) {
   const std::filesystem::path path(filename);
-  if (filename.empty() || path.is_absolute() || path.has_parent_path() ||
-      path.filename() != path || path == "." || path == "..") {
+  if (filename.empty() || path.is_absolute() || path.has_parent_path() || path.filename() != path ||
+      path == "." || path == "..") {
     throw MapOutputError(field + " must be a non-empty leaf filename");
   }
 }
 
-Bounds ValidateInputs(const std::filesystem::path& output_directory,
-                      const PointCloud& map,
-                      const MapperTrajectory& trajectory,
-                      const MapOutputConfig& config) {
+Bounds ValidateInputs(const std::filesystem::path& output_directory, const PointCloud& map,
+                      const MapperTrajectory& trajectory, const MapOutputConfig& config) {
   if (output_directory.empty()) {
     throw MapOutputError("output directory is empty");
   }
   ValidateLeafFilename(config.pcd_filename, "pcd_filename");
   ValidateLeafFilename(config.trajectory_filename, "trajectory_filename");
-  ValidateLeafFilename(config.top_down_png_filename,
-                       "top_down_png_filename");
+  ValidateLeafFilename(config.top_down_png_filename, "top_down_png_filename");
   if (config.pcd_filename == config.trajectory_filename ||
       config.pcd_filename == config.top_down_png_filename ||
       config.trajectory_filename == config.top_down_png_filename) {
     throw MapOutputError("output filenames must be distinct");
   }
   RequireFinite(config.padding_meters, "padding_meters");
-  if (config.padding_meters < 0.0 ||
-      config.image_width < kMinimumImageDimension ||
-      config.image_height < kMinimumImageDimension ||
-      config.image_width > kMaximumImageDimension ||
+  if (config.padding_meters < 0.0 || config.image_width < kMinimumImageDimension ||
+      config.image_height < kMinimumImageDimension || config.image_width > kMaximumImageDimension ||
       config.image_height > kMaximumImageDimension ||
-      config.image_width >
-          std::numeric_limits<std::size_t>::max() / config.image_height / 3) {
+      config.image_width > std::numeric_limits<std::size_t>::max() / config.image_height / 3) {
     throw MapOutputError("invalid top-down image configuration");
   }
   if (map.empty()) {
@@ -135,10 +127,8 @@ Bounds ValidateInputs(const std::filesystem::path& output_directory,
   Bounds bounds;
   for (std::size_t index = 0; index < map.size(); ++index) {
     const pcl::PointXYZ& point = map[index];
-    if (!std::isfinite(point.x) || !std::isfinite(point.y) ||
-        !std::isfinite(point.z)) {
-      throw MapOutputError("map contains a non-finite point at index " +
-                           std::to_string(index));
+    if (!std::isfinite(point.x) || !std::isfinite(point.y) || !std::isfinite(point.z)) {
+      throw MapOutputError("map contains a non-finite point at index " + std::to_string(index));
     }
     bounds.Include(point.x, point.y, point.z);
   }
@@ -146,10 +136,8 @@ Bounds ValidateInputs(const std::filesystem::path& output_directory,
   double previous_timestamp = 0.0;
   for (std::size_t index = 0; index < trajectory.size(); ++index) {
     const MapperTrajectoryPoint& point = trajectory[index];
-    RequireFinite(point.timestamp,
-                  "trajectory[" + std::to_string(index) + "].timestamp");
-    RequireFinite(point.fitness,
-                  "trajectory[" + std::to_string(index) + "].fitness");
+    RequireFinite(point.timestamp, "trajectory[" + std::to_string(index) + "].timestamp");
+    RequireFinite(point.fitness, "trajectory[" + std::to_string(index) + "].fitness");
     if (index > 0 && point.timestamp <= previous_timestamp) {
       throw MapOutputError("trajectory timestamps must increase strictly");
     }
@@ -186,17 +174,14 @@ Projection MakeProjection(Bounds bounds, const MapOutputConfig& config) {
 
   const double range_x = bounds.maximum_x - bounds.minimum_x;
   const double range_y = bounds.maximum_y - bounds.minimum_y;
-  if (!std::isfinite(bounds.minimum_x) ||
-      !std::isfinite(bounds.maximum_x) ||
-      !std::isfinite(bounds.minimum_y) ||
-      !std::isfinite(bounds.maximum_y) || !std::isfinite(range_x) ||
-      !std::isfinite(range_y) || range_x <= 0.0 || range_y <= 0.0) {
+  if (!std::isfinite(bounds.minimum_x) || !std::isfinite(bounds.maximum_x) ||
+      !std::isfinite(bounds.minimum_y) || !std::isfinite(bounds.maximum_y) ||
+      !std::isfinite(range_x) || !std::isfinite(range_y) || range_x <= 0.0 || range_y <= 0.0) {
     throw MapOutputError("map bounds cannot be represented in the PNG");
   }
   const double available_width = static_cast<double>(config.image_width - 1);
   const double available_height = static_cast<double>(config.image_height - 1);
-  const double scale =
-      std::min(available_width / range_x, available_height / range_y);
+  const double scale = std::min(available_width / range_x, available_height / range_y);
   if (!std::isfinite(scale) || scale <= 0.0) {
     throw MapOutputError("map projection scale is invalid");
   }
@@ -211,22 +196,18 @@ Projection MakeProjection(Bounds bounds, const MapOutputConfig& config) {
           config.image_height};
 }
 
-void SetPixel(std::vector<std::uint8_t>& pixels, std::size_t width,
-              std::size_t height, int x, int y,
-              const std::array<std::uint8_t, 3>& color) {
-  if (x < 0 || y < 0 || x >= static_cast<int>(width) ||
-      y >= static_cast<int>(height)) {
+void SetPixel(std::vector<std::uint8_t>& pixels, std::size_t width, std::size_t height, int x,
+              int y, const std::array<std::uint8_t, 3>& color) {
+  if (x < 0 || y < 0 || x >= static_cast<int>(width) || y >= static_cast<int>(height)) {
     return;
   }
   const std::size_t offset =
-      3 * (static_cast<std::size_t>(y) * width +
-           static_cast<std::size_t>(x));
+      3 * (static_cast<std::size_t>(y) * width + static_cast<std::size_t>(x));
   std::copy(color.begin(), color.end(), pixels.begin() + offset);
 }
 
-void DrawLine(std::vector<std::uint8_t>& pixels, std::size_t width,
-              std::size_t height, std::pair<int, int> start,
-              std::pair<int, int> end,
+void DrawLine(std::vector<std::uint8_t>& pixels, std::size_t width, std::size_t height,
+              std::pair<int, int> start, std::pair<int, int> end,
               const std::array<std::uint8_t, 3>& color) {
   int x = start.first;
   int y = start.second;
@@ -254,11 +235,9 @@ void DrawLine(std::vector<std::uint8_t>& pixels, std::size_t width,
   }
 }
 
-std::vector<std::uint8_t> RenderTopDown(
-    const PointCloud& map, const MapperTrajectory& trajectory,
-    const Bounds& bounds, const MapOutputConfig& config) {
-  std::vector<std::uint8_t> pixels(config.image_width * config.image_height * 3,
-                                   248);
+std::vector<std::uint8_t> RenderTopDown(const PointCloud& map, const MapperTrajectory& trajectory,
+                                        const Bounds& bounds, const MapOutputConfig& config) {
+  std::vector<std::uint8_t> pixels(config.image_width * config.image_height * 3, 248);
   const Projection projection = MakeProjection(bounds, config);
   const double raw_z_range = bounds.maximum_z - bounds.minimum_z;
   if (!std::isfinite(raw_z_range) || raw_z_range < 0.0) {
@@ -266,15 +245,13 @@ std::vector<std::uint8_t> RenderTopDown(
   }
   const double z_range = std::max(1e-9, raw_z_range);
   for (const pcl::PointXYZ& point : map) {
-    const double height_fraction =
-        std::clamp((point.z - bounds.minimum_z) / z_range, 0.0, 1.0);
+    const double height_fraction = std::clamp((point.z - bounds.minimum_z) / z_range, 0.0, 1.0);
     const std::array<std::uint8_t, 3> color{
         static_cast<std::uint8_t>(35.0 + 194.0 * height_fraction),
         static_cast<std::uint8_t>(92.0 + 32.0 * height_fraction),
         static_cast<std::uint8_t>(145.0 - 100.0 * height_fraction)};
     const auto pixel = projection.Pixel(point.x, point.y);
-    SetPixel(pixels, config.image_width, config.image_height, pixel.first,
-             pixel.second, color);
+    SetPixel(pixels, config.image_width, config.image_height, pixel.first, pixel.second, color);
   }
 
   constexpr std::array<std::uint8_t, 3> kTrajectoryColor{198, 42, 48};
@@ -291,9 +268,8 @@ std::vector<std::uint8_t> RenderTopDown(
     for (int y_offset = -2; y_offset <= 2; ++y_offset) {
       for (int x_offset = -2; x_offset <= 2; ++x_offset) {
         if (x_offset * x_offset + y_offset * y_offset <= 4) {
-          SetPixel(pixels, config.image_width, config.image_height,
-                   pixel.first + x_offset, pixel.second + y_offset,
-                   kTrajectoryColor);
+          SetPixel(pixels, config.image_width, config.image_height, pixel.first + x_offset,
+                   pixel.second + y_offset, kTrajectoryColor);
         }
       }
     }
@@ -310,17 +286,14 @@ std::string BuildTrajectoryCsv(const MapperTrajectory& trajectory) {
     Eigen::Quaterniond orientation(point.pose.rotation());
     orientation.normalize();
     const Eigen::Vector3d translation = point.pose.translation();
-    output << point.timestamp << ',' << translation.x() << ','
-           << translation.y() << ',' << translation.z() << ','
-           << orientation.x() << ',' << orientation.y() << ','
-           << orientation.z() << ',' << orientation.w() << ','
-           << point.fitness << '\n';
+    output << point.timestamp << ',' << translation.x() << ',' << translation.y() << ','
+           << translation.z() << ',' << orientation.x() << ',' << orientation.y() << ','
+           << orientation.z() << ',' << orientation.w() << ',' << point.fitness << '\n';
   }
   return output.str();
 }
 
-void WriteTextFile(const std::filesystem::path& path,
-                   const std::string& contents) {
+void WriteTextFile(const std::filesystem::path& path, const std::string& contents) {
   std::ofstream output(path, std::ios::binary | std::ios::trunc);
   if (!output) {
     throw MapOutputError("failed to open trajectory CSV: " + path.string());
@@ -360,16 +333,14 @@ void WritePcd(const std::filesystem::path& path, const PointCloud& map) {
   }
 }
 
-void WritePng(const std::filesystem::path& path,
-              const std::vector<std::uint8_t>& pixels,
+void WritePng(const std::filesystem::path& path, const std::vector<std::uint8_t>& pixels,
               const MapOutputConfig& config) {
   png_image image{};
   image.version = PNG_IMAGE_VERSION;
   image.width = static_cast<png_uint_32>(config.image_width);
   image.height = static_cast<png_uint_32>(config.image_height);
   image.format = PNG_FORMAT_RGB;
-  if (png_image_write_to_file(&image, path.string().c_str(), 0, pixels.data(),
-                              0, nullptr) == 0) {
+  if (png_image_write_to_file(&image, path.string().c_str(), 0, pixels.data(), 0, nullptr) == 0) {
     const std::string message = image.message;
     png_image_free(&image);
     throw MapOutputError("failed to write top-down PNG: " + message);
@@ -416,8 +387,7 @@ void CommitStagedFiles(std::vector<StagedFile>& files) {
         file->backed_up = false;
       }
     }
-    throw MapOutputError("failed to commit map outputs: " +
-                         std::string(error.what()));
+    throw MapOutputError("failed to commit map outputs: " + std::string(error.what()));
   }
 }
 
@@ -426,61 +396,48 @@ void ValidateDestinations(const std::filesystem::path& output_directory,
   std::error_code error;
   const bool output_exists = std::filesystem::exists(output_directory, error);
   if (error) {
-    throw MapOutputError("failed to inspect output directory: " +
-                         error.message());
+    throw MapOutputError("failed to inspect output directory: " + error.message());
   }
-  if (output_exists &&
-      !std::filesystem::is_directory(output_directory, error)) {
+  if (output_exists && !std::filesystem::is_directory(output_directory, error)) {
     if (error) {
-      throw MapOutputError("failed to inspect output directory: " +
-                           error.message());
+      throw MapOutputError("failed to inspect output directory: " + error.message());
     }
-    throw MapOutputError("output path is not a directory: " +
-                         output_directory.string());
+    throw MapOutputError("output path is not a directory: " + output_directory.string());
   }
 
-  const std::array<std::filesystem::path, 3> final_paths{
-      paths.pcd, paths.trajectory_csv, paths.top_down_png};
+  const std::array<std::filesystem::path, 3> final_paths{paths.pcd, paths.trajectory_csv,
+                                                         paths.top_down_png};
   for (const std::filesystem::path& path : final_paths) {
     error.clear();
     const bool exists = std::filesystem::exists(path, error);
     if (error) {
-      throw MapOutputError("failed to inspect output destination: " +
-                           error.message());
+      throw MapOutputError("failed to inspect output destination: " + error.message());
     }
     if (exists && !std::filesystem::is_regular_file(path, error)) {
       if (error) {
-        throw MapOutputError("failed to inspect output destination: " +
-                             error.message());
+        throw MapOutputError("failed to inspect output destination: " + error.message());
       }
-      throw MapOutputError("output destination is not a regular file: " +
-                           path.string());
+      throw MapOutputError("output destination is not a regular file: " + path.string());
     }
   }
 }
 
 }  // namespace
 
-MapOutputPaths SaveMapOutputs(
-    const std::filesystem::path& output_directory, const PointCloud& map,
-    const MapperTrajectory& trajectory, const MapOutputConfig& config) {
-  const Bounds bounds =
-      ValidateInputs(output_directory, map, trajectory, config);
+MapOutputPaths SaveMapOutputs(const std::filesystem::path& output_directory, const PointCloud& map,
+                              const MapperTrajectory& trajectory, const MapOutputConfig& config) {
+  const Bounds bounds = ValidateInputs(output_directory, map, trajectory, config);
   const std::string trajectory_csv = BuildTrajectoryCsv(trajectory);
-  const std::vector<std::uint8_t> pixels =
-      RenderTopDown(map, trajectory, bounds, config);
+  const std::vector<std::uint8_t> pixels = RenderTopDown(map, trajectory, bounds, config);
 
   const MapOutputPaths paths{output_directory / config.pcd_filename,
                              output_directory / config.trajectory_filename,
-                             output_directory /
-                                 config.top_down_png_filename};
+                             output_directory / config.top_down_png_filename};
   ValidateDestinations(output_directory, paths);
   const std::string suffix = UniqueSuffix();
   std::vector<StagedFile> staged{
-      {paths.pcd, paths.pcd.string() + ".tmp" + suffix,
-       paths.pcd.string() + ".bak" + suffix},
-      {paths.trajectory_csv,
-       paths.trajectory_csv.string() + ".tmp" + suffix,
+      {paths.pcd, paths.pcd.string() + ".tmp" + suffix, paths.pcd.string() + ".bak" + suffix},
+      {paths.trajectory_csv, paths.trajectory_csv.string() + ".tmp" + suffix,
        paths.trajectory_csv.string() + ".bak" + suffix},
       {paths.top_down_png, paths.top_down_png.string() + ".tmp" + suffix,
        paths.top_down_png.string() + ".bak" + suffix}};
@@ -495,16 +452,14 @@ MapOutputPaths SaveMapOutputs(
   } catch (const MapOutputError&) {
     throw;
   } catch (const std::exception& error) {
-    throw MapOutputError("failed to save map outputs: " +
-                         std::string(error.what()));
+    throw MapOutputError("failed to save map outputs: " + std::string(error.what()));
   }
 
   return paths;
 }
 
 MapOutputPaths SaveMapOutputs(const std::filesystem::path& output_directory,
-                              const SimpleIcpMapper& mapper,
-                              const MapOutputConfig& config) {
+                              const SimpleIcpMapper& mapper, const MapOutputConfig& config) {
   const PointCloud::ConstPtr map = mapper.global_map();
   if (!map) {
     throw MapOutputError("mapper returned a null global map");

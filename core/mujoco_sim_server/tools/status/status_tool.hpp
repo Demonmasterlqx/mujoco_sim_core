@@ -7,7 +7,7 @@
 #include <optional>
 #include <string>
 
-#include <mujoco_sim/v3/sync.pb.h>
+#include <mujoco_sim/v4/sync.pb.h>
 
 namespace mujoco_sim::server::status_tool {
 
@@ -19,10 +19,13 @@ struct StatusOptions {
   bool json = false;
 };
 
-enum class CommandLineResult { kSuccess, kHelp, kError };
+enum class CommandLineResult {
+  kSuccess,
+  kHelp,
+  kError
+};
 
-CommandLineResult ParseCommandLine(int argc, char** argv,
-                                   StatusOptions* options,
+CommandLineResult ParseCommandLine(int argc, char** argv, StatusOptions* options,
                                    std::string* message);
 std::string Usage();
 
@@ -35,7 +38,7 @@ struct PublisherIdentity {
 };
 
 struct ReceivedStatus {
-  mujoco_sim::v3::ServerStatus status;
+  mujoco_sim::v4::ServerStatus status;
   PublisherIdentity publisher;
   std::int64_t send_clock = 0;
   std::chrono::steady_clock::time_point received_at;
@@ -51,11 +54,9 @@ struct StatusUpdate {
 
 class StatusTracker {
  public:
-  StatusTracker(std::string server_name,
-                std::chrono::milliseconds stale_after);
-  StatusUpdate Accept(const PublisherIdentity& publisher,
-                      std::int64_t send_clock,
-                      const mujoco_sim::v3::ServerStatus& status,
+  StatusTracker(std::string server_name, std::chrono::milliseconds stale_after);
+  StatusUpdate Accept(const PublisherIdentity& publisher, std::int64_t send_clock,
+                      const mujoco_sim::v4::ServerStatus& status,
                       std::chrono::steady_clock::time_point received_at);
   bool stale(std::chrono::steady_clock::time_point now) const;
   const std::optional<ReceivedStatus>& latest() const { return latest_; }
@@ -67,23 +68,20 @@ class StatusTracker {
   std::uint64_t next_sequence_ = 1;
 };
 
-bool ParseStatusPayload(const void* data, std::size_t size,
-                        const std::string& server_name,
-                        mujoco_sim::v3::ServerStatus* status);
+bool ParseStatusPayload(const void* data, std::size_t size, const std::string& server_name,
+                        mujoco_sim::v4::ServerStatus* status);
 
 struct StatusReport {
   std::string server_name;
-  mujoco_sim::v3::ServerStatus status;
-  std::optional<mujoco_sim::v3::GetAvailableResourcesResponse> resources;
+  mujoco_sim::v4::ServerStatus status;
+  std::optional<mujoco_sim::v4::GetAvailableResourcesResponse> resources;
   std::string resource_error;
 };
 
 std::string FormatHuman(const StatusReport& report);
-bool FormatJson(const StatusReport& report, std::string* output,
-                std::string* error_message);
+bool FormatJson(const StatusReport& report, std::string* output, std::string* error_message);
 bool WriteReport(const StatusReport& report, bool json, std::ostream* output,
                  std::string* error_message);
-int RunStatusTool(const StatusOptions& options, std::ostream* output,
-                  std::ostream* error_output);
+int RunStatusTool(const StatusOptions& options, std::ostream* output, std::ostream* error_output);
 
 }  // namespace mujoco_sim::server::status_tool

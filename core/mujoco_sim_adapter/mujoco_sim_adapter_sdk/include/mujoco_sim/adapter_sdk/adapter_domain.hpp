@@ -26,10 +26,8 @@ struct ResourceInfo {
 class ControllerLayout {
  public:
   ControllerLayout() = default;
-  ControllerLayout(std::vector<ResourceInfo> observations,
-                   std::vector<ResourceInfo> commands,
-                   std::size_t observation_scalar_count,
-                   std::size_t command_scalar_count);
+  ControllerLayout(std::vector<ResourceInfo> observations, std::vector<ResourceInfo> commands,
+                   std::size_t observation_scalar_count, std::size_t command_scalar_count);
   std::optional<ScalarSpan> Observation(std::string_view name) const;
   std::optional<ScalarSpan> Command(std::string_view name) const;
   std::size_t observation_scalar_count() const noexcept;
@@ -44,7 +42,6 @@ class ControllerLayout {
   std::unordered_map<std::string, ScalarSpan> command_index_;
   std::size_t observation_scalar_count_ = 0;
   std::size_t command_scalar_count_ = 0;
-
 };
 
 struct AdapterRegistration {

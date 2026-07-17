@@ -25,8 +25,7 @@ struct StreamRunState {
 int main(int argc, char** argv) {
   demo::AppConfig app_config;
   std::string message;
-  const auto parse_result = demo::ParseAppConfig(argc, argv, &app_config,
-                                                  &message);
+  const auto parse_result = demo::ParseAppConfig(argc, argv, &app_config, &message);
   if (parse_result == demo::ParseAppConfigResult::kHelp) {
     std::cout << message;
     return 0;
@@ -69,31 +68,24 @@ int main(int argc, char** argv) {
       complete = false;
       mujoco_sim::adapter_sdk::OwnedStreamSample sample;
       const auto wait_result = client.WaitForSample(
-          stream.name, std::chrono::milliseconds(config.wait_timeout_ms),
-          &sample, &message);
+          stream.name, std::chrono::milliseconds(config.wait_timeout_ms), &sample, &message);
       if (wait_result == mujoco_sim::adapter_sdk::SampleWaitResult::kTimeout) {
         continue;
       }
-      if (wait_result !=
-          mujoco_sim::adapter_sdk::SampleWaitResult::kReceived) {
-        std::cerr << "camera stream stopped: " << stream.name << ": "
-                  << message << '\n';
+      if (wait_result != mujoco_sim::adapter_sdk::SampleWaitResult::kReceived) {
+        std::cerr << "camera stream stopped: " << stream.name << ": " << message << '\n';
         result = 1;
         break;
       }
       const auto descriptor = client.descriptor(stream.name);
-      if (!descriptor.has_value() ||
-          !demo::ValidateCameraSample(sample, *descriptor, stream.kind,
-                                      &stream.summary, &message)) {
-        std::cerr << "camera stream validation failed: " << stream.name
-                  << ": " << message << '\n';
+      if (!descriptor.has_value() || !demo::ValidateCameraSample(sample, *descriptor, stream.kind,
+                                                                 &stream.summary, &message)) {
+        std::cerr << "camera stream validation failed: " << stream.name << ": " << message << '\n';
         result = 1;
         break;
       }
-      if (stream.kind == demo::CameraStreamKind::kRgb &&
-          !screenshot_saved) {
-        if (!demo::SaveRgbScreenshot(config.screenshot_path, sample,
-                                     &message)) {
+      if (stream.kind == demo::CameraStreamKind::kRgb && !screenshot_saved) {
+        if (!demo::SaveRgbScreenshot(config.screenshot_path, sample, &message)) {
           std::cerr << "camera screenshot failed: " << message << '\n';
           result = 1;
           break;
@@ -105,17 +97,14 @@ int main(int argc, char** argv) {
     if (config.max_samples_per_stream > 0) {
       complete = true;
       for (const auto& stream : streams) {
-        complete = complete &&
-                   stream.summary.sample_count >=
-                       config.max_samples_per_stream;
+        complete = complete && stream.summary.sample_count >= config.max_samples_per_stream;
       }
       if (complete) break;
     }
   }
   client.Stop();
 
-  std::cout << "sensor-demo camera summary screenshot="
-            << (screenshot_saved ? 1 : 0);
+  std::cout << "sensor-demo camera summary screenshot=" << (screenshot_saved ? 1 : 0);
   for (const auto& stream : streams) {
     std::cout << ' ' << stream.name << '=' << stream.summary.sample_count
               << " dropped=" << client.dropped_samples(stream.name);

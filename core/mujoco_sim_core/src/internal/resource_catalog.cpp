@@ -16,10 +16,13 @@ namespace {
 using mujoco_sim::core::COMMAND_ACTUATOR;
 using mujoco_sim::core::OBSERVATION_SENSOR;
 
-enum class SensorQuantity { kPosition, kVelocity, kForce };
+enum class SensorQuantity {
+  kPosition,
+  kVelocity,
+  kForce
+};
 
-std::string JointUnit(const mjModel* model, int joint_id,
-                      SensorQuantity quantity) {
+std::string JointUnit(const mjModel* model, int joint_id, SensorQuantity quantity) {
   if (joint_id < 0 || joint_id >= model->njnt) {
     return {};
   }
@@ -50,8 +53,7 @@ std::string JointUnit(const mjModel* model, int joint_id,
   return {};
 }
 
-std::string TendonUnit(const mjModel* model, int tendon_id,
-                       SensorQuantity quantity) {
+std::string TendonUnit(const mjModel* model, int tendon_id, SensorQuantity quantity) {
   if (tendon_id < 0 || tendon_id >= model->ntendon) {
     return {};
   }
@@ -72,8 +74,7 @@ std::string TendonUnit(const mjModel* model, int tendon_id,
       }
     }
 
-    const std::string joint_unit =
-        JointUnit(model, model->wrap_objid[wrap_id], quantity);
+    const std::string joint_unit = JointUnit(model, model->wrap_objid[wrap_id], quantity);
     if (joint_unit.empty() || (!unit.empty() && unit != joint_unit)) {
       return {};
     }
@@ -82,16 +83,14 @@ std::string TendonUnit(const mjModel* model, int tendon_id,
   return unit;
 }
 
-std::string ActuatorUnit(const mjModel* model, int actuator_id,
-                         SensorQuantity quantity) {
+std::string ActuatorUnit(const mjModel* model, int actuator_id, SensorQuantity quantity) {
   if (actuator_id < 0 || actuator_id >= model->nu) {
     return {};
   }
   switch (model->actuator_trntype[actuator_id]) {
     case mjTRN_JOINT:
     case mjTRN_JOINTINPARENT:
-      return JointUnit(model, model->actuator_trnid[2 * actuator_id],
-                       quantity);
+      return JointUnit(model, model->actuator_trnid[2 * actuator_id], quantity);
     case mjTRN_SLIDERCRANK:
       switch (quantity) {
         case SensorQuantity::kPosition:
@@ -103,8 +102,7 @@ std::string ActuatorUnit(const mjModel* model, int actuator_id,
       }
       break;
     case mjTRN_TENDON:
-      return TendonUnit(model, model->actuator_trnid[2 * actuator_id],
-                        quantity);
+      return TendonUnit(model, model->actuator_trnid[2 * actuator_id], quantity);
     default:
       // Site, body and plugin transmissions can mix linear and angular axes.
       break;
@@ -112,8 +110,7 @@ std::string ActuatorUnit(const mjModel* model, int actuator_id,
   return {};
 }
 
-std::optional<std::string> JointSensorUnit(const mjModel* model,
-                                          int sensor_type, int object_id) {
+std::optional<std::string> JointSensorUnit(const mjModel* model, int sensor_type, int object_id) {
   switch (sensor_type) {
     case mjSENS_JOINTPOS:
     case mjSENS_JOINTLIMITPOS:
@@ -129,8 +126,7 @@ std::optional<std::string> JointSensorUnit(const mjModel* model,
   }
 }
 
-std::optional<std::string> TendonSensorUnit(const mjModel* model,
-                                           int sensor_type, int object_id) {
+std::optional<std::string> TendonSensorUnit(const mjModel* model, int sensor_type, int object_id) {
   switch (sensor_type) {
     case mjSENS_TENDONPOS:
     case mjSENS_TENDONLIMITPOS:
@@ -146,8 +142,8 @@ std::optional<std::string> TendonSensorUnit(const mjModel* model,
   }
 }
 
-std::optional<std::string> ActuatorSensorUnit(const mjModel* model,
-                                             int sensor_type, int object_id) {
+std::optional<std::string> ActuatorSensorUnit(const mjModel* model, int sensor_type,
+                                              int object_id) {
   switch (sensor_type) {
     case mjSENS_ACTUATORPOS:
       return ActuatorUnit(model, object_id, SensorQuantity::kPosition);
@@ -200,12 +196,9 @@ constexpr std::array kFixedSensorUnits{
 std::string FixedSensorUnit(int sensor_type) {
   const auto found = std::find_if(
       kFixedSensorUnits.begin(), kFixedSensorUnits.end(),
-      [sensor_type](const FixedUnitEntry& entry) {
-        return entry.sensor_type == sensor_type;
-      });
+      [sensor_type](const FixedUnitEntry& entry) { return entry.sensor_type == sensor_type; });
   return found == kFixedSensorUnits.end() ? "" : std::string(found->unit);
 }
-
 
 std::string SensorUnit(const mjModel* model, int sensor_id) {
   const int sensor_type = model->sensor_type[sensor_id];
@@ -257,8 +250,7 @@ std::string ObjectName(const mjModel* model, int object_type, int object_id) {
   if (object_type == mjOBJ_UNKNOWN || object_id < 0) {
     return {};
   }
-  const char* name =
-      mj_id2name(model, static_cast<mjtObj>(object_type), object_id);
+  const char* name = mj_id2name(model, static_cast<mjtObj>(object_type), object_id);
   return name == nullptr ? "" : name;
 }
 
@@ -279,8 +271,7 @@ std::string SensorFrameId(const mjModel* model, int sensor_id) {
     case mjSENS_FORCE:
     case mjSENS_TORQUE:
     case mjSENS_MAGNETOMETER:
-      return ObjectName(model, model->sensor_objtype[sensor_id],
-                        model->sensor_objid[sensor_id]);
+      return ObjectName(model, model->sensor_objtype[sensor_id], model->sensor_objid[sensor_id]);
     case mjSENS_GEOMNORMAL:
     case mjSENS_GEOMFROMTO:
     case mjSENS_SUBTREECOM:
@@ -288,13 +279,11 @@ std::string SensorFrameId(const mjModel* model, int sensor_id) {
     case mjSENS_SUBTREEANGMOM:
       return "world";
     case mjSENS_CAMPROJECTION:
-      return ObjectName(model, model->sensor_reftype[sensor_id],
-                        model->sensor_refid[sensor_id]);
+      return ObjectName(model, model->sensor_reftype[sensor_id], model->sensor_refid[sensor_id]);
     default:
       return {};
   }
 }
-
 
 }  // namespace
 
@@ -321,16 +310,13 @@ ResourceCatalog ResourceCatalog::Build(const mjModel& model) {
     mujoco_sim::core::ResourceDescriptor descriptor;
     descriptor.set_name(name);
     descriptor.set_type(OBSERVATION_SENSOR);
-    descriptor.set_dimension(
-        static_cast<std::uint32_t>(model.sensor_dim[sensor_id]));
+    descriptor.set_dimension(static_cast<std::uint32_t>(model.sensor_dim[sensor_id]));
     descriptor.set_mujoco_id(sensor_id);
     descriptor.set_mujoco_type(model.sensor_type[sensor_id]);
     descriptor.set_mujoco_datatype(model.sensor_datatype[sensor_id]);
     descriptor.set_mujoco_stage(model.sensor_needstage[sensor_id]);
-    descriptor.set_interval_period_s(
-        model.sensor_interval[2 * sensor_id]);
-    descriptor.set_interval_phase_s(
-        model.sensor_interval[2 * sensor_id + 1]);
+    descriptor.set_interval_period_s(model.sensor_interval[2 * sensor_id]);
+    descriptor.set_interval_phase_s(model.sensor_interval[2 * sensor_id + 1]);
     descriptor.set_delay_s(model.sensor_delay[sensor_id]);
     descriptor.set_unit(SensorUnit(&model, sensor_id));
     descriptor.set_object_type(model.sensor_objtype[sensor_id]);
@@ -339,8 +325,7 @@ ResourceCatalog ResourceCatalog::Build(const mjModel& model) {
     const int object_type = model.sensor_objtype[sensor_id];
     const int object_id = model.sensor_objid[sensor_id];
     if (object_type != mjOBJ_UNKNOWN && object_id >= 0) {
-      const char* object_name =
-          mj_id2name(&model, static_cast<mjtObj>(object_type), object_id);
+      const char* object_name = mj_id2name(&model, static_cast<mjtObj>(object_type), object_id);
       if (object_name != nullptr) {
         descriptor.set_object_name(object_name);
       }
@@ -373,6 +358,5 @@ ResourceCatalog ResourceCatalog::Build(const mjModel& model) {
   }
   return catalog;
 }
-
 
 }  // namespace mujoco_sim::core::internal

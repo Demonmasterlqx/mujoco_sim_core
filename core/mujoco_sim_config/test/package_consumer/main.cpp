@@ -4,8 +4,8 @@
 #include <vector>
 
 int main() {
-  const char* argv[] = {"config-consumer", "--model", "robot.xml",
-                        "--headless", "--label", "one", "two"};
+  const char* argv[] = {"config-consumer", "--model", "robot.xml", "--headless",
+                        "--label",         "one",     "two"};
   install_consumer::ConsumerConfig config;
   std::string error;
   if (!install_consumer::Parse(7, argv, &config, &error)) {

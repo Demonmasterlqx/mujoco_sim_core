@@ -7,13 +7,12 @@
 #include <vector>
 
 #include <mujoco_sim/core/simulation_core.hpp>
-#include <mujoco_sim/v3/sync.pb.h>
+#include <mujoco_sim/v4/sync.pb.h>
 
 namespace mujoco_sim::sensor {
 
 struct CameraOutput {
-  mujoco_sim::v3::StreamFormat format =
-      mujoco_sim::v3::STREAM_FORMAT_UNSPECIFIED;
+  mujoco_sim::v4::StreamFormat format = mujoco_sim::v4::STREAM_FORMAT_UNSPECIFIED;
   std::string stream_name;
 };
 
@@ -54,7 +53,7 @@ struct CaptureMetadata {
 };
 
 struct RawFrame {
-  mujoco_sim::v3::StreamFrameHeader header;
+  mujoco_sim::v4::StreamFrameHeader header;
   std::vector<std::byte> payload;
 };
 
@@ -63,20 +62,17 @@ struct StreamShape {
   std::uint64_t payload_bytes = 0;
 };
 
-bool StreamShapeFor(mujoco_sim::v3::StreamFormat format,
-                    std::uint32_t width, std::uint32_t height,
+bool StreamShapeFor(mujoco_sim::v4::StreamFormat format, std::uint32_t width, std::uint32_t height,
                     StreamShape* shape, std::string* error_message);
 
-bool DescribeCameraStreams(
-    const mujoco_sim::core::SimulationSnapshot& snapshot,
-    const CameraProfile& profile,
-    std::vector<mujoco_sim::v3::StreamDescriptor>* descriptors,
-    std::string* error_message);
+bool DescribeCameraStreams(const mujoco_sim::core::SimulationSnapshot& snapshot,
+                           const CameraProfile& profile,
+                           std::vector<mujoco_sim::v4::StreamDescriptor>* descriptors,
+                           std::string* error_message);
 
-bool DescribeRayLidarStream(
-    const mujoco_sim::core::SimulationSnapshot& snapshot,
-    const RayLidarProfile& profile,
-    mujoco_sim::v3::StreamDescriptor* descriptor,
-    std::string* error_message);
+bool DescribeRayLidarStream(const mujoco_sim::core::SimulationSnapshot& snapshot,
+                            const RayLidarProfile& profile,
+                            mujoco_sim::v4::StreamDescriptor* descriptor,
+                            std::string* error_message);
 
 }  // namespace mujoco_sim::sensor

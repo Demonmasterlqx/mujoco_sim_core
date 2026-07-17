@@ -50,14 +50,14 @@ class BlockingMailbox {
   }
 
   template <typename StopPredicate, typename ErrorProvider>
-  MailboxWaitResult Wait(std::unique_lock<std::mutex>& lock,
-                         std::condition_variable& condition,
-                         std::chrono::milliseconds timeout,
-                         StopPredicate stopped, ErrorProvider error,
-                         T* output, std::string* error_message) {
+  MailboxWaitResult Wait(std::unique_lock<std::mutex>& lock, std::condition_variable& condition,
+                         std::chrono::milliseconds timeout, StopPredicate stopped,
+                         ErrorProvider error, T* output, std::string* error_message) {
     if (wait_in_progress_) return MailboxWaitResult::kConcurrentWait;
     wait_in_progress_ = true;
-    const auto finish = [this] { wait_in_progress_ = false; };
+    const auto finish = [this] {
+      wait_in_progress_ = false;
+    };
     const auto ready = [&] {
       return !items_.empty() || !error().empty() || stopped();
     };

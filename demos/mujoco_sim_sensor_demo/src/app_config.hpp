@@ -6,7 +6,7 @@
 
 #include <mujoco_sim/adapter_sdk/observer_client.hpp>
 #include <mujoco_sim/adapter_sdk/sensor_stream_client.hpp>
-#include <mujoco_sim/adapter_sdk/sync_adapter_client.hpp>
+#include <mujoco_sim/adapter_sdk/controller_client.hpp>
 #include <mujoco_sim/sensor_demo/interface_data.hpp>
 #include <mujoco_sim/sensor_demo/map_output.hpp>
 
@@ -15,7 +15,7 @@
 namespace mujoco_sim::sensor_demo {
 
 struct ControllerProcessConfig {
-  mujoco_sim::adapter_sdk::AdapterOptions adapter;
+  mujoco_sim::adapter_sdk::ControllerOptions adapter;
   ControllerInterfaces interfaces;
   WaypointControllerConfig control;
   std::uint64_t log_every_ticks = 0;
@@ -70,10 +70,9 @@ enum class ParseAppConfigResult {
   kError,
 };
 
-bool BuildAppConfig(const generated::SensorDemoConfig& generated_config,
-                    AppConfig* config, std::string* error_message);
-ParseAppConfigResult ParseAppConfig(int argc, char** argv, AppConfig* config,
-                                    std::string* message);
+bool BuildAppConfig(const generated::SensorDemoConfig& generated_config, AppConfig* config,
+                    std::string* error_message);
+ParseAppConfigResult ParseAppConfig(int argc, char** argv, AppConfig* config, std::string* message);
 std::string AppUsage();
 
 }  // namespace mujoco_sim::sensor_demo

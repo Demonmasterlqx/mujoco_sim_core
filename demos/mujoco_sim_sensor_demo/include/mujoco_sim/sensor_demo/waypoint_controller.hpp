@@ -31,8 +31,7 @@ struct WaypointControllerConfig {
   PlanarPose initial_pose{};
 
   // Local-frame perimeter matching the usable loop in scene.xml.
-  std::vector<Waypoint> waypoints{
-      {0.0, 0.0}, {9.35, 0.0}, {9.35, 5.5}, {0.0, 5.5}};
+  std::vector<Waypoint> waypoints{{0.0, 0.0}, {9.35, 0.0}, {9.35, 5.5}, {0.0, 5.5}};
 };
 
 // Wheel positions are ordered front-left, front-right, rear-left, rear-right.

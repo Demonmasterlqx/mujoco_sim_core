@@ -30,8 +30,7 @@ bool SimViewer::Initialize(std::string* error_message) {
     if (error_message != nullptr) {
       *error_message = description == nullptr
                            ? "failed to initialize GLFW"
-                           : "failed to initialize GLFW: " +
-                                 std::string(description);
+                           : "failed to initialize GLFW: " + std::string(description);
     }
     return false;
   }
@@ -39,17 +38,15 @@ bool SimViewer::Initialize(std::string* error_message) {
   mjv_defaultCamera(&impl_->camera);
   mjv_defaultOption(&impl_->option);
   mjv_defaultPerturb(&impl_->perturb);
-  impl_->simulate = std::make_unique<mujoco::Simulate>(
-      std::make_unique<mujoco::GlfwAdapter>(), &impl_->camera,
-      &impl_->option, &impl_->perturb, true);
+  impl_->simulate =
+      std::make_unique<mujoco::Simulate>(std::make_unique<mujoco::GlfwAdapter>(), &impl_->camera,
+                                         &impl_->option, &impl_->perturb, true);
   return true;
 }
 
 bool SimViewer::QueueLoad(mujoco_sim::core::SimulationSnapshot& snapshot,
-                          const std::string& displayed_filename,
-                          std::string* error_message) {
-  if (impl_->simulate == nullptr || snapshot.model() == nullptr ||
-      snapshot.data() == nullptr) {
+                          const std::string& displayed_filename, std::string* error_message) {
+  if (impl_->simulate == nullptr || snapshot.model() == nullptr || snapshot.data() == nullptr) {
     if (error_message != nullptr) {
       *error_message = "viewer is not initialized with a valid snapshot";
     }
@@ -58,8 +55,7 @@ bool SimViewer::QueueLoad(mujoco_sim::core::SimulationSnapshot& snapshot,
   const mujoco::MutexLock viewer_lock(impl_->simulate->mtx);
   impl_->simulate->mnew_ = const_cast<mjModel_*>(snapshot.model());
   impl_->simulate->dnew_ = snapshot.data();
-  std::snprintf(impl_->simulate->filename,
-                sizeof(impl_->simulate->filename), "%s",
+  std::snprintf(impl_->simulate->filename, sizeof(impl_->simulate->filename), "%s",
                 displayed_filename.c_str());
   impl_->simulate->loadrequest = 2;
   return true;

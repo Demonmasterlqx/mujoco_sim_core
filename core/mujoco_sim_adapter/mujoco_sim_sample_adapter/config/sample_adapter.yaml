@@ -37,21 +37,6 @@ fields:
     default: 0.0
     finite: true
     cli: [--command-value]
-  commit_timeout_ms:
-    type: uint32
-    description: Controller commit timeout in milliseconds
-    default: 1000
-    cli: [--commit-timeout-ms]
-  session_timeout_ms:
-    type: uint32
-    description: Controller session presence timeout in milliseconds
-    default: 1000
-    cli: [--session-timeout-ms]
-  heartbeat_period_ms:
-    type: uint32
-    description: Suppressed Controller heartbeat period in milliseconds
-    default: 250
-    cli: [--heartbeat-period-ms]
   service_timeout_ms:
     type: uint32
     description: Registry service timeout in milliseconds

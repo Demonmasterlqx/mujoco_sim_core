@@ -18,9 +18,9 @@ class ServerEventQueue {
   static constexpr std::size_t kMaxBatchSize = 64;
 
   bool TryPush(ServerEvent event);
-  std::vector<ServerEvent> WaitUntil(
-      std::chrono::steady_clock::time_point deadline);
+  std::vector<ServerEvent> WaitUntil(std::chrono::steady_clock::time_point deadline);
   void Close(const char* reason = "server is stopping");
+  void Notify();
 
   bool closed() const;
   std::size_t size() const;
@@ -33,6 +33,7 @@ class ServerEventQueue {
   std::deque<ServerEvent> events_;
   std::size_t payload_bytes_ = 0;
   std::size_t high_watermark_ = 0;
+  bool notification_pending_ = false;
   bool closed_ = false;
 };
 

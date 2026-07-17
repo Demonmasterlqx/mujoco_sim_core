@@ -1,7 +1,0 @@
-tick_timeout_ms: 100
-session_timeout_ms: 3000
-status_period_ms: 100
-status_min_interval_ms: 20
-transport_subscriber_sample_period_ms: 1000
-log_summary_period_ms: 1000
-headless: true

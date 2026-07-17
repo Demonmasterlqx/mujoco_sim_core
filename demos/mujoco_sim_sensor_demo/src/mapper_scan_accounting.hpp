@@ -14,12 +14,10 @@ enum class MapperScanOutcome {
 // scan must receive exactly one accepted or rejected outcome.
 class MapperScanAccounting {
  public:
-  explicit MapperScanAccounting(std::uint64_t max_scans)
-      : max_scans_(max_scans) {}
+  explicit MapperScanAccounting(std::uint64_t max_scans) : max_scans_(max_scans) {}
 
   [[nodiscard]] bool CanStartScan() const noexcept {
-    return !scan_pending_ &&
-           (max_scans_ == 0 || processed_scans_ < max_scans_);
+    return !scan_pending_ && (max_scans_ == 0 || processed_scans_ < max_scans_);
   }
 
   std::uint64_t BeginDecodedScan() noexcept {
@@ -38,15 +36,9 @@ class MapperScanAccounting {
     scan_pending_ = false;
   }
 
-  [[nodiscard]] std::uint64_t processed_scans() const noexcept {
-    return processed_scans_;
-  }
-  [[nodiscard]] std::uint64_t accepted_scans() const noexcept {
-    return accepted_scans_;
-  }
-  [[nodiscard]] std::uint64_t rejected_scans() const noexcept {
-    return rejected_scans_;
-  }
+  [[nodiscard]] std::uint64_t processed_scans() const noexcept { return processed_scans_; }
+  [[nodiscard]] std::uint64_t accepted_scans() const noexcept { return accepted_scans_; }
+  [[nodiscard]] std::uint64_t rejected_scans() const noexcept { return rejected_scans_; }
 
  private:
   std::uint64_t max_scans_ = 0;
@@ -72,9 +64,7 @@ class MapperScanScope {
   MapperScanScope(MapperScanScope&&) = delete;
   MapperScanScope& operator=(MapperScanScope&&) = delete;
 
-  [[nodiscard]] std::uint64_t scan_number() const noexcept {
-    return scan_number_;
-  }
+  [[nodiscard]] std::uint64_t scan_number() const noexcept { return scan_number_; }
 
   void Finish(MapperScanOutcome outcome) noexcept {
     assert(accounting_ != nullptr);

@@ -1,37 +1,45 @@
 # mujoco_sim_protocol
 
-`mujoco_sim_protocol` is the single Protocol V3 wire contract. It contains
-Protobuf messages for the low-frequency control plane, a fixed binary codec for
-the high-frequency data plane, Sensor stream framing, and eCAL endpoint naming.
+`mujoco_sim_protocol` is the repository's only Protocol V4 wire contract. It
+contains Protobuf control-plane messages, fixed dense data-plane codecs, Sensor
+stream framing, canonical layout fingerprints, and eCAL endpoint naming.
 
 ## Contract
 
-- Protobuf package: `mujoco_sim.v3`
-- Registry: `mujoco_sim.v3.<server>.registry`
-- Runtime topics: `mujoco_sim/v3/<server>/...`
-- Framing version: `1.0`
-- Maximum Tick, Commit, or Observation frame: 4 MiB
+- Protobuf package: `mujoco_sim.v4`
+- Registry service: `mujoco_sim.v4.<server>.registry`
+- Runtime topics: `mujoco_sim/v4/<server>/...`
+- Dense framing: `2.0`, magic `MJDATA4\0`, little-endian
+- Maximum complete dense frame: 4 MiB
+- State/Observation header: 80 bytes
+- Command header: 64 bytes
 
-The generated header is `<mujoco_sim/v3/sync.pb.h>`. Protobuf is used for
-resource discovery, registration/lifecycle RPCs, session heartbeat, Controller
-fault, Server status, and Sensor metadata. Tick, Commit, and Observation are not
-Protobuf messages.
+Dense kinds are fixed at Controller State 1, Controller Command 2, and
+Observation 3; flags must be zero. State and Observation carry session, epoch,
+completed-step tick, layout, sequence, and simulation time. Command carries
+only session, epoch, command layout, and strictly increasing session sequence;
+it has no tick, simulation time, source-State identity, or source-lag fields.
 
-## Dense data frames
+All multibyte dense-frame fields and IEEE-754 `double` payload scalars are
+little-endian. The fixed offsets are:
 
-`<mujoco_sim/protocol/data_frame.hpp>` implements an 80-byte little-endian
-header followed by contiguous IEEE-754 `double` values. The header carries kind,
-session, epoch, Tick, 128-bit layout fingerprint, Observer sequence, simulation
-time, scalar count, and exact frame size. It contains no adapter or resource
-names.
+| Offset | Common field | State / Observation | Command |
+| ---: | --- | --- | --- |
+| 0 | 8-byte magic | `MJDATA4\0` | `MJDATA4\0` |
+| 8 | framing major/minor | `uint16 2`, `uint16 0` | same |
+| 12 | kind/flags/header bytes | `uint8`, `0`, `uint16 80` | `uint8`, `0`, `uint16 64` |
+| 16 | frame/scalar counts | `uint32`, `uint32` | same |
+| 24 | session/epoch | `uint64`, `uint64` | same |
+| 40 | kind-specific identity | tick at 40, layout at 48 | layout at 40 |
+| 64 | final metadata | sequence at 64, simulation time at 72 | sequence at 56 |
 
 ```cpp
 mujoco_sim::protocol::DataFrameHeader header;
-header.kind = mujoco_sim::protocol::DataFrameKind::kCommit;
+header.kind = mujoco_sim::protocol::DataFrameKind::kControllerCommand;
 header.session_id = 4;
 header.epoch = 2;
-header.tick_id = 10;
 header.layout = {fingerprint_low, fingerprint_high};
+header.sequence = 1;
 
 std::string bytes;
 mujoco_sim::protocol::DataFrameError error;
@@ -42,29 +50,60 @@ if (!mujoco_sim::protocol::EncodeDataFrame(
 }
 ```
 
-The codec reads and writes individual fields and never casts a packed struct.
-Parsing validates magic, framing version, kind, flags, header size, exact total
-size, and scalar count before exposing the payload view. `DecodeDataFrameScalars`
-copies into caller-owned reusable storage. A reserved output buffer performs no
-steady-state allocation.
+The codec reads individual fields and never casts a packed struct. Parsing
+validates magic, version, kind-specific header size, flags, exact frame size,
+nonzero sequence, and scalar count before exposing the payload view. The
+caller must additionally validate session identity, layout, expected scalar
+count, finite values, command ranges, and sequence ordering against its active
+session.
 
-Sensor payloads use `<mujoco_sim/protocol/stream_frame.hpp>`: a fixed prefix,
-serialized V3 `StreamFrameHeader`, and raw payload bytes.
+The 16-byte layout fingerprint is FNV-1a-128 over canonical ordered resource
+metadata, each scalar offset, and the final observation/command scalar counts.
+`ValidateLayoutHash()` also requires nonzero resource dimensions, contiguous
+offsets, exact counts, and a matching fingerprint. It is an identity checksum,
+not a cryptographic digest.
+
+Sensor raw payloads use a separate `MJSTREAM` framing version 1.0 through
+`<mujoco_sim/protocol/stream_frame.hpp>`. Its 24-byte little-endian prefix
+contains magic, framing version, serialized Protocol V4 `StreamFrameHeader`
+size, and payload size. The serialized header is limited to 1 MiB and the raw
+payload to 512 MiB; the parser requires both encoded sizes and the Protobuf
+`payload_size` field to match the complete frame exactly.
 
 ## Endpoints
 
 | Helper | Result for `server=default`, `adapter=arm` |
 | --- | --- |
-| `RegistryServiceName` | `mujoco_sim.v3.default.registry` |
-| `TickTopicName` | `mujoco_sim/v3/default/tick/arm` |
-| `CommitTopicName` | `mujoco_sim/v3/default/commit` |
-| `ObservationTopicName` | `mujoco_sim/v3/default/observation/arm` |
-| `SessionHeartbeatTopicName` | `mujoco_sim/v3/default/session_heartbeat` |
-| `ControllerFaultTopicName` | `mujoco_sim/v3/default/controller_fault` |
-| `StatusTopicName` | `mujoco_sim/v3/default/status` |
-| `SensorStreamTopicName` | `mujoco_sim/v3/default/sensor/<stream>` |
+| `RegistryServiceName` | `mujoco_sim.v4.default.registry` |
+| `ControllerStateTopicName` | `mujoco_sim/v4/default/controller_state/arm` |
+| `ControllerCommandTopicName` | `mujoco_sim/v4/default/controller_command` |
+| `ObservationTopicName` | `mujoco_sim/v4/default/observation/arm` |
+| `SessionHeartbeatTopicName` | `mujoco_sim/v4/default/session_heartbeat` |
+| `ControllerFaultTopicName` | `mujoco_sim/v4/default/controller_fault` |
+| `StatusTopicName` | `mujoco_sim/v4/default/status` |
+| `SensorStreamTopicName` | `mujoco_sim/v4/default/sensor/<stream>` |
 
-There are no endpoint aliases or version negotiation fallbacks.
+Session heartbeat is used by Observers only. There are no endpoint aliases,
+older framing decoders, or version negotiation fallbacks.
+
+Identifiers are 1 to 64 ASCII characters, start with a letter or digit, and
+then contain only letters, digits, `_`, or `-`. Controller commands share one
+Server topic and are demultiplexed by session identity; State and Observation
+topics are per adapter.
+
+## Lifecycle messages
+
+Registration returns an immutable `ResourceLayout`; Controller registration
+also returns the complete granted `ControllerRuntimePolicy`. Controllers move
+through `PROVISIONAL`, `ACTIVE_NO_COMMAND`, `ONLINE`, `OFFLINE`, and terminal
+`ERROR`. A valid non-unspecified `ControllerFault` applies only to the exact
+session/epoch and enters `ERROR`; malformed, stale, duplicate, conflicting, or
+out-of-range Command frames are rejected without refreshing liveness or
+entering `ERROR`.
+
+Observers reuse `AdapterState` but do not use `ACTIVE_NO_COMMAND`. Automatic
+expiry, explicit unregister, and replacement publish one `UNREGISTERED`
+tombstone before that session disappears from later status messages.
 
 ## Build and test
 
@@ -75,7 +114,6 @@ cmake --build build/mujoco_sim_protocol -j
 ctest --test-dir build/mujoco_sim_protocol --output-on-failure
 ```
 
-`protocol_test` covers fixed golden bytes, malformed fields, unaligned input,
-NaN/Inf bit preservation, exact-size rejection, and an arbitrary-input corpus.
-`data_frame_allocation_test` verifies zero warmed-buffer allocations across
-10,000 encode/parse/decode iterations.
+Installed consumers use `find_package(mujoco_sim_protocol CONFIG REQUIRED)`,
+link `mujoco_sim::protocol`, and include the generated Protobuf API as
+`<mujoco_sim/v4/sync.pb.h>`.

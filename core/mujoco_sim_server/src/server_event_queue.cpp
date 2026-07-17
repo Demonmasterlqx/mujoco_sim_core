@@ -25,7 +25,8 @@ std::vector<ServerEvent> ServerEventQueue::WaitUntil(
     std::chrono::steady_clock::time_point deadline) {
   std::unique_lock lock(mutex_);
   condition_.wait_until(lock, deadline,
-                        [this] { return closed_ || !events_.empty(); });
+                        [this] { return closed_ || notification_pending_ || !events_.empty(); });
+  notification_pending_ = false;
   const std::size_t count = std::min(events_.size(), kMaxBatchSize);
   std::vector<ServerEvent> batch;
   batch.reserve(count);
@@ -46,13 +47,23 @@ void ServerEventQueue::Close(const char* reason) {
     payload_bytes_ = 0;
     pending.swap(events_);
   }
-  for (auto& event : pending) CancelRpcEvent(&event, reason);
+  for (auto& event : pending)
+    CancelRpcEvent(&event, reason);
   condition_.notify_all();
 }
 
 bool ServerEventQueue::closed() const {
   std::lock_guard lock(mutex_);
   return closed_;
+}
+
+void ServerEventQueue::Notify() {
+  {
+    std::lock_guard lock(mutex_);
+    if (closed_) return;
+    notification_pending_ = true;
+  }
+  condition_.notify_one();
 }
 
 std::size_t ServerEventQueue::size() const {

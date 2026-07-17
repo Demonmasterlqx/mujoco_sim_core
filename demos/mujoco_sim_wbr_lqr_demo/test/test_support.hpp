@@ -16,11 +16,9 @@ struct DenseTick {
   double simulation_time_s = 0.0;
 };
 
-inline std::size_t ObservationDimension(const InterfaceConfig& config,
-                                        std::string_view name) {
+inline std::size_t ObservationDimension(const InterfaceConfig& config, std::string_view name) {
   if (name == config.imu.quaternion) return 4;
-  if (name == config.imu.linear_acceleration ||
-      name == config.imu.angular_velocity) return 3;
+  if (name == config.imu.linear_acceleration || name == config.imu.angular_velocity) return 3;
   return 1;
 }
 
@@ -49,18 +47,16 @@ inline mujoco_sim::adapter_sdk::ControllerLayout MakeValidLayout(
     if (IsWheelActuator(name)) limit = 5.2;
     commands.push_back({name, {command_offset++, 1}, true, -limit, limit});
   }
-  return {std::move(observations), std::move(commands), offset,
-          command_offset};
+  return {std::move(observations), std::move(commands), offset, command_offset};
 }
 
 inline std::vector<double> DefaultValues(std::string_view name) {
   if (name == "imu_quat") return {1.0, 0.0, 0.0, 0.0};
   if (name == "imu_accel") return {0.0, 0.0, 9.81};
   if (name == "imu_gyro") return {0.0, 0.0, 0.0};
-  constexpr std::array<std::string_view, 6> motors{
-      "ljoint1", "ljoint4", "lwheel", "rjoint1", "rjoint4", "rwheel"};
-  constexpr std::array<double, 6> positions{-0.75, -2.25, 0.0,
-                                             0.75, 2.25, 0.0};
+  constexpr std::array<std::string_view, 6> motors{"ljoint1", "ljoint4", "lwheel",
+                                                   "rjoint1", "rjoint4", "rwheel"};
+  constexpr std::array<double, 6> positions{-0.75, -2.25, 0.0, 0.75, 2.25, 0.0};
   for (std::size_t i = 0; i < motors.size(); ++i) {
     const std::string prefix(motors[i]);
     if (name == prefix + "_pos") return {positions[i]};
@@ -77,9 +73,8 @@ inline void SetObservation(const mujoco_sim::adapter_sdk::ControllerLayout& layo
   std::copy(values.begin(), values.end(), output->begin() + span->offset);
 }
 
-inline DenseTick MakeValidTick(
-    const mujoco_sim::adapter_sdk::ControllerLayout& layout,
-    double simulation_time_s = 0.0) {
+inline DenseTick MakeValidTick(const mujoco_sim::adapter_sdk::ControllerLayout& layout,
+                               double simulation_time_s = 0.0) {
   DenseTick tick{{}, simulation_time_s};
   tick.observations.resize(layout.observation_scalar_count());
   for (const auto& resource : layout.observations()) {

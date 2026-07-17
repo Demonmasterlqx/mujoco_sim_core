@@ -8,7 +8,7 @@
 #include <vector>
 
 #include <control/msgs.hpp>
-#include <mujoco_sim/adapter_sdk/sync_adapter_client.hpp>
+#include <mujoco_sim/adapter_sdk/controller_client.hpp>
 #include <mujoco_sim/wbr_lqr_demo/config.hpp>
 
 namespace mujoco_sim::wbr_lqr_demo {
@@ -25,20 +25,17 @@ std::vector<std::string> WbrObservationNames();
 std::vector<std::string> WbrObservationNames(const InterfaceConfig& config);
 std::vector<std::string> WbrCommandNames();
 std::vector<std::string> WbrCommandNames(const InterfaceConfig& config);
-void ValidateWbrLayout(
-    const mujoco_sim::adapter_sdk::ControllerLayout& layout);
+void ValidateWbrLayout(const mujoco_sim::adapter_sdk::ControllerLayout& layout);
 void ValidateWbrLayout(const InterfaceConfig& config,
                        const mujoco_sim::adapter_sdk::ControllerLayout& layout);
 
-class TickDecoder {
+class StateDecoder {
  public:
-  explicit TickDecoder(
-      const mujoco_sim::adapter_sdk::ControllerLayout& registered_layout);
-  TickDecoder(InterfaceConfig config,
-              const mujoco_sim::adapter_sdk::ControllerLayout& registered_layout);
+  explicit StateDecoder(const mujoco_sim::adapter_sdk::ControllerLayout& registered_layout);
+  StateDecoder(InterfaceConfig config,
+               const mujoco_sim::adapter_sdk::ControllerLayout& registered_layout);
 
-  control::msg_raw_state_t Decode(
-      const mujoco_sim::adapter_sdk::TickLease& tick) const;
+  control::msg_raw_state_t Decode(const mujoco_sim::adapter_sdk::StateLease& state) const;
   control::msg_raw_state_t Decode(std::span<const double> observations,
                                   double simulation_time_s) const;
 
@@ -54,8 +51,7 @@ class TickDecoder {
 
 class TorqueCommandMapper {
  public:
-  explicit TorqueCommandMapper(
-      const mujoco_sim::adapter_sdk::ControllerLayout& registered_layout);
+  explicit TorqueCommandMapper(const mujoco_sim::adapter_sdk::ControllerLayout& registered_layout);
   TorqueCommandMapper(InterfaceConfig config,
                       const mujoco_sim::adapter_sdk::ControllerLayout& registered_layout);
 

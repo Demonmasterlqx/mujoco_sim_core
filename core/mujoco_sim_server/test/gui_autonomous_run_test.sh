@@ -22,9 +22,9 @@ if [[ "${status}" -ne 0 ]]; then
 fi
 
 grep -Fq "event=viewer_initialized mode=gui" "${log_path}"
-grep -Fq "event=server_stopped reason=max_ticks exit_code=0" \
+grep -Fq 'event=server_stopped reason="max_ticks" exit_code=0' \
   "${log_path}"
-if grep -Fq "event=tick_summary" "${log_path}"; then
+if grep -Fq "event=server_summary" "${log_path}"; then
   echo "log_summary_period_ms=0 unexpectedly emitted a summary" >&2
   exit 1
 fi

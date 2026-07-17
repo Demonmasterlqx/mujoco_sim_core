@@ -19,9 +19,10 @@ target_link_libraries(server PRIVATE server_config_generated)
 ```
 
 The function creates a library target and generates
-`server_config.hpp`/`server_config.cpp` under the consumer build tree. The
-target property `MUJOCO_SIM_CONFIG_HEADER` identifies the generated header.
-The installed runtime target is `mujoco_sim::config`.
+`server_config.hpp`/`server_config.cpp` under the consumer build tree. Without
+`OWNER_TARGET`, the helper target exposes `MUJOCO_SIM_CONFIG_HEADER` and
+`MUJOCO_SIM_CONFIG_SOURCE` properties. The installed runtime target is
+`mujoco_sim::config`.
 
 For an exported static library, attach generated sources directly so it does
 not expose a generated helper target in its package export:
@@ -34,6 +35,12 @@ mujoco_sim_generate_config(
   OWNER_TARGET server
 )
 ```
+
+With `OWNER_TARGET`, generated files and `mujoco_sim::config` are private to
+the owner. Their target properties are
+`MUJOCO_SIM_CONFIG_<TARGET>_HEADER` and
+`MUJOCO_SIM_CONFIG_<TARGET>_SOURCE`. `OUTPUT_DIRECTORY` can override the
+default generation directory; `OUTPUT_NAME` must be a valid C++ identifier.
 
 ## Schema
 
@@ -83,22 +90,26 @@ For the schema above, generation provides:
 ```cpp
 #include "server_config.hpp"
 
-generated::ServerConfig config;
+mujoco_sim::server::generated::ServerConfig config;
 std::string error;
-if (!generated::Parse(argc, argv, &config, &error)) {
+if (!mujoco_sim::server::generated::Parse(argc, argv, &config, &error)) {
   // Parse returns false for both errors and --help; --help returns Usage().
 }
-generated::Load("server.yaml", &config, &error);
-const std::string help = generated::Usage();
+mujoco_sim::server::generated::Load("server.yaml", &config, &error);
+const std::string help = mujoco_sim::server::generated::Usage();
 ```
 
 Existing business APIs can remain stable through thin forwarding wrappers:
 
 ```cpp
+namespace application {
+using ServerConfig = mujoco_sim::server::generated::ServerConfig;
+
 bool ParseCommandLine(int argc, char** argv, ServerConfig* value,
                       std::string* error) {
-  return generated::Parse(argc, argv, value, error);
+  return mujoco_sim::server::generated::Parse(argc, argv, value, error);
 }
+}  // namespace application
 ```
 
 Parsing is transactional. YAML is applied to a temporary copy, then CLI
@@ -114,9 +125,10 @@ working directory.
 ## Build And Test
 
 ```bash
-cmake -S . -B build -DBUILD_TESTING=ON
-cmake --build build
-ctest --test-dir build --output-on-failure
+cmake -S core/mujoco_sim_config -B build/mujoco_sim_config \
+  -DBUILD_TESTING=ON
+cmake --build build/mujoco_sim_config -j
+ctest --test-dir build/mujoco_sim_config --output-on-failure
 ```
 
 Tests cover schema generation, generated runtime behavior, and a consumer that

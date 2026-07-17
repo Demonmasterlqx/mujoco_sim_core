@@ -29,8 +29,7 @@ eCAL::SServiceMethodInformation MethodInfo(const std::string& method) {
 
 class EcalScope {
  public:
-  explicit EcalScope(const std::string& name)
-      : initialized_(eCAL::Initialize(name)) {}
+  explicit EcalScope(const std::string& name) : initialized_(eCAL::Initialize(name)) {}
 
   ~EcalScope() {
     if (initialized_) eCAL::Finalize();
@@ -70,13 +69,10 @@ TEST(SensorRuntimeEcalTest, CaptureErrorReachesStreamClient) {
   EcalScope ecal("mujoco-sim-runtime-error-test");
   ASSERT_TRUE(ecal.initialized());
   const std::string server_name =
-      "runtime-error-" + std::to_string(
-                             std::chrono::steady_clock::now()
-                                 .time_since_epoch()
-                                 .count());
+      "runtime-error-" +
+      std::to_string(std::chrono::steady_clock::now().time_since_epoch().count());
   auto config = MakeConfig(server_name);
-  mujoco_sim::core::SimulationCore core(
-      mujoco_sim::core::CoreOptions{server_name});
+  mujoco_sim::core::SimulationCore core(mujoco_sim::core::CoreOptions{server_name});
   std::string error;
   const auto loaded = core.LoadModel(config.model_path);
   ASSERT_TRUE(loaded.response.loaded) << loaded.response.message;
@@ -88,20 +84,17 @@ TEST(SensorRuntimeEcalTest, CaptureErrorReachesStreamClient) {
   mujoco_sim::server::SensorRuntime runtime(std::move(hooks));
   ASSERT_TRUE(runtime.Initialize(core, config, &error)) << error;
 
-  eCAL::CServiceServer registry(
-      mujoco_sim::protocol::RegistryServiceName(server_name));
+  eCAL::CServiceServer registry(mujoco_sim::protocol::RegistryServiceName(server_name));
   ASSERT_TRUE(registry.SetMethodCallback(
       MethodInfo(mujoco_sim::protocol::kGetSensorStreamsMethod),
-      [&runtime](const eCAL::SServiceMethodInformation&,
-                 const std::string& request_bytes,
+      [&runtime](const eCAL::SServiceMethodInformation&, const std::string& request_bytes,
                  std::string& response_bytes) {
-        mujoco_sim::v3::GetSensorStreamsRequest request;
+        mujoco_sim::v4::GetSensorStreamsRequest request;
         if (!request.ParseFromString(request_bytes)) return 1;
         const auto response = runtime.GetCatalog(request);
         return response.SerializeToString(&response_bytes) ? 0 : 1;
       }));
-  eCAL::CPublisher status_publisher(
-      mujoco_sim::protocol::StatusTopicName(server_name));
+  eCAL::CPublisher status_publisher(mujoco_sim::protocol::StatusTopicName(server_name));
 
   mujoco_sim::adapter_sdk::SensorStreamOptions options;
   options.server_name = server_name;
@@ -117,33 +110,28 @@ TEST(SensorRuntimeEcalTest, CaptureErrorReachesStreamClient) {
   ASSERT_GT(status_publisher.GetSubscriberCount(), 0U);
 
   mujoco_sim::adapter_sdk::OwnedStreamSample sample;
-  auto waiting = std::async(std::launch::async, [&] {
-    return client.WaitForSample("lidar", 5s, &sample, &error);
-  });
+  auto waiting = std::async(std::launch::async,
+                            [&] { return client.WaitForSample("lidar", 5s, &sample, &error); });
   const auto error_deadline = std::chrono::steady_clock::now() + 4s;
   while (waiting.wait_for(0ms) != std::future_status::ready &&
          std::chrono::steady_clock::now() < error_deadline) {
-    core.OpenIssuedTicks();
-    ASSERT_TRUE(core.CompleteEmptyBarrier().step_completed.has_value());
+    ASSERT_TRUE(core.Step().step_completed.has_value());
     runtime.OnStepCompleted(core);
     runtime.CompleteBlockingEnqueues();
-    mujoco_sim::v3::ServerStatus status;
+    mujoco_sim::v4::ServerStatus status;
     status.set_epoch(core.state().epoch);
     status.set_tick_id(core.state().current_tick_id);
     status.set_simulation_time_s(core.state().simulation_time_s);
-    status.set_state(mujoco_sim::v3::RUNNING);
+    status.set_state(mujoco_sim::v4::RUNNING);
     runtime.AppendStatus(&status);
     status_publisher.Send(status.SerializeAsString());
     std::this_thread::sleep_for(20ms);
   }
 
   ASSERT_EQ(waiting.wait_for(0ms), std::future_status::ready);
-  EXPECT_EQ(waiting.get(),
-            mujoco_sim::adapter_sdk::SampleWaitResult::kError);
-  EXPECT_NE(error.find("injected runtime capture failure"),
-            std::string::npos);
-  EXPECT_NE(client.stream_diagnostic("lidar").find(
-                "injected runtime capture failure"),
+  EXPECT_EQ(waiting.get(), mujoco_sim::adapter_sdk::SampleWaitResult::kError);
+  EXPECT_NE(error.find("injected runtime capture failure"), std::string::npos);
+  EXPECT_NE(client.stream_diagnostic("lidar").find("injected runtime capture failure"),
             std::string::npos);
   client.Stop();
   runtime.Stop();

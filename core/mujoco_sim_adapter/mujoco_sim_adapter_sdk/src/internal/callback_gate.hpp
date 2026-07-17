@@ -36,10 +36,8 @@ class CallbackGate {
       {
         std::lock_guard lock(state_->mutex);
         --state_->active_callbacks;
-        const auto found =
-            state_->callbacks_by_thread.find(std::this_thread::get_id());
-        if (found != state_->callbacks_by_thread.end() &&
-            --found->second == 0) {
+        const auto found = state_->callbacks_by_thread.find(std::this_thread::get_id());
+        if (found != state_->callbacks_by_thread.end() && --found->second == 0) {
           state_->callbacks_by_thread.erase(found);
         }
       }
@@ -66,13 +64,11 @@ class CallbackGate {
 
   static void WaitForOtherCallbacks(const std::shared_ptr<State>& state) {
     std::unique_lock lock(state->mutex);
-    const auto current =
-        state->callbacks_by_thread.find(std::this_thread::get_id());
+    const auto current = state->callbacks_by_thread.find(std::this_thread::get_id());
     const std::size_t callbacks_on_this_thread =
         current == state->callbacks_by_thread.end() ? 0 : current->second;
-    state->condition.wait(lock, [&] {
-      return state->active_callbacks <= callbacks_on_this_thread;
-    });
+    state->condition.wait(lock,
+                          [&] { return state->active_callbacks <= callbacks_on_this_thread; });
   }
 };
 

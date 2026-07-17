@@ -47,8 +47,7 @@ TEST(ModelContractTest, LoadsSceneWithFixedStepAndAllMeshes) {
   EXPECT_EQ(model.get()->nmesh, 15);
 
   std::size_t stl_count = 0;
-  for (const auto& entry :
-       std::filesystem::directory_iterator(mjcf_dir / "meshes")) {
+  for (const auto& entry : std::filesystem::directory_iterator(mjcf_dir / "meshes")) {
     if (entry.is_regular_file() && entry.path().extension() == ".STL") {
       ++stl_count;
     }
@@ -64,12 +63,9 @@ TEST(ModelContractTest, ExposesTwentyOneNamedStateResources) {
 
   int total_dimension = 0;
   for (const auto& name : demo::WbrObservationNames()) {
-    const int sensor_id =
-        mj_name2id(model.get(), mjOBJ_SENSOR, name.c_str());
+    const int sensor_id = mj_name2id(model.get(), mjOBJ_SENSOR, name.c_str());
     ASSERT_GE(sensor_id, 0) << name;
-    EXPECT_EQ(model.get()->sensor_dim[sensor_id],
-              ExpectedSensorDimension(name))
-        << name;
+    EXPECT_EQ(model.get()->sensor_dim[sensor_id], ExpectedSensorDimension(name)) << name;
     total_dimension += model.get()->sensor_dim[sensor_id];
   }
   EXPECT_EQ(total_dimension, 28);
@@ -84,21 +80,17 @@ TEST(ModelContractTest, PreservesSixMotorOrderAndControlRanges) {
   const auto names = demo::WbrCommandNames();
   ASSERT_EQ(names.size(), 6U);
   for (std::size_t i = 0; i < names.size(); ++i) {
-    const int actuator_id =
-        mj_name2id(model.get(), mjOBJ_ACTUATOR, names[i].c_str());
+    const int actuator_id = mj_name2id(model.get(), mjOBJ_ACTUATOR, names[i].c_str());
     ASSERT_EQ(actuator_id, static_cast<int>(i)) << names[i];
     EXPECT_TRUE(model.get()->actuator_ctrllimited[actuator_id]);
     const double expected_limit = (i == 2 || i == 5) ? 5.2 : 20.0;
-    EXPECT_DOUBLE_EQ(model.get()->actuator_ctrlrange[2 * actuator_id],
-                     -expected_limit);
-    EXPECT_DOUBLE_EQ(model.get()->actuator_ctrlrange[2 * actuator_id + 1],
-                     expected_limit);
+    EXPECT_DOUBLE_EQ(model.get()->actuator_ctrlrange[2 * actuator_id], -expected_limit);
+    EXPECT_DOUBLE_EQ(model.get()->actuator_ctrlrange[2 * actuator_id + 1], expected_limit);
   }
 }
 
 TEST(ModelContractTest, CoreLoadsHomeKeyframeAndBuildsCatalogs) {
-  const std::filesystem::path scene =
-      std::filesystem::path(WBR_LQR_MJCF_DIR) / "scene.xml";
+  const std::filesystem::path scene = std::filesystem::path(WBR_LQR_MJCF_DIR) / "scene.xml";
   mujoco_sim::core::SimulationCore core;
   mujoco_sim::core::ModelLoadOptions options;
   options.initial_keyframe = "home";

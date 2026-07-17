@@ -9,7 +9,7 @@
 #include <ecal/pubsub/subscriber.h>
 #include <mujoco_sim/adapter_sdk/observer_client.hpp>
 #include <mujoco_sim/protocol/data_frame.hpp>
-#include <mujoco_sim/v3/sync.pb.h>
+#include <mujoco_sim/v4/sync.pb.h>
 
 #include "adapter_session.hpp"
 #include "adapter_transport.hpp"
@@ -29,9 +29,8 @@ class ObserverClient::Impl : public std::enable_shared_from_this<Impl> {
   ~Impl();
   bool Start(std::string* error_message);
   bool Activate(std::string* error_message);
-  ObservationWaitResult WaitForObservation(
-      std::chrono::milliseconds timeout, ObservationLease* frame,
-      std::string* error_message);
+  ObservationWaitResult WaitForObservation(std::chrono::milliseconds timeout,
+                                           ObservationLease* frame, std::string* error_message);
   void Stop();
   bool Unregister(std::string* error_message);
   std::uint64_t dropped_frames() const;
@@ -50,7 +49,7 @@ class ObserverClient::Impl : public std::enable_shared_from_this<Impl> {
   bool FinishStart(std::string* error_message);
   bool WaitBeforeActivation(std::chrono::milliseconds delay);
   bool UnregisterSession(std::string* error_message);
-  bool CompleteUnregister(const mujoco_sim::v3::UnregisterAdapterResponse& response,
+  bool CompleteUnregister(const mujoco_sim::v4::UnregisterAdapterResponse& response,
                           std::string* error_message);
   void MarkStoppedLocked();
   void TransitionToStopped();
@@ -62,14 +61,14 @@ class ObserverClient::Impl : public std::enable_shared_from_this<Impl> {
   void StartHeartbeatThread();
   void JoinHeartbeatThread();
   void HeartbeatLoop();
-  mujoco_sim::v3::SessionHeartbeat BuildHeartbeat() const;
+  mujoco_sim::v4::SessionHeartbeat BuildHeartbeat() const;
 
   using CallbackGate = internal::CallbackGate<Impl>;
   using CallbackState = CallbackGate::State;
   using CallbackLease = CallbackGate::Lease;
 
   ObserverOptions options_;
-  mujoco_sim::v3::RegisterAdapterResponse wire_registration_;
+  mujoco_sim::v4::RegisterAdapterResponse wire_registration_;
   AdapterRegistration registration_;
   mujoco_sim::protocol::LayoutFingerprint layout_fingerprint_{};
   std::shared_ptr<internal::AdapterTransport> transport_;

@@ -24,7 +24,11 @@ bool SimViewer::Synchronize(core::SimulationCore&, core::SimulationSnapshot&,
 void SimViewer::RenderLoop() {}
 void SimViewer::RequestScreenshot() {}
 void SimViewer::RequestClose() {}
-bool SimViewer::close_requested() const { return true; }
-bool SimViewer::model_loaded() const { return false; }
+bool SimViewer::close_requested() const {
+  return true;
+}
+bool SimViewer::model_loaded() const {
+  return false;
+}
 
 }  // namespace mujoco_sim::server

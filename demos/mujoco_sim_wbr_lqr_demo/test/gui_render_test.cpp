@@ -19,8 +19,7 @@ using namespace std::chrono_literals;
 
 class ScopedScreenshot {
  public:
-  ScopedScreenshot()
-      : path_(std::filesystem::current_path() / "screenshot.png") {
+  ScopedScreenshot() : path_(std::filesystem::current_path() / "screenshot.png") {
     std::error_code error;
     std::filesystem::remove(path_, error);
   }
@@ -43,8 +42,7 @@ TEST(WbrGuiRenderTest, CapturesNonBlankModelFrame) {
   load_options.initial_keyframe = "home";
   std::string error;
   const auto model_load = core.LoadModel(
-      (std::filesystem::path(WBR_LQR_MJCF_DIR) / "scene.xml").string(),
-      load_options);
+      (std::filesystem::path(WBR_LQR_MJCF_DIR) / "scene.xml").string(), load_options);
   ASSERT_TRUE(model_load.response.loaded) << model_load.response.message;
   auto snapshot = core.CreateSnapshot(&error);
   ASSERT_NE(snapshot, nullptr) << error;
@@ -60,8 +58,7 @@ TEST(WbrGuiRenderTest, CapturesNonBlankModelFrame) {
       return;
     }
     const auto load_deadline = std::chrono::steady_clock::now() + 3s;
-    while (!viewer.model_loaded() &&
-           std::chrono::steady_clock::now() < load_deadline) {
+    while (!viewer.model_loaded() && std::chrono::steady_clock::now() < load_deadline) {
       std::this_thread::sleep_for(5ms);
     }
     loaded = viewer.model_loaded();
@@ -84,23 +81,17 @@ TEST(WbrGuiRenderTest, CapturesNonBlankModelFrame) {
 
   png_image image{};
   image.version = PNG_IMAGE_VERSION;
-  ASSERT_NE(png_image_begin_read_from_file(&image,
-                                           screenshot.path().c_str()),
-            0)
-      << image.message;
+  ASSERT_NE(png_image_begin_read_from_file(&image, screenshot.path().c_str()), 0) << image.message;
   image.format = PNG_FORMAT_RGB;
   std::vector<unsigned char> pixels(PNG_IMAGE_SIZE(image));
-  ASSERT_NE(png_image_finish_read(&image, nullptr, pixels.data(), 0, nullptr),
-            0)
-      << image.message;
+  ASSERT_NE(png_image_finish_read(&image, nullptr, pixels.data(), 0, nullptr), 0) << image.message;
   const auto width = image.width;
   const auto height = image.height;
   png_image_free(&image);
 
   EXPECT_GE(width, 320U);
   EXPECT_GE(height, 240U);
-  const auto [minimum, maximum] =
-      std::minmax_element(pixels.begin(), pixels.end());
+  const auto [minimum, maximum] = std::minmax_element(pixels.begin(), pixels.end());
   ASSERT_NE(minimum, pixels.end());
   EXPECT_GT(static_cast<int>(*maximum) - static_cast<int>(*minimum), 20);
 }

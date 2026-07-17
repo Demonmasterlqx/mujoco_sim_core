@@ -2,7 +2,7 @@ version: 1
 namespace: mujoco_sim::server::generated
 name: ServerConfig
 program: mujoco-sim-server
-description: Run the MuJoCo lockstep simulation server
+description: Run the MuJoCo asynchronous simulation server
 fields:
   server_name:
     type: string
@@ -24,59 +24,120 @@ fields:
     description: Stop successfully after this many ticks; zero is unlimited
     default: 0
     cli: [--max-ticks]
-  tick_timeout_ms:
+  pacing_mode:
+    type: string
+    description: Simulation pacing mode, realtime or unthrottled
+    default: realtime
+  realtime_factor:
+    type: double
+    description: Simulation time to wall time ratio in realtime mode
+    default: 1.0
+    finite: true
+    min: 0.000001
+  command_timeout_ms:
     type: uint32
-    description: Default Controller barrier or Observer keepalive timeout in milliseconds
-    default: 1000
-    cli: [--tick-timeout-ms]
+    description: Time without a valid Controller command before OFFLINE
+    default: 500
+    min: 1
+  command_keepalive_ms:
+    type: uint32
+    description: Granted SDK command keepalive period
+    default: 100
+    min: 1
+  offline_session_expire_ms:
+    type: uint32
+    description: OFFLINE lifetime before automatic unregister; zero disables
+    default: 0
+  controller_state_every_n_steps:
+    type: uint32
+    description: Default Controller State cadence
+    default: 1
+    min: 1
+  controller_state_period_s:
+    type: double
+    description: Simulation-time Controller State period; zero selects every_n_steps
+    default: 0.0
+    finite: true
+    min: 0.0
+  controller_state_max_rate_hz:
+    type: double
+    description: Maximum Controller State publication frequency
+    default: 1000.0
+    finite: true
+    min: 0.000001
+  startup_ctrl_policy:
+    type: string
+    description: startup ctrl policy
+    default: zero
+  offline_ctrl_policy:
+    type: string
+    description: offline ctrl policy
+    default: hold_last
+  error_ctrl_policy:
+    type: string
+    description: error ctrl policy
+    default: zero
+  release_ctrl_policy:
+    type: string
+    description: release ctrl policy
+    default: zero
+  controller_overrides:
+    type: object_sequence
+    items:
+      type: object
+      fields:
+        adapter_id:
+          type: string
+          required: true
+          non_empty: true
+        command_timeout_ms:
+          type: uint32
+          default: 500
+          min: 1
+        command_keepalive_ms:
+          type: uint32
+          default: 100
+          min: 1
+        offline_session_expire_ms:
+          type: uint32
+          default: 0
+        state_every_n_steps:
+          type: uint32
+          default: 1
+          min: 1
+        state_period_s:
+          type: double
+          default: 0.0
+          finite: true
+          min: 0.0
+        startup_ctrl_policy:
+          type: string
+          default: zero
+        offline_ctrl_policy:
+          type: string
+          default: hold_last
+        error_ctrl_policy:
+          type: string
+          default: zero
+        release_ctrl_policy:
+          type: string
+          default: zero
   session_timeout_ms:
     type: uint32
     description: Adapter presence timeout in milliseconds
     default: 1000
     min: 1
-  controller_heartbeat_period_ms:
-    type: uint32
-    description: Controller keepalive period while no Commit is being published
-    default: 250
-    min: 100
   observer_heartbeat_period_ms:
     type: uint32
     description: Observer keepalive period in milliseconds
     default: 250
     min: 100
-  tick_retry_initial_ms:
-    type: uint32
-    description: Delay before the first Tick retransmission
-    default: 5
-    min: 1
-  tick_retry_backoff_multiplier:
-    type: double
-    description: Tick retransmission delay multiplier
-    default: 2.0
-    finite: true
-    min: 1.0
-  tick_retry_max_delay_ms:
-    type: uint32
-    description: Maximum Tick retransmission delay
-    default: 20
-    min: 1
-  tick_retry_max_attempts:
-    type: uint32
-    description: Maximum retransmissions for one Controller and Barrier
-    default: 3
   activation_timeout_ms:
     type: uint32
     description: Maximum time a provisional adapter may wait before activation
     default: 5000
     min: 1
     cli: [--activation-timeout-ms]
-  allow_timed_out_adapter_replacement:
-    type: bool
-    description: Timed-out adapter replacement policy toggle
-    default: true
-    cli:
-      flags: [--allow-timed-out-adapter-replacement]
-      inverse_flags: [--deny-timed-out-adapter-replacement]
   status_period_ms:
     type: uint32
     description: Server status publication period in milliseconds

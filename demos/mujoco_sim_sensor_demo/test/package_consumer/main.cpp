@@ -6,8 +6,7 @@
 int main() {
   std::string error;
   mujoco_sim::sensor_demo::ImuSynchronizer synchronizer(2);
-  if (!synchronizer.Add(
-          {0.0, Eigen::Quaterniond::Identity()}, &error)) {
+  if (!synchronizer.Add({0.0, Eigen::Quaterniond::Identity()}, &error)) {
     return 1;
   }
   mujoco_sim::sensor_demo::WaypointController controller;

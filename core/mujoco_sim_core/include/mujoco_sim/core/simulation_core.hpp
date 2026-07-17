@@ -1,14 +1,11 @@
 #pragma once
 
 #include <array>
-#include <atomic>
 #include <chrono>
 #include <cstdint>
 #include <memory>
-#include <optional>
 #include <span>
 #include <string>
-#include <unordered_map>
 #include <vector>
 
 #include <mujoco_sim/core/domain.hpp>
@@ -18,326 +15,165 @@ struct mjModel_;
 
 namespace mujoco_sim::core {
 
-class SimulationSnapshot;
 namespace detail {
 class SnapshotManager;
 }
 
-/// Construction-time policy for one SimulationCore instance.
 struct CoreOptions {
-  /// Logical server identity required in all addressed protocol messages.
+  struct ControllerOverride {
+    std::string adapter_id;
+    std::uint32_t command_timeout_ms = 500;
+    std::uint32_t command_keepalive_ms = 100;
+    std::uint32_t offline_session_expire_ms = 0;
+    ObservationDelivery state_delivery;
+    ControlPolicy startup_policy = ControlPolicy::kZero;
+    ControlPolicy offline_policy = ControlPolicy::kHoldLast;
+    ControlPolicy error_policy = ControlPolicy::kZero;
+    ControlPolicy release_policy = ControlPolicy::kZero;
+  };
   std::string server_name = "default";
-  /// Default Controller Barrier Commit timeout in milliseconds.
-  std::uint32_t default_commit_timeout_ms = 1000;
-  /// Default Controller/Observer presence timeout in milliseconds.
-  std::uint32_t default_session_timeout_ms = 1000;
-  /// Maximum provisional lifetime before registration expires, in milliseconds.
+  std::uint32_t command_timeout_ms = 500;
+  std::uint32_t command_keepalive_ms = 100;
+  std::uint32_t observer_session_timeout_ms = 1000;
   std::uint32_t activation_timeout_ms = 5000;
-  /// Whether a timed-out adapter ID may atomically receive a new session.
-  bool allow_timed_out_adapter_replacement = true;
+  std::uint32_t offline_session_expire_ms = 0;
+  ObservationDelivery controller_state_delivery = [] {
+    ObservationDelivery d;
+    d.set_every_n_steps(1);
+    return d;
+  }();
+  double controller_state_max_rate_hz = 1000.0;
+  ControlPolicy startup_policy = ControlPolicy::kZero;
+  ControlPolicy offline_policy = ControlPolicy::kHoldLast;
+  ControlPolicy error_policy = ControlPolicy::kZero;
+  ControlPolicy release_policy = ControlPolicy::kZero;
+  std::vector<ControllerOverride> controller_overrides;
 };
-
-/// Options applied while preparing a replacement MuJoCo model.
 struct ModelLoadOptions {
-  /// Optional keyframe name applied before the new model is committed.
   std::string initial_keyframe;
 };
-
-/// Operation that caused an open Barrier to complete exactly one step.
-enum class StepCompletionSource {
-  kCommit,       ///< The last required Controller committed.
-  kDeadline,     ///< Missing Controllers timed out.
-  kUnregister,   ///< Removing a required Controller completed the Barrier.
-  kLocalError,   ///< A Controller-local error removed it from the Barrier.
-  kEmptyBarrier, ///< A Barrier with no required Controllers was completed.
+enum class AdapterChangeKind {
+  kRegistered,
+  kActivated,
+  kUnregistered,
+  kActivationExpired,
+  kTimedOut,
+  kRecovered,
+  kLocalError,
+  kServerFailed,
+  kReplaced
 };
-
-/// Immutable description of the state produced by one completed MuJoCo step.
+struct AdapterChange {
+  AdapterChangeKind kind = AdapterChangeKind::kRegistered;
+  std::string adapter_id;
+  AdapterRole role = ADAPTER_ROLE_UNSPECIFIED;
+  std::uint64_t session_id = 0;
+  std::optional<std::uint64_t> previous_session_id;
+  AdapterState old_state = ADAPTER_STATE_UNSPECIFIED, new_state = ADAPTER_STATE_UNSPECIFIED;
+  std::string message;
+  std::uint64_t tick_id = 0;
+};
 struct StepCompletedEvent {
-  /// Tick ID whose frozen Barrier membership produced the step.
-  std::uint64_t completed_tick_id = 0;
-  /// Tick ID to use for the next Barrier; exactly completed_tick_id + 1.
-  std::uint64_t next_tick_id = 0;
-  /// MuJoCo simulation time after the step, in seconds.
-  double simulation_time_s = 0.0;
-  /// Lifecycle operation that completed the Barrier.
-  StepCompletionSource source = StepCompletionSource::kCommit;
-  /// Post-step frames due for active Observers, in delivery order.
+  std::uint64_t completed_tick_id = 0, next_tick_id = 0;
+  double simulation_time_s = 0;
+  std::vector<ControllerStateFrame> controller_states;
   std::vector<ObservationFrame> observer_frames;
 };
-
-/// Adapter lifecycle transition emitted by a mutating Core operation.
-enum class AdapterChangeKind {
-  kRegistered,        ///< A new provisional session was created.
-  kActivated,         ///< A provisional session became active.
-  kUnregistered,      ///< A matching session was removed.
-  kActivationExpired, ///< A provisional session exceeded its deadline.
-  kTimedOut,          ///< An active session exceeded a liveness deadline.
-  kRecoveryPending,   ///< Recovery proof was accepted for the next Tick.
-  kRecovered,         ///< A recovery-pending Controller became active.
-  kLocalError,        ///< A Controller-local Commit error occurred.
-  kServerFailed,      ///< A server-wide failure propagated to the adapter.
-  kReplaced,          ///< A timed-out session was atomically replaced.
-};
-
-/// Before/after projection for one adapter lifecycle mutation.
-struct AdapterChange {
-  /// Kind of lifecycle mutation.
-  AdapterChangeKind kind = AdapterChangeKind::kRegistered;
-  /// Stable adapter ID affected by the mutation.
-  std::string adapter_id;
-  /// Adapter role for disambiguating Controller and Observer namespaces.
-  mujoco_sim::core::AdapterRole role =
-      mujoco_sim::core::ADAPTER_ROLE_UNSPECIFIED;
-  /// Session affected by the mutation; nonzero for registered adapters.
-  std::uint64_t session_id = 0;
-  /// Replaced session, present only for kReplaced.
-  std::optional<std::uint64_t> previous_session_id;
-  /// Wire-visible state immediately before the mutation.
-  mujoco_sim::core::ControllerState old_state =
-      mujoco_sim::core::CONTROLLER_STATE_UNSPECIFIED;
-  /// Wire-visible state immediately after the mutation.
-  mujoco_sim::core::ControllerState new_state =
-      mujoco_sim::core::CONTROLLER_STATE_UNSPECIFIED;
-  /// Diagnostic associated with the transition; may be empty on success.
-  std::string message;
-  /// Current Core Tick when the transition was recorded.
-  std::uint64_t tick_id = 0;
-};
-
-/// Side effects that the single owning SimulationLoop applies after mutation.
 struct EngineEffects {
-  /// Adapter lifecycle changes caused by the operation, in mutation order.
   std::vector<AdapterChange> adapter_changes;
-  /// Present when this operation completed exactly one MuJoCo step.
   std::optional<StepCompletedEvent> step_completed;
-  enum class StatusUrgency { kNone, kPeriodicOnly, kLifecycle, kTerminal };
+  enum class StatusUrgency {
+    kNone,
+    kPeriodicOnly,
+    kLifecycle,
+    kTerminal
+  };
   StatusUrgency status_urgency = StatusUrgency::kNone;
 };
-
-/// Response and all externally applied effects from one Core operation.
-template <typename Response>
+template <class Response>
 struct EngineResult {
-  /// Operation-specific response. A rejected input normally has empty effects;
-  /// a Controller-local Commit error may also carry isolation effects.
   Response response;
-  /// Ordered effects generated by the same atomic Core mutation.
   EngineEffects effects;
 };
-
-/// Result of a transactional model load.
 struct ModelLoadReceipt {
-  /// True only when the prepared model became the live model.
   bool loaded = false;
-  /// Diagnostic on failure; empty after a successful load.
   std::string message;
 };
-
-/// Core result of processing one AdapterCommit.
-struct CommitReceipt {
-  /// Validation or lifecycle result code.
-  mujoco_sim::core::ErrorCode code = mujoco_sim::core::OK;
-  /// Human-readable result; callers must branch on code, not this text.
+struct CommandReceipt {
+  ErrorCode code = OK;
   std::string message;
-  /// True when an identical prior Commit was recognized without mutation.
-  bool duplicate = false;
 };
-
-/// Borrowed resource catalog for the current model generation.
 struct CoreResources {
-  /// Observation descriptors in canonical layout order.
-  std::span<const mujoco_sim::core::ResourceDescriptor> observations;
-  /// Command descriptors in canonical layout order.
-  std::span<const mujoco_sim::core::ResourceDescriptor> commands;
+  std::span<const ResourceDescriptor> observations, commands;
 };
-
-/// Coherent read-only summary of the current Core state.
 struct CoreState {
-  /// Current model generation; increments on successful model replacement.
-  std::uint64_t epoch = 0;
-  /// Next or currently open Barrier Tick ID, monotonic within an epoch.
-  std::uint64_t current_tick_id = 0;
-  /// Live MuJoCo simulation time in seconds.
-  double simulation_time_s = 0.0;
-  /// Loaded model timestep in seconds, or zero before model load.
-  double timestep_s = 0.0;
-  /// Current wire-visible server lifecycle state.
-  mujoco_sim::core::ServerState server_state =
-      mujoco_sim::core::SERVER_STATE_UNSPECIFIED;
-  /// True while Barrier membership is frozen for a Tick.
-  bool tick_open = false;
-  /// Number of Controllers participating in future Barriers.
+  std::uint64_t epoch = 0, current_tick_id = 0;
+  double simulation_time_s = 0, timestep_s = 0;
+  ServerState server_state = SERVER_STATE_UNSPECIFIED;
   std::size_t active_controller_count = 0;
-  /// Controller counts indexed by the numeric domain ControllerState value.
-  std::array<std::size_t, 6> controller_counts{};
-  /// Observer counts indexed by the numeric domain ControllerState value.
-  std::array<std::size_t, 6> observer_counts{};
-
-  /// Returns the number of Controllers projected to `state`.
-  std::size_t controller_count(
-      mujoco_sim::core::ControllerState state) const noexcept;
-  /// Returns the number of Observers projected to `state`.
-  std::size_t observer_count(
-      mujoco_sim::core::ControllerState state) const noexcept;
+  std::array<std::size_t, 7> controller_counts{}, observer_counts{};
+  std::size_t controller_count(AdapterState s) const noexcept {
+    return controller_counts[static_cast<std::size_t>(s)];
+  }
+  std::size_t observer_count(AdapterState s) const noexcept {
+    return observer_counts[static_cast<std::size_t>(s)];
+  }
 };
 
-/// Identity required to prove that an issued Tick handle is still current.
-struct IssuedTickIdentity {
-  /// Controller that received the Tick.
-  std::string adapter_id;
-  /// Session at issue time.
-  std::uint64_t session_id = 0;
-  /// Model generation at issue time.
-  std::uint64_t epoch = 0;
-  /// Barrier Tick at issue time.
-  std::uint64_t tick_id = 0;
-  /// Monotonic in-process generation distinguishing reissued handles.
-  std::uint64_t issue_generation = 0;
-};
-
-/// Immutable dense Tick payload for one Controller/Tick.
-struct IssuedTick {
-  Tick frame;
-  /// Identity used to query current validity.
-  IssuedTickIdentity identity;
-  /// False after a lifecycle boundary invalidates this handle.
-  mutable std::atomic<bool> current{true};
-};
-
-/// Shared immutable handle whose payload survives timeout for recovery proof.
-using IssuedTickHandle = std::shared_ptr<const IssuedTick>;
-
-
-/// Move-only isolated mjData snapshot tied to one Core model generation.
 class SimulationSnapshot {
  public:
-  /// Destroys the owned mjData. The shared model remains alive as needed.
   ~SimulationSnapshot();
-
   SimulationSnapshot(const SimulationSnapshot&) = delete;
   SimulationSnapshot& operator=(const SimulationSnapshot&) = delete;
-  /// Transfers snapshot model/data ownership to the destination.
   SimulationSnapshot(SimulationSnapshot&&) noexcept;
-  /// Replaces this snapshot with ownership transferred from `other`.
   SimulationSnapshot& operator=(SimulationSnapshot&&) noexcept;
-
-  /// Returns the immutable model shared with the Core model generation.
   const mjModel_* model() const;
-  /// Returns snapshot-owned mutable data; never aliases the live Core mjData.
   mjData_* data() const;
 
  private:
   struct Impl;
   SimulationSnapshot();
-
   std::unique_ptr<Impl> impl_;
-
   friend class SimulationCore;
   friend class detail::SnapshotManager;
 };
 
-/// Single-writer domain facade for deterministic lockstep simulation.
-///
-/// No method is internally synchronized. Except for destruction or
-/// move-assignment of a moved-from object, every method must be invoked by the
-/// one thread that owns the Core. Returned snapshots may be consumed outside
-/// that thread only while no method updates the same snapshot object.
 class SimulationCore {
  public:
-  /// Creates a Core for one server identity.
-  ///
-  /// Thread safety: after construction, all methods must be called by one
-  /// owner thread. SimulationCore does not perform internal synchronization.
   explicit SimulationCore(CoreOptions options = {});
   ~SimulationCore();
-
   SimulationCore(const SimulationCore&) = delete;
   SimulationCore& operator=(const SimulationCore&) = delete;
-  /// Transfers the complete implementation to the destination.
-  ///
-  /// A moved-from object may only be destroyed or move-assigned.
   SimulationCore(SimulationCore&&) noexcept;
-  /// Replaces this Core with the complete implementation from `other`.
-  /// The moved-from object may only be destroyed or move-assigned.
   SimulationCore& operator=(SimulationCore&&) noexcept;
-
-  /// Transactionally replaces the model and resets sessions, epoch and Tick.
-  ///
-  /// On failure, the currently loaded model and all Core state remain intact.
-  /// On success, snapshots from the prior model generation cannot be updated.
-  EngineResult<ModelLoadReceipt> LoadModel(
-      const std::string& model_path, const ModelLoadOptions& options = {});
-  /// Returns whether a live model/data pair has been committed.
+  EngineResult<ModelLoadReceipt> LoadModel(const std::string&,
+                                           const ModelLoadOptions& options = {});
   bool IsModelLoaded() const;
-
-  /// Creates an isolated mjData snapshot of the current simulation state.
-  /// Returns null on failure and writes a diagnostic when provided.
-  std::unique_ptr<SimulationSnapshot> CreateSnapshot(
-      std::string* error_message) const;
-  /// Clones a snapshot owned by this Core and current model generation.
-  std::unique_ptr<SimulationSnapshot> CloneSnapshot(
-      const SimulationSnapshot& source, std::string* error_message) const;
-  /// Refreshes an owned current-generation snapshot from live simulation data.
-  /// On failure, snapshot data is not modified.
-  bool UpdateSnapshot(SimulationSnapshot& snapshot,
-                      std::string* error_message) const;
-
-  /// Returns borrowed descriptors owned by the current model generation.
-  /// Both spans are invalidated by the next successful LoadModel(), or when
-  /// the owning Core implementation is destroyed or replaced.
+  std::unique_ptr<SimulationSnapshot> CreateSnapshot(std::string*) const;
+  std::unique_ptr<SimulationSnapshot> CloneSnapshot(const SimulationSnapshot&, std::string*) const;
+  bool UpdateSnapshot(SimulationSnapshot&, std::string*) const;
   CoreResources resources() const;
-
-  /// Validates protocol identity and returns the current resource catalog.
-  /// This query does not mutate Core state and is safe to retry.
-  mujoco_sim::core::GetAvailableResourcesResponse GetAvailableResources(
-      const mujoco_sim::core::GetAvailableResourcesRequest& request) const;
-  /// Registers a provisional adapter without opening the current Barrier.
-  EngineResult<mujoco_sim::core::RegisterAdapterResponse> RegisterAdapter(
-      const mujoco_sim::core::RegisterAdapterRequest& request);
-  /// Activates a provisional adapter; Controllers join on the next Tick.
-  EngineResult<mujoco_sim::core::ActivateAdapterResponse> ActivateAdapter(
-      const mujoco_sim::core::ActivateAdapterRequest& request);
-  /// Removes one matching adapter session and releases its resources.
-  EngineResult<mujoco_sim::core::UnregisterAdapterResponse> UnregisterAdapter(
-      const mujoco_sim::core::UnregisterAdapterRequest& request);
-
-  /// Opens the next Barrier and returns immutable serialized Tick handles.
-  /// Repeated calls while open return current cached handles without
-  /// reserializing. A lifecycle boundary invalidates handle.current.
-  EngineResult<std::vector<IssuedTickHandle>> OpenIssuedTicks();
-  /// Returns false after the handle's Barrier or adapter identity is invalid.
-  bool IsIssuedTickCurrent(const IssuedTickIdentity& identity) const;
-  /// Completes an already-open Barrier that has no required Controllers.
-  EngineEffects CompleteEmptyBarrier();
-  /// Validates and records a Commit or recovery proof.
-  ///
-  /// Recovery proof never applies actuator commands and only makes the
-  /// Controller active when the next Tick is opened.
-  EngineResult<CommitReceipt> SubmitCommit(
-      const mujoco_sim::core::AdapterCommit& commit);
-  EngineResult<CommitReceipt> SubmitFault(const ControllerFault& fault);
-  /// Accepts a valid monotonic keepalive without changing simulation state.
-  EngineEffects AcceptHeartbeat(
-      const mujoco_sim::core::AdapterHeartbeat& heartbeat,
-      std::chrono::steady_clock::time_point now =
-          std::chrono::steady_clock::now());
-  /// Applies activation, keepalive and Barrier deadlines at `now`.
-  EngineEffects CheckDeadlines(
-      std::chrono::steady_clock::time_point now);
-
-  /// Enters the terminal error-paused state and invalidates issued Ticks.
-  EngineEffects MarkFailed(const std::string& message);
-  /// Enters the stopped state and invalidates issued Ticks.
-  EngineEffects MarkStopped(const std::string& message = {});
-
-  /// Builds a read-only wire projection of current server and adapter state.
-  mujoco_sim::core::ServerStatus MakeStatus() const;
-
-  /// Returns one coherent copy of scalar state and adapter phase counts.
+  GetAvailableResourcesResponse GetAvailableResources(const GetAvailableResourcesRequest&) const;
+  EngineResult<RegisterAdapterResponse> RegisterAdapter(
+      const RegisterAdapterRequest&,
+      std::chrono::steady_clock::time_point now = std::chrono::steady_clock::now());
+  EngineResult<ActivateAdapterResponse> ActivateAdapter(
+      const ActivateAdapterRequest&,
+      std::chrono::steady_clock::time_point now = std::chrono::steady_clock::now());
+  EngineResult<UnregisterAdapterResponse> UnregisterAdapter(const UnregisterAdapterRequest&);
+  EngineResult<CommandReceipt> SubmitCommand(const ControllerCommand&,
+                                             std::chrono::steady_clock::time_point now);
+  EngineResult<CommandReceipt> SubmitFault(const ControllerFault&);
+  EngineEffects AcceptHeartbeat(const AdapterHeartbeat&, std::chrono::steady_clock::time_point now);
+  EngineEffects Step();
+  EngineEffects CheckDeadlines(std::chrono::steady_clock::time_point now);
+  EngineEffects MarkFailed(const std::string&);
+  EngineEffects MarkStopped(const std::string&);
+  ServerStatus MakeStatus() const;
   CoreState state() const;
 
  private:
-  struct Impl;
+  class Impl;
   std::unique_ptr<Impl> impl_;
 };
 

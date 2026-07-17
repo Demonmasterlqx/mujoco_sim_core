@@ -3,7 +3,7 @@
 #include <array>
 #include <limits>
 
-#include <mujoco_sim/wbr_lqr_demo/tick_controller.hpp>
+#include <mujoco_sim/wbr_lqr_demo/controller.hpp>
 
 #include "test_support.hpp"
 
@@ -20,7 +20,7 @@ TEST(InterfaceMappingTest, DecodesDenseRegisteredSpans) {
   test::SetObservation(layout, "rwheel_vel", velocity, &tick.observations);
   test::SetObservation(layout, "rjoint4_tor", effort, &tick.observations);
 
-  const demo::TickDecoder decoder(layout);
+  const demo::StateDecoder decoder(layout);
   const auto raw = decoder.Decode(tick.observations, tick.simulation_time_s);
   EXPECT_DOUBLE_EQ(raw.time, 0.017);
   EXPECT_FLOAT_EQ(raw.quat_gt[0], 1.0F);
@@ -34,29 +34,26 @@ TEST(InterfaceMappingTest, ValidatesLayoutAndValues) {
   auto observations = test::MakeValidLayout().observations();
   auto commands = test::MakeValidLayout().commands();
   observations.front().scalars.count = 3;
-  const mujoco_sim::adapter_sdk::ControllerLayout wrong(
-      observations, commands, 31, 6);
-  EXPECT_THROW((demo::TickDecoder(wrong)), demo::InterfaceError);
+  const mujoco_sim::adapter_sdk::ControllerLayout wrong(observations, commands, 31, 6);
+  EXPECT_THROW((demo::StateDecoder(wrong)), demo::InterfaceError);
 
   auto unbounded_commands = commands;
   unbounded_commands.front().has_command_range = false;
-  const mujoco_sim::adapter_sdk::ControllerLayout unbounded(
-      test::MakeValidLayout().observations(), unbounded_commands, 31, 6);
+  const mujoco_sim::adapter_sdk::ControllerLayout unbounded(test::MakeValidLayout().observations(),
+                                                            unbounded_commands, 31, 6);
   EXPECT_THROW((demo::TorqueCommandMapper(unbounded)), demo::InterfaceError);
 
   const auto layout = test::MakeValidLayout();
   auto tick = test::MakeValidTick(layout);
   tick.observations[layout.Observation("lwheel_vel")->offset] =
       std::numeric_limits<double>::infinity();
-  EXPECT_THROW(demo::TickDecoder(layout).Decode(tick.observations, 0.0),
-               demo::InterfaceError);
+  EXPECT_THROW(demo::StateDecoder(layout).Decode(tick.observations, 0.0), demo::InterfaceError);
 }
 
 TEST(InterfaceMappingTest, MapsDenseCommandOrderAndClampsRanges) {
   const auto layout = test::MakeValidLayout(false, true);
   const demo::TorqueCommandMapper mapper(layout);
-  const auto commands = mapper.Map(
-      {25.0F, -25.0F, 8.0F, -21.0F, 19.0F, -9.0F});
+  const auto commands = mapper.Map({25.0F, -25.0F, 8.0F, -21.0F, 19.0F, -9.0F});
   ASSERT_EQ(commands.size(), 6U);
   EXPECT_DOUBLE_EQ(commands[layout.Command("rwheel_actuator")->offset], -5.2);
   EXPECT_DOUBLE_EQ(commands[layout.Command("rjoint4_actuator")->offset], 19.0);
@@ -75,17 +72,11 @@ TEST(InterfaceMappingTest, BuildsAdapterRegistrationOptions) {
   demo::AdapterConfig config;
   config.server_name = "sim";
   config.adapter_id = "wbr";
-  config.commit_timeout_ms = 750;
-  config.session_timeout_ms = 1500;
-  config.heartbeat_period_ms = 300;
-  const auto options = demo::MakeAdapterOptions(config);
+  const auto options = demo::MakeControllerOptions(config);
   EXPECT_EQ(options.server_name, "sim");
   EXPECT_EQ(options.adapter_id, "wbr");
   EXPECT_EQ(options.observation_names.size(), 21U);
   EXPECT_EQ(options.command_names.size(), 6U);
-  EXPECT_EQ(options.commit_timeout_ms, 750U);
-  EXPECT_EQ(options.session_timeout_ms, 1500U);
-  EXPECT_EQ(options.heartbeat_period_ms, 300U);
 }
 
 TEST(InterfaceMappingTest, RunsInputScriptRelativeToAdapterSession) {
@@ -95,17 +86,16 @@ TEST(InterfaceMappingTest, RunsInputScriptRelativeToAdapterSession) {
   toggle_move.space = true;
   demo::PipelineConfig pipeline_config;
   pipeline_config.imu_mode = control::imu_mode::bypass;
-  demo::TickController controller(
-      layout, pipeline_config,
-      demo::InputScript({{0, 1, {}}, {1, 2, toggle_move}}));
+  demo::WbrController controller(layout, pipeline_config,
+                                 demo::InputScript({{0, 1, {}}, {1, 2, toggle_move}}));
 
-  controller.HandleTick(tick.observations, 0.5);
+  controller.ComputeCommand(tick.observations, 0.5);
   ASSERT_TRUE(controller.last_output().has_value());
   EXPECT_FALSE(controller.last_input().space);
-  controller.HandleTick(tick.observations, 0.501);
+  controller.ComputeCommand(tick.observations, 0.501);
   EXPECT_TRUE(controller.last_input().space);
   EXPECT_TRUE(controller.last_output()->command.move);
   controller.Reset();
-  controller.HandleTick(tick.observations, 0.9);
+  controller.ComputeCommand(tick.observations, 0.9);
   EXPECT_FALSE(controller.last_input().space);
 }

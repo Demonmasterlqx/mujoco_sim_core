@@ -13,10 +13,11 @@ namespace mujoco_sim::sample_adapter {
 namespace {
 
 std::string Trim(std::string value) {
-  auto not_space = [](unsigned char c) { return !std::isspace(c); };
+  auto not_space = [](unsigned char c) {
+    return !std::isspace(c);
+  };
   value.erase(value.begin(), std::find_if(value.begin(), value.end(), not_space));
-  value.erase(std::find_if(value.rbegin(), value.rend(), not_space).base(),
-              value.end());
+  value.erase(std::find_if(value.rbegin(), value.rend(), not_space).base(), value.end());
   return value;
 }
 
@@ -24,9 +25,6 @@ generated::SampleConfig ToGenerated(const SampleOptions& options) {
   generated::SampleConfig output;
   output.max_ticks = options.max_ticks;
   output.command_value = options.command_value;
-  output.commit_timeout_ms = options.adapter.commit_timeout_ms;
-  output.session_timeout_ms = options.adapter.session_timeout_ms;
-  output.heartbeat_period_ms = options.adapter.heartbeat_period_ms;
   output.service_timeout_ms = options.adapter.service_timeout_ms;
   return output;
 }
@@ -37,9 +35,6 @@ SampleOptions ToPublic(generated::SampleConfig config) {
   output.adapter.adapter_id = std::move(config.adapter_id);
   output.adapter.observation_names = std::move(config.observation_names);
   output.adapter.command_names = std::move(config.command_names);
-  output.adapter.commit_timeout_ms = config.commit_timeout_ms;
-  output.adapter.session_timeout_ms = config.session_timeout_ms;
-  output.adapter.heartbeat_period_ms = config.heartbeat_period_ms;
   output.adapter.service_timeout_ms = config.service_timeout_ms;
   output.max_ticks = config.max_ticks;
   output.command_value = config.command_value;
@@ -66,8 +61,7 @@ std::vector<double> ConstantCommandsForLayout(
   return std::vector<double>(layout.command_scalar_count(), value);
 }
 
-bool ParseCommandLine(int argc, char** argv, SampleOptions* options,
-                      std::string* error_message) {
+bool ParseCommandLine(int argc, char** argv, SampleOptions* options, std::string* error_message) {
   if (options == nullptr || error_message == nullptr) {
     if (error_message != nullptr) {
       *error_message = "options and error_message must not be null";
@@ -96,6 +90,8 @@ bool ParseCommandLine(int argc, char** argv, SampleOptions* options,
   return true;
 }
 
-std::string Usage() { return generated::Usage(); }
+std::string Usage() {
+  return generated::Usage();
+}
 
 }  // namespace mujoco_sim::sample_adapter

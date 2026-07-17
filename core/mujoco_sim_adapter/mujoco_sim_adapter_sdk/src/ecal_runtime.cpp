@@ -35,8 +35,7 @@ void Release(void*) {
 
 }  // namespace
 
-std::shared_ptr<void> AcquireEcalRuntime(const std::string& unit_name,
-                                         std::string* error_message) {
+std::shared_ptr<void> AcquireEcalRuntime(const std::string& unit_name, std::string* error_message) {
   if (error_message == nullptr) {
     return {};
   }

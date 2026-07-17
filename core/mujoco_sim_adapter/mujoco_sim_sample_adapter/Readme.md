@@ -1,46 +1,40 @@
 # mujoco_sim_sample_adapter
 
-This package is the minimal Protocol V3 Controller application built on
-`mujoco_sim_adapter_sdk`. It registers requested resources, caches command
-spans from `ControllerLayout`, waits for `TickLease`, fills one dense command
-vector, commits, and unregisters.
+This package is the minimal Protocol V4 Controller application. It registers
+resources, caches command spans from `ControllerLayout`, consumes immutable
+`StateLease` values, updates the latest dense Command, and unregisters.
 
-Configuration is strict and generated from
-[`config/sample_adapter.yaml`](config/sample_adapter.yaml). The relevant fields
-are:
+The executable accepts a strict YAML file through `--config`; command-line
+values override the file. Its generated schema is
+[`config/sample_adapter.yaml`](config/sample_adapter.yaml):
 
 ```yaml
 server_name: default
-adapter_id: sample_adapter
-observation_names: [hinge_pos]
+adapter_id: sample_controller
+observation_names: [hinge_pos, hinge_vel]
 command_names: [hinge_motor]
+max_ticks: 0
 command_value: 0.0
-commit_timeout_ms: 1000
-session_timeout_ms: 1000
-heartbeat_period_ms: 250
 service_timeout_ms: 5000
 ```
 
-Unknown fields and removed field names are errors; there are no configuration
-aliases. `commit_timeout_ms` is the per-Tick deadline, while
-`session_timeout_ms` is the absence-of-presence deadline.
+Runtime timeout, keepalive, cadence, and control policies are granted by the
+Server during registration. Unknown and removed fields are errors.
+
+With a Server already running and exporting the requested resources:
 
 ```bash
 mujoco-sim-sample-adapter \
   --server-name default \
-  --adapter-id sample_adapter \
-  --observation hinge_pos \
-  --command hinge_motor \
-  --command-value 0.25
+  --adapter-id sample_controller \
+  --observations hinge_pos hinge_vel \
+  --commands hinge_motor \
+  --command-value 0.25 \
+  --ticks 1000
 ```
 
-Build and test:
-
-```bash
-cmake -S core/mujoco_sim_adapter/mujoco_sim_sample_adapter \
-  -B build/mujoco_sim_sample_adapter -DBUILD_TESTING=ON
-cmake --build build/mujoco_sim_sample_adapter -j
-ctest --test-dir build/mujoco_sim_sample_adapter --output-on-failure
-```
-
-The suite includes unit, installed-consumer, headless eCAL, and GUI eCAL tests.
+The same values may be placed in a YAML document and passed with
+`--config adapter.yaml`. `--ticks 0` (the default) is unlimited; the process
+then runs until terminal session state or external termination. It unregisters
+on normal loop exit, while failed registration or activation returns a nonzero
+exit status.
