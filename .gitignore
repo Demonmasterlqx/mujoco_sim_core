@@ -5,4 +5,11 @@ log/*
 install/*
 __pycache__/
 
+/CMakeFiles/
+/Testing/
+/doxygen-local/
+/CMakeCache.txt
+/cmake_install.cmake
+/compile_commands.json
+
 .env

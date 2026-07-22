@@ -10,7 +10,6 @@
 | `mujoco_sim_sensor` | 从隔离 Snapshot 捕获 headless camera 与 360 度 ray LiDAR | [查看](core/mujoco_sim_sensor/README.md) |
 | `mujoco_sim_server` | 提供 eCAL server、配置解析和图形界面 | [查看](core/mujoco_sim_server/Readme.md) |
 | `mujoco_sim_adapter_sdk` | 提供异步 Controller、Observer 与 Sensor Stream C++ Client | [查看](core/mujoco_sim_adapter/mujoco_sim_adapter_sdk/Readme.md) |
-| `mujoco_sim_sample_adapter` | 展示固定 command adapter 和端到端联调 | [查看](core/mujoco_sim_adapter/mujoco_sim_sample_adapter/Readme.md) |
 | `mujoco_sim_wbr_lqr_demo` | 迁移 WBR LQR 抡腿机器人控制器，提供可配置接口和完整闭环示例 | [查看](demos/mujoco_sim_wbr_lqr_demo/README.md) |
 | `mujoco_sim_sensor_demo` | 四进程房间巡航、相机消费和 IMU/LiDAR ICP 建图示例 | [查看](demos/mujoco_sim_sensor_demo/README.md) |
 
@@ -18,19 +17,28 @@
 
 使用 colcon 作为构建工具。所有包均为纯 CMake 包：
 
-配置生成依赖 Python 3/PyYAML，生成后的运行时依赖 CLI11 和 yaml-cpp；server 图形界面
-依赖 GLFW 和 libpng。可通过 rosdep 安装，对应 Ubuntu 包包括 `python3-yaml`、
-`libcli11-dev`、`libyaml-cpp-dev`、`libglfw3-dev`、`libpng-dev`、EGL/OSMesa 和 PCL。
+系统依赖统一通过 apt 安装，禁止使用 rosdep。安装前需要为 Ubuntu 24.04 配置可提供
+`ecal` 和 `python3-colcon-common-extensions` 的 apt 软件源。配置生成依赖
+Python 3/PyYAML，生成后的运行时依赖 CLI11 和 yaml-cpp；server 图形界面依赖
+GLFW 和 libpng，传感器及 demo 还依赖 EGL、OSMesa、Eigen 和 PCL。
 
 ```bash
-rosdep install --from-paths core demos --ignore-src -r -y
+sudo apt update
+sudo apt install --yes \
+  build-essential cmake ecal libcli11-dev libegl1-mesa-dev libeigen3-dev \
+  libglfw3-dev libgtest-dev libosmesa6-dev libpcl-dev libpng-dev \
+  libprotobuf-dev libspdlog-dev libyaml-cpp-dev pkg-config protobuf-compiler \
+  python3-colcon-common-extensions python3-yaml xvfb
 ```
 
 ```bash
 colcon list --topological-order
 colcon build --cmake-args -DBUILD_TESTING=ON
-colcon test --packages-select mujoco_sim_config mujoco_sim_protocol mujoco_sim_core mujoco_sim_sensor mujoco_sim_server mujoco_sim_adapter_sdk mujoco_sim_sample_adapter mujoco_sim_wbr_lqr_demo mujoco_sim_sensor_demo
-colcon test-result --verbose
+colcon test --packages-select \
+  mujoco_sim_config mujoco_sim_protocol mujoco_sim_core mujoco_sim_sensor \
+  mujoco_sim_server mujoco_sim_adapter_sdk mujoco_sim_wbr_lqr_demo \
+  mujoco_sim_sensor_demo
+colcon test-result --all --verbose
 ```
 
 ## 架构设计
@@ -109,7 +117,7 @@ OpenGL context。若 YAML 设置了 `headless: true`，可用 `--gui` 在命令�
 
 ## Protocol V4 运行示例
 
-打开两个终端，并确保当前目录都是仓库根目录。终端 1 先启动 server：
+在仓库根目录启动 server：
 
 ```bash
 source install/setup.bash
@@ -119,15 +127,10 @@ mujoco-sim-server \
 ```
 
 server 加载模型后立即进入 `RUNNING`，即使没有 adapter 也会按模型 timestep 实时推进。
-可以在运行期间任意时刻于终端 2 注册并启动 adapter：
-
-```bash
-source install/setup.bash
-
-mujoco-sim-sample-adapter \
-  --ticks 5 \
-  --command-value 0.1
-```
+Controller 集成方式和完整闭环示例见
+[`mujoco_sim_wbr_lqr_demo`](demos/mujoco_sim_wbr_lqr_demo/README.md)；Sensor Stream、
+Observer 和多进程控制示例见
+[`mujoco_sim_sensor_demo`](demos/mujoco_sim_sensor_demo/README.md)。
 
 无头运行只需增加：
 
@@ -137,11 +140,11 @@ mujoco-sim-server \
   --model core/mujoco_sim_core/test/testdata/simple_actuator.xml
 ```
 
-adapter 处理 5 个 State 后会尽力注销并退出，server 继续自主运行，使用 Ctrl-C 或关闭 GUI
-结束 server。若配置非零 `max_ticks`，它统计 server 启动以来的全部 `mj_step()`，包括 adapter
-注册前和注销后的步进，因此不能把它当作某个 adapter 的 State 数。
+server 使用 Ctrl-C 或关闭 GUI 结束。若配置非零 `max_ticks`，它统计 server 启动以来的
+全部 `mj_step()`，包括 adapter 注册前和注销后的步进，因此不能把它当作某个 adapter
+的 State 数。
 
-在 server 运行期间，可从第三个终端查询默认 server 的状态和模型资源：
+在 server 运行期间，可从另一个终端查询默认 server 的状态和模型资源：
 
 ```bash
 source install/setup.bash
