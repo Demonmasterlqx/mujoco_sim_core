@@ -23,8 +23,6 @@ TEST(ControllerPipelineTest, FirstTickUsesEmptyPreviousPendulum) {
   EXPECT_EQ(first.tick_index, 0U);
   EXPECT_EQ(pipeline.tick_count(), 1U);
   EXPECT_FLOAT_EQ(first.fusion_pendulum.x, 0.0F);
-  EXPECT_FLOAT_EQ(first.fusion_pendulum.v, 0.0F);
-  EXPECT_FALSE(first.fusion_pendulum.normal);
   EXPECT_FLOAT_EQ(first.command.x, 0.0F);
   EXPECT_EQ(first.fsm_state, control::chassis_state::relax);
   for (const float torque : first.raw_torque) {
@@ -33,8 +31,26 @@ TEST(ControllerPipelineTest, FirstTickUsesEmptyPreviousPendulum) {
 
   const auto second = pipeline.Step(raw, {});
   EXPECT_FLOAT_EQ(second.fusion_pendulum.x, first.pendulum.x);
-  EXPECT_FLOAT_EQ(second.fusion_pendulum.v, first.pendulum.v);
-  EXPECT_FLOAT_EQ(second.command.x, first.pendulum.x);
+  EXPECT_FLOAT_EQ(second.command.x, -0.00025F);
+  EXPECT_GT(second.command.x, first.pendulum.x);
+}
+
+TEST(ControllerPipelineTest, IdleInputRampsVelocityCommandBackToZero) {
+  demo::PipelineConfig config;
+  config.imu_mode = control::imu_mode::bypass;
+  demo::ControllerPipeline pipeline(config);
+  const auto raw = test::MakeHomeObservation();
+
+  control::input_snapshot_t forward{};
+  forward.w = true;
+  for (int tick = 0; tick < 20; ++tick)
+    pipeline.Step(raw, forward);
+  const float commanded_velocity = pipeline.Step(raw, forward).command.v;
+  ASSERT_GT(commanded_velocity, 0.0F);
+
+  const auto released = pipeline.Step(raw, {});
+  EXPECT_LT(released.command.v, commanded_velocity);
+  EXPECT_GT(released.command.v, 0.0F);
 }
 
 TEST(ControllerPipelineTest, ResetRestoresFirstTickState) {

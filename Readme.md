@@ -198,6 +198,10 @@ mujoco-sim-wbr-lqr-adapter \
 使用 adapter 的 `--ticks` 设置本地 State 上限，不要把 server 的启动总 step 上限
 当作 adapter 预算。21 个 state resource 和 6 个 command resource 均可在 adapter YAML
 中改名；控制器仍按六个固定语义槽位执行上游 LQR/FSM 逻辑。
+默认脚本会在第 1 个 Controller tick 使能底盘，并在第 2000 个 tick 切换到中腿长后
+持续站立。控制方程固定到 `wbr_mujoco@1d895574`，输入快照语义对齐
+`mujoco_interface@a2501454`；包内 6000-Step MuJoCo 闭环测试验证最终持续处于
+`NORMAL`、机身抬升、俯仰受控且水平漂移有界。
 
 ## Sensor / Mapping Demo
 

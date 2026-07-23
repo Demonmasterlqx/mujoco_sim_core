@@ -103,10 +103,18 @@ if ! grep -Eq "space_effects=[1-9][0-9]*" "${adapter_log}"; then
   exit 1
 fi
 
-if (( ticks > 4000 )); then
-  if ! grep -Eq "e_effects=[1-9][0-9]* .*q_effects=[1-9][0-9]*" \
+if (( ticks > 2000 )); then
+  if ! grep -Eq "e_effects=[1-9][0-9]*" \
       "${adapter_log}"; then
-    echo "WBR adapter summary did not prove the E/Q script effects" >&2
+    echo "WBR adapter summary did not prove the E stand-height script effect" >&2
+    sed -n '1,200p' "${adapter_log}" >&2 || true
+    exit 1
+  fi
+fi
+
+if (( ticks >= 5000 )); then
+  if ! grep -Eq "wbr-lqr summary .* final_fsm=normal" "${adapter_log}"; then
+    echo "WBR adapter did not finish the stand-up run in NORMAL" >&2
     sed -n '1,200p' "${adapter_log}" >&2 || true
     exit 1
   fi

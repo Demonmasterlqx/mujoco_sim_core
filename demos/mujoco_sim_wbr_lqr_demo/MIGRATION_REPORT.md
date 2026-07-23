@@ -2,18 +2,19 @@
 
 ## Scope Completed
 
-- Pinned upstream repository commit
-  `6a8b37517803db616d4fb19dcdd5ab448bff7847` and controller submodule commit
-  `022d57e7d7ac1fbc7b6fbf3f4162a30bfe42ba5e`.
+- Pinned controller repository commit
+  `wbr_mujoco@1d895574d91e3b14d13696676d9f91b2b4403ee4` and input/runtime
+  reference commit
+  `mujoco_interface@a2501454b09038469137deccb1d8c6ee460d1c69`.
 - Imported 8 byte-identical runtime `control/*.hpp` headers, 2 MJCF files,
   and all 15 STL meshes.
 - Made the model timestep explicit at `0.001` seconds.
 - Added Core named-keyframe loading and start the WBR model from `home`.
-- Replaced the upstream four-thread/shared-memory topology with one
+- Replaced the upstream multi-service/eCAL topology with one
   deterministic `ControllerPipeline::Step` per SDK-delivered State. The SDK
   exposes the latest completed-step State through a depth-1 mailbox, so a slow
   Controller may coalesce intermediate States without blocking the Server.
-- Preserved upstream IMU, command fusion, dual leg solve, odometry, FSM,
+- Preserved upstream IMU, command fusion, leg solve, odometry, FSM,
   VMC/LQR, motor ordering, signs, gains, and coefficient tables.
 - Added a generated YAML/CLI configuration and the executable
   `mujoco-sim-wbr-lqr-adapter`.
@@ -24,8 +25,8 @@
   actuator range clamping, and clamp statistics. The public integration surface
   uses `StateDecoder` and `WbrController::ComputeCommand()` to match the
   asynchronous State/Command protocol terminology.
-- Added deterministic half-open input scripts and translated the upstream
-  Space/E/Q sequence.
+- Added deterministic half-open input scripts using the `mujoco_interface`
+  input snapshot fields. The shipped stand-up sequence pulses Space and then E.
 - Added source-tree and installed-layout server configurations. Relative model
   paths are resolved against the YAML location.
 - Added unit, model-contract, headless eCAL, and GUI/Xvfb eCAL tests.
@@ -42,12 +43,14 @@
 | Observation scalar values | 28 |
 | Command resources | 6 |
 | Shipped runtime YAML files | 2 |
-| CTest targets in the demo package | 9 |
+| CTest targets in the demo package | 10 |
 
-The automated headless CTest completes the default 6000 real simulation Steps,
-and asserts the Space/E/Q command effects at Steps 1, 2000, and 4000. Separate
-tests run a 200-Step GUI/Xvfb loop, capture a nonblank WBR render, and execute
-the staged adapter/config/model from a different working directory.
+The direct closed-loop CTest completes 6000 real MuJoCo Steps from `home` and
+asserts sustained `NORMAL`, raised base height, bounded pitch, bounded travel,
+and the middle leg-length target. The headless eCAL test consumes 6000 delivered
+States and asserts the Space/E effects. Separate tests run a 200-Step GUI/Xvfb
+loop, capture a nonblank WBR render, and execute the staged adapter/config/model
+from a different working directory.
 
 ## Deliberate Differences
 
@@ -56,17 +59,18 @@ the staged adapter/config/model from a different working directory.
    SDK-delivered State. State delivery follows the granted cadence, and the SDK
    may coalesce intermediate States when the Controller is slower than the
    Server.
-2. Upstream optional IMU noise injection lived in shared-memory I/O and was not
-   migrated. Mahony and ground-truth quaternion bypass modes remain
+2. Upstream optional IMU noise injection lives in its eCAL state I/O and was
+   not migrated. Mahony and ground-truth quaternion bypass modes remain
    configurable.
-3. Upstream internal limits are `40 Nm` for joint outputs and `10 Nm` for
+3. Upstream internal limits are `40 Nm` for joint outputs and `5.2 Nm` for
    wheel outputs, while the imported MJCF exposes `20 Nm` and `5.2 Nm`
-   actuator ranges. The port preserves equations and clamps only at the
-   protocol boundary.
+   actuator ranges. The port preserves equations and clamps joint commands at
+   the protocol boundary.
 4. Invalid layouts, values, and controller outputs are explicit process errors
    instead of propagating non-finite data.
-5. Keyboard input is represented by deterministic configured Step intervals.
-   The server GUI does not currently forward interactive keys to adapters.
+5. The `mujoco_interface` GUI publishes live input snapshots. Protocol V4 does
+   not currently expose that channel, so this demo represents the same fields
+   with deterministic configured Controller-tick intervals.
 
 ## Migration Friction And Next-Stage Goals
 
@@ -162,6 +166,7 @@ The package tests cover:
 - generated configuration merge/validation and transactional conversion
 - scripted input boundaries and pulse constraints
 - Core model loading from keyframe `home`
+- 6000-Step MuJoCo closed-loop stand-up and steady balancing
 - real eCAL headless and GUI/Xvfb asynchronous execution
 
 All imported provenance and byte-identity details are recorded in

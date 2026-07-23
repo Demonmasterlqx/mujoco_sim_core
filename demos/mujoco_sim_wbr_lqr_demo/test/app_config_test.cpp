@@ -25,8 +25,9 @@ TEST(AppConfigTest, LoadsShippedGeneratedConfig) {
   EXPECT_EQ(config.adapter.interfaces.motors[5].effort_command, "rwheel_actuator");
   EXPECT_TRUE(config.input_script.InputAt(1).space);
   EXPECT_TRUE(config.input_script.InputAt(2000).e);
-  EXPECT_TRUE(config.input_script.InputAt(4000).q);
+  EXPECT_FALSE(config.input_script.InputAt(4000).q);
   EXPECT_EQ(config.pipeline.chassis.leg_pid.len.kp, 6000.0F);
+  EXPECT_FLOAT_EQ(config.pipeline.chassis.twheel_max, 5.2F);
 }
 
 TEST(AppConfigTest, ResourceNamesRemainConfigurableAcrossReordering) {

@@ -1,10 +1,19 @@
 # WBR LQR Demo
 
-This package integrates the upstream `CosmosMount/wbr_mujoco` controller with
-the repository's asynchronous Protocol V4 runtime. The executable registers 21
+This package integrates the controller from `CosmosMount/wbr_mujoco` and the
+control-input semantics from `CosmosMount/mujoco_interface` with this
+repository's asynchronous Protocol V4 runtime. The executable registers 21
 observation resources and six actuator commands, activates one Controller
 session, runs the upstream LQR state/control pipeline, and updates the latest
 dense Command for each `StateLease`.
+
+The imported controller includes the corrected wheel direction, the model's
+`5.2 Nm` wheel limit, the current LQR tables, the corrected odometry Kalman
+gain, bounded odometry innovations, and the current command-reference ramps.
+The shipped input script releases all keys for the first sample, pulses Space
+to enable the chassis, then pulses E at controller tick 2000 and holds the
+middle leg-length target. Starting from the `home` keyframe therefore raises
+the robot and leaves it balancing rather than lowering it again automatically.
 
 `StateDecoder` validates the registered layout and caches every observation
 span in its constructor. Decode rejects a dense vector whose scalar count does
@@ -47,6 +56,7 @@ ctest --test-dir build/mujoco_sim_wbr_lqr_demo --output-on-failure
 ```
 
 The suite covers default and renamed/reordered interfaces, dense decoding,
-torque mapping, upstream model contract, installed consumption, headless eCAL,
-and GUI execution. Upstream provenance is documented in [UPSTREAM.md](UPSTREAM.md)
-and migration details in [MIGRATION_REPORT.md](MIGRATION_REPORT.md).
+torque mapping, upstream model contract, a 6000-Step MuJoCo closed-loop stand,
+installed consumption, headless eCAL, and GUI execution. Upstream provenance
+is documented in [UPSTREAM.md](UPSTREAM.md) and migration details in
+[MIGRATION_REPORT.md](MIGRATION_REPORT.md).

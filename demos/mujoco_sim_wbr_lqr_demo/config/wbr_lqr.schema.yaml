@@ -159,7 +159,6 @@ fields:
       - {begin_tick: 0, end_tick: 1}
       - {begin_tick: 1, end_tick: 2, space: true}
       - {begin_tick: 2000, end_tick: 2001, e: true}
-      - {begin_tick: 4000, end_tick: 4001, q: true}
     items:
       type: object
       fields:

@@ -82,8 +82,7 @@ LinkState SnapshotLink(const control::link_solver& link, const std::string& side
 }
 
 void ValidateCommand(const control::msg_cmd_t& command) {
-  const float values[] = {command.x,   command.v,    command.len,  command.dlen,
-                          command.yaw, command.dyaw, command.roll, command.tri_spd};
+  const float values[] = {command.x, command.v, command.len, command.yaw, command.dyaw};
   for (std::size_t i = 0; i < std::size(values); ++i) {
     RequireFinite(values[i], "command field " + std::to_string(i));
   }
@@ -181,11 +180,6 @@ PipelineOutput ControllerPipeline::Step(const control::msg_raw_state_t& observat
   const float right_velocity =
       observation.motors[5].dq * impl_->config.chassis.rwheel * impl_->right.wheel_sign();
 
-  impl_->left.link().solve(pitch, pitch_rate, 0.0F, observation.motors[0], observation.motors[1]);
-  impl_->right.link().solve(pitch, pitch_rate, 0.0F, observation.motors[3], observation.motors[4]);
-  SnapshotLink(impl_->left.link(), "left first solve");
-  SnapshotLink(impl_->right.link(), "right first solve");
-
   impl_->odometry.update(output.imu.quaternion, output.imu.accel,
                          (left_velocity + right_velocity) * 0.5F, yaw, kControlDtSeconds);
   output.odometry = {impl_->odometry.x, impl_->odometry.v, impl_->odometry.az};
@@ -197,8 +191,8 @@ PipelineOutput ControllerPipeline::Step(const control::msg_raw_state_t& observat
                            observation.motors[1]);
   impl_->right.link().solve(pitch, pitch_rate, impl_->odometry.az, observation.motors[3],
                             observation.motors[4]);
-  output.left = SnapshotLink(impl_->left.link(), "left second solve");
-  output.right = SnapshotLink(impl_->right.link(), "right second solve");
+  output.left = SnapshotLink(impl_->left.link(), "left solve");
+  output.right = SnapshotLink(impl_->right.link(), "right solve");
 
   output.observed_state = {
       impl_->odometry.x,  impl_->odometry.v,       yaw,

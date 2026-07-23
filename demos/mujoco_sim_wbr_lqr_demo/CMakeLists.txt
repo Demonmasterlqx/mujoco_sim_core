@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.22)
-project(mujoco_sim_wbr_lqr_demo VERSION 0.1.0 LANGUAGES CXX)
+project(mujoco_sim_wbr_lqr_demo VERSION 0.2.0 LANGUAGES CXX)
 
 include(GNUInstallDirs)
 include(CMakePackageConfigHelpers)
@@ -142,6 +142,18 @@ if(BUILD_TESTING)
     WBR_LQR_MJCF_DIR="${CMAKE_CURRENT_SOURCE_DIR}/mjcf"
   )
   add_test(NAME wbr_model_contract_test COMMAND wbr_model_contract_test)
+
+  add_executable(wbr_closed_loop_standing_test test/closed_loop_standing_test.cpp)
+  target_link_libraries(wbr_closed_loop_standing_test PRIVATE
+    ${PROJECT_NAME}
+    GTest::gtest_main
+    mujoco::mujoco
+  )
+  target_compile_definitions(wbr_closed_loop_standing_test PRIVATE
+    WBR_LQR_MJCF_DIR="${CMAKE_CURRENT_SOURCE_DIR}/mjcf"
+  )
+  add_test(NAME wbr_closed_loop_standing_test COMMAND wbr_closed_loop_standing_test)
+  set_tests_properties(wbr_closed_loop_standing_test PROPERTIES TIMEOUT 20)
 
   configure_file(
     test/package_consumer_test.cmake.in
