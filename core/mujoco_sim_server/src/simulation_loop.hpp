@@ -60,7 +60,26 @@ class SimulationLoop {
   void PublishStatus(bool, bool = false);
   void PublishSummary(std::chrono::steady_clock::time_point, const mujoco_sim::core::CoreState&);
   void ProcessTimers(std::chrono::steady_clock::time_point);
-  void Finish(int, std::string);
+  /**
+   * @brief Completes every shutdown stage without leaking an exception.
+   *
+   * Stages are isolated so a Sensor, Core, transport, or logging failure does
+   * not prevent the remaining shutdown work. Any stage failure forces exit
+   * code 2.
+   *
+   * 在不泄漏异常的前提下完成全部关闭阶段。
+   *
+   * 各阶段彼此隔离，因此 Sensor、Core、传输或日志失败不会阻止后续关闭工作；任一
+   * 阶段失败都会将退出码强制设为 2。
+   *
+   * @param code Exit code selected by the run loop. 仿真循环选定的退出码。
+   * @param reason Owned terminal reason. 自有的终止原因。
+   *
+   * @par Thread safety / 线程安全
+   * Called only by the simulation thread after input closure.
+   * 仅由仿真线程在输入关闭后调用。
+   */
+  void Finish(int code, std::string reason) noexcept;
 
   template <class Event, class Request>
   typename Event::response_type SubmitRpc(Request);
@@ -98,7 +117,7 @@ class SimulationLoop {
   std::atomic<std::uint64_t> malformed_pending_{0};
   mutable std::mutex lifecycle_mutex_;
   std::string stop_reason_ = "external_stop";
-  int exit_code_ = 1;
+  std::atomic<int> exit_code_{1};
   bool initialized_ = false;
   bool status_dirty_ = true;
 };

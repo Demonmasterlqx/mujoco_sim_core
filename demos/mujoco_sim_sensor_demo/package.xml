@@ -8,14 +8,14 @@
 
   <buildtool_depend>cmake</buildtool_depend>
   <depend>pkg-config</depend>
-  <depend>eigen</depend>
-  <depend>libpcl-all-dev</depend>
+  <depend>libeigen3-dev</depend>
+  <depend>libpcl-dev</depend>
   <depend>libpng-dev</depend>
   <depend>mujoco_sim_adapter_sdk</depend>
-  <depend>mujoco_sim_config</depend>
+  <build_depend>mujoco_sim_config</build_depend>
   <depend>mujoco_sim_protocol</depend>
   <exec_depend>mujoco_sim_server</exec_depend>
-  <test_depend>gtest</test_depend>
+  <test_depend>libgtest-dev</test_depend>
   <test_depend>mujoco_sim_core</test_depend>
   <test_depend>mujoco_sim_sensor</test_depend>
   <test_depend>mujoco_sim_server</test_depend>

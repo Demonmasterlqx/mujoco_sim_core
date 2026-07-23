@@ -141,6 +141,7 @@ int main(int argc, char** argv) {
   std::string unregister_error;
   if (!client.Unregister(&unregister_error)) {
     std::cerr << "adapter unregister failed: " << unregister_error << '\n';
+    run_result = 1;
   }
 
   if (!handler_error.empty()) {

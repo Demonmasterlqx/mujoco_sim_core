@@ -43,16 +43,47 @@ int main(int argc, char** argv) {
   std::string error;
   if (!observer.Start(&error) || !observer.Activate(&error)) {
     std::cerr << "truth observer start failed: " << error << '\n';
+    std::string unregister_error;
+    if (!observer.Unregister(&unregister_error)) {
+      std::cerr << "truth observer cleanup after start failure failed: " << unregister_error
+                << '\n';
+    }
     return 1;
   }
-  std::signal(SIGINT, HandleSignal);
-  std::signal(SIGTERM, HandleSignal);
+  const auto previous_interrupt = std::signal(SIGINT, HandleSignal);
+  if (previous_interrupt == SIG_ERR) {
+    std::cerr << "failed to install truth recorder SIGINT handler\n";
+    std::string unregister_error;
+    if (!observer.Unregister(&unregister_error)) {
+      std::cerr << "truth observer cleanup after signal failure failed: " << unregister_error
+                << '\n';
+    }
+    return 1;
+  }
+  if (std::signal(SIGTERM, HandleSignal) == SIG_ERR) {
+    const bool restored = std::signal(SIGINT, previous_interrupt) != SIG_ERR;
+    std::cerr << (restored ? "failed to install truth recorder SIGTERM handler"
+                           : "failed to install truth recorder SIGTERM handler and restore the "
+                             "SIGINT handler")
+              << '\n';
+    std::string unregister_error;
+    if (!observer.Unregister(&unregister_error)) {
+      std::cerr << "truth observer cleanup after signal failure failed: " << unregister_error
+                << '\n';
+    }
+    return 1;
+  }
   std::cout << "truth recorder ready" << std::endl;
 
   const auto position = observer.layout().Observation("base_position");
   const auto quaternion = observer.layout().Observation("imu_quat");
   if (!position || !quaternion || position->count != 3 || quaternion->count != 4) {
     std::cerr << "truth observation layout is invalid\n";
+    std::string unregister_error;
+    if (!observer.Unregister(&unregister_error)) {
+      std::cerr << "truth observer cleanup after layout failure failed: " << unregister_error
+                << '\n';
+    }
     return 1;
   }
 
@@ -60,12 +91,18 @@ int main(int argc, char** argv) {
   std::ofstream output(output_path, std::ios::trunc);
   if (!output) {
     std::cerr << "failed to create truth CSV: " << output_path << '\n';
+    std::string unregister_error;
+    if (!observer.Unregister(&unregister_error)) {
+      std::cerr << "truth observer cleanup after output failure failed: " << unregister_error
+                << '\n';
+    }
     return 1;
   }
   output.imbue(std::locale::classic());
   output << std::setprecision(17) << "timestamp,x,y,z,qx,qy,qz,qw\n";
 
   std::uint64_t samples = 0;
+  int run_result = 0;
   while (stop_requested == 0) {
     mujoco_sim::adapter_sdk::ObservationLease frame;
     const auto result = observer.WaitForObservation(500ms, &frame, &error);
@@ -77,7 +114,8 @@ int main(int argc, char** argv) {
     }
     if (result != mujoco_sim::adapter_sdk::ObservationWaitResult::kReceived) {
       std::cerr << "truth observer stopped with error: " << error << '\n';
-      return 1;
+      run_result = 1;
+      break;
     }
     const auto values = frame.observations();
     output << frame.simulation_time_s() << ',' << values[position->offset] << ','
@@ -89,13 +127,13 @@ int main(int argc, char** argv) {
   std::string unregister_error;
   if (!observer.Unregister(&unregister_error)) {
     std::cerr << "truth observer unregister failed: " << unregister_error << '\n';
-    return 1;
+    run_result = 1;
   }
   output.close();
   if (!output || samples < 20) {
     std::cerr << "truth recorder produced too few samples: " << samples << '\n';
-    return 1;
+    run_result = 1;
   }
   std::cout << "truth recorder summary samples=" << samples << '\n';
-  return 0;
+  return run_result;
 }

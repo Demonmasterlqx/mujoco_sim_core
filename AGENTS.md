@@ -20,6 +20,10 @@ must document and test the alternative configuration.
 - Readme.md is the user-facing package index, build guide, and current runtime
   overview. Keep its commands and package list consistent with the workspace.
 - .clang-format is the formatting authority for first-party C++ source.
+- .gitignore defines repository-local and generated-output exclusions. Keep it
+  aligned with the local-directory rules below.
+- image.png is a legacy GUI visual reference. It is not a build or test input
+  and is not authoritative evidence of the current runtime or interface.
 - .github/ contains CI workflows. A local check is not a substitute for keeping
   the corresponding CI workflow valid.
 
@@ -97,6 +101,10 @@ build/, install/, log/, CMakeFiles/, Testing/, doxygen-local/, CMakeCache.txt,
 cmake_install.cmake, and compile_commands.json are generated or local outputs.
 They are not source directories and must not be committed.
 
+.env contains local credentials or environment overrides and must never be
+committed, quoted in diagnostics, or copied into generated artifacts. Python
+__pycache__/ directories are local outputs and must not be committed.
+
 All CMake builds must be out of source and use a directory beneath build/.
 Never configure CMake with the repository root as the build directory.
 
@@ -121,6 +129,11 @@ The following trees are third-party or vendored code:
 
 - core/mujoco_sim_core/mujoco/
 - demos/mujoco_sim_wbr_lqr_demo/third_party/
+- demos/mujoco_sim_wbr_lqr_demo/mjcf/
+
+The WBR MJCF tree is vendored model data rather than first-party source.
+UPSTREAM.md records the single intentional local patch to mjmodel.xml; preserve
+that patch explicitly when comparing or updating the remaining upstream bytes.
 
 Do not apply project formatting, bilingual documentation requirements,
 complexity limits, or unrelated cleanup to third-party code. Do not edit
@@ -278,8 +291,9 @@ Example:
  * @return true if the command was accepted; otherwise false.
  *         如果控制指令被成功接收则返回 true，否则返回 false。
  *
- * @thread_safety This function may be called from the controller thread.
- *                本函数可以由控制器线程调用。
+ * @par Thread safety / 线程安全
+ * This function may be called from the controller thread.
+ * 本函数可以由控制器线程调用。
  */
 bool CommitCommand(const Command& command);
 ~~~

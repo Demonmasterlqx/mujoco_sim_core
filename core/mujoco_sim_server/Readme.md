@@ -127,6 +127,22 @@ summary. `active_controllers` counts `ACTIVE_NO_COMMAND`, `ONLINE`, and
 `transport_subscriber_sample_period_ms`; it is diagnostic only and never gates
 simulation stepping or State publication.
 
+An ordinary publish rejection caused by having no subscriber is non-blocking
+and is not logged as a failure. Dense-frame encoding failures, Protobuf
+serialization failures, and eCAL publish exceptions are logged with message,
+adapter, tick, sequence, and endpoint context using the configured warning
+rate limit.
+
+Logging is required for Server operation. `Start()` fails if a configured sink
+cannot be initialized or written. A sink or flush failure detected after
+startup preserves bounded shutdown and makes the final process exit code 2.
+
+Embedded GUI users may call `ServerApplication::RequestScreenshot()`
+concurrently with `Run()`. The call is non-blocking and returns false before a
+GUI viewer is initialized, after `Run()` completes, or when the Server is
+headless. On the supported Linux baseline, MuJoCo writes the accepted request
+to `screenshot.png` in the process working directory.
+
 The detailed loop boundary and ownership rules are documented in
 [Server runtime](../../doc/architecture/server_runtime.md) and the
 [Locking model](../../doc/architecture/locking_model.md).

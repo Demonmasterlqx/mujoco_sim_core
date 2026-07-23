@@ -154,8 +154,9 @@ class BlockingWaitGate {
 };
 
 std::unique_ptr<mujoco_sim::core::SimulationCore> LoadCore() {
-  auto core = std::make_unique<mujoco_sim::core::SimulationCore>(
-      mujoco_sim::core::CoreOptions{"sensor-test"});
+  mujoco_sim::core::CoreOptions options;
+  options.server_name = "sensor-test";
+  auto core = std::make_unique<mujoco_sim::core::SimulationCore>(std::move(options));
   const auto loaded = core->LoadModel(MUJOCO_SIM_SENSOR_RUNTIME_TEST_MODEL);
   EXPECT_TRUE(loaded.response.loaded) << loaded.response.message;
   return core;
@@ -318,6 +319,46 @@ TEST(SensorRuntimeTest, PublishesHeadlessCameraAndLidarCatalogFrames) {
   EXPECT_TRUE(has_finite_point);
 }
 
+TEST(SensorRuntimeTest, ConfinesPublisherOperationsToTheOwningWorker) {
+  auto core = LoadCore();
+  std::mutex operation_mutex;
+  std::optional<std::thread::id> publisher_thread;
+  std::atomic<bool> thread_mismatch = false;
+  std::atomic<std::size_t> sends = 0;
+  const auto record_thread = [&] {
+    std::lock_guard lock(operation_mutex);
+    if (!publisher_thread.has_value()) {
+      publisher_thread = std::this_thread::get_id();
+    } else if (*publisher_thread != std::this_thread::get_id()) {
+      thread_mismatch = true;
+    }
+  };
+  SensorRuntime runtime({[&](const std::string&) {
+    SensorRuntimePublisher publisher;
+    publisher.subscriber_count = [&] {
+      record_thread();
+      return 1U;
+    };
+    publisher.send = [&](const std::string&) {
+      record_thread();
+      ++sends;
+      return true;
+    };
+    return publisher;
+  }});
+  ServerConfig config = BaseConfig();
+  config.sensor_streams = {LidarStream()};
+  std::string error;
+  ASSERT_TRUE(runtime.Initialize(*core, config, &error)) << error;
+
+  ASSERT_TRUE(Advance(core.get(), &runtime));
+  ASSERT_TRUE(WaitUntil([&] { return sends.load() > 0; }));
+  EXPECT_FALSE(thread_mismatch.load());
+  std::lock_guard lock(operation_mutex);
+  ASSERT_TRUE(publisher_thread.has_value());
+  EXPECT_NE(*publisher_thread, std::this_thread::get_id());
+}
+
 TEST(SensorRuntimeTest, UsesSimulationTimeForStreamRate) {
   auto core = LoadCore();
   FakePublisherBus bus;
@@ -365,7 +406,9 @@ TEST(SensorRuntimeTest, LatestQueueKeepsNewestCaptureAndCountsDrops) {
   FakePublisherBus bus;
   FirstCaptureGate gate;
   SensorRuntime runtime({[&bus](const std::string& topic) { return bus.MakePublisher(topic); },
-                         [&gate](const std::string& source) { gate.BeforeCapture(source); }});
+                         [&gate](const std::string& source) {
+                           gate.BeforeCapture(source);
+                         }});
   ServerConfig config = BaseConfig();
   config.sensor_streams = {LidarStream()};
   std::string error;
@@ -397,7 +440,9 @@ TEST_P(SensorFifoRuntimeTest, AppliesConfiguredOverflowPolicy) {
   FakePublisherBus bus;
   FirstCaptureGate gate;
   SensorRuntime runtime({[&bus](const std::string& topic) { return bus.MakePublisher(topic); },
-                         [&gate](const std::string& source) { gate.BeforeCapture(source); }});
+                         [&gate](const std::string& source) {
+                           gate.BeforeCapture(source);
+                         }});
   ServerConfig config = BaseConfig();
   config.sensor_streams = {LidarStream("lidar", "fifo", 2, GetParam().first)};
   std::string error;
@@ -430,10 +475,11 @@ TEST(SensorRuntimeTest, BlockingQueueWaitsThroughSuccessfulPublish) {
   FakePublisherBus bus;
   FirstCaptureGate gate;
   BlockingWaitGate wait_gate;
-  SensorRuntime runtime(
-      {[&bus](const std::string& topic) { return bus.MakePublisher(topic); },
-       [&gate](const std::string& source) { gate.BeforeCapture(source); },
-       [&wait_gate](const std::string& source) { wait_gate.OnWaitStarted(source); }});
+  SensorRuntime runtime({[&bus](const std::string& topic) { return bus.MakePublisher(topic); },
+                         [&gate](const std::string& source) { gate.BeforeCapture(source); },
+                         [&wait_gate](const std::string& source) {
+                           wait_gate.OnWaitStarted(source);
+                         }});
   ServerConfig config = BaseConfig();
   config.sensor_streams = {LidarStream("lidar", "blocking", 1, "drop_oldest")};
   std::string error;
@@ -474,7 +520,9 @@ TEST(SensorRuntimeTest, StopRequestReleasesBlockingEnqueueBeforeWorkerJoin) {
   SensorRuntime runtime(
       {[&bus](const std::string& topic) { return bus.MakePublisher(topic); },
        [&capture_gate](const std::string& source) { capture_gate.BeforeCapture(source); },
-       [&wait_gate](const std::string& source) { wait_gate.OnWaitStarted(source); }});
+       [&wait_gate](const std::string& source) {
+         wait_gate.OnWaitStarted(source);
+       }});
   ServerConfig config = BaseConfig();
   config.sensor_streams = {LidarStream("lidar", "blocking", 1, "drop_oldest")};
   std::string error;
@@ -495,6 +543,35 @@ TEST(SensorRuntimeTest, StopRequestReleasesBlockingEnqueueBeforeWorkerJoin) {
   runtime.Stop();
 }
 
+TEST(SensorRuntimeTest, StopDiscardsQueuedCapturesAndJoinsOnlyActiveWork) {
+  auto core = LoadCore();
+  FakePublisherBus bus;
+  FirstCaptureGate capture_gate;
+  std::atomic<std::size_t> capture_count = 0;
+  SensorRuntime runtime({[&bus](const std::string& topic) { return bus.MakePublisher(topic); },
+                         [&](const std::string& source) {
+                           capture_count.fetch_add(1, std::memory_order_relaxed);
+                           capture_gate.BeforeCapture(source);
+                         }});
+  ServerConfig config = BaseConfig();
+  config.sensor_streams = {LidarStream("lidar", "fifo", 4, "drop_oldest")};
+  std::string error;
+  ASSERT_TRUE(runtime.Initialize(*core, config, &error)) << error;
+
+  ASSERT_TRUE(core->Step().step_completed.has_value());
+  runtime.OnStepCompleted(*core);
+  ASSERT_TRUE(capture_gate.WaitUntilEntered());
+  for (int step = 0; step < 4; ++step) {
+    ASSERT_TRUE(core->Step().step_completed.has_value());
+    runtime.OnStepCompleted(*core);
+  }
+
+  runtime.RequestStop();
+  capture_gate.Release();
+  runtime.Stop();
+  EXPECT_EQ(capture_count.load(std::memory_order_relaxed), 1U);
+}
+
 TEST(SensorRuntimeTest, ExternalStopPredicateReleasesBlockingEnqueue) {
   auto core = LoadCore();
   FakePublisherBus bus;
@@ -503,7 +580,9 @@ TEST(SensorRuntimeTest, ExternalStopPredicateReleasesBlockingEnqueue) {
   SensorRuntime runtime(
       {[&bus](const std::string& topic) { return bus.MakePublisher(topic); },
        [&capture_gate](const std::string& source) { capture_gate.BeforeCapture(source); },
-       [&wait_gate](const std::string& source) { wait_gate.OnWaitStarted(source); }});
+       [&wait_gate](const std::string& source) {
+         wait_gate.OnWaitStarted(source);
+       }});
   ServerConfig config = BaseConfig();
   config.sensor_streams = {LidarStream("lidar", "blocking", 1, "drop_oldest")};
   std::string error;
@@ -531,13 +610,14 @@ TEST(SensorRuntimeTest, BlockingCaptureFailureReleasesPendingWaitSafely) {
   FakePublisherBus bus;
   FirstCaptureGate capture_gate;
   BlockingWaitGate wait_gate;
-  SensorRuntime runtime(
-      {[&bus](const std::string& topic) { return bus.MakePublisher(topic); },
-       [&capture_gate](const std::string& source) {
-         capture_gate.BeforeCapture(source);
-         throw std::runtime_error("injected blocking capture failure");
-       },
-       [&wait_gate](const std::string& source) { wait_gate.OnWaitStarted(source); }});
+  SensorRuntime runtime({[&bus](const std::string& topic) { return bus.MakePublisher(topic); },
+                         [&capture_gate](const std::string& source) {
+                           capture_gate.BeforeCapture(source);
+                           throw std::runtime_error("injected blocking capture failure");
+                         },
+                         [&wait_gate](const std::string& source) {
+                           wait_gate.OnWaitStarted(source);
+                         }});
   ServerConfig config = BaseConfig();
   config.sensor_streams = {LidarStream("lidar", "blocking", 1, "drop_oldest")};
   std::string error;
@@ -768,6 +848,11 @@ TEST(SensorRuntimeTest, SubscriberDisconnectDuringSendIsNotAStreamError) {
   channel->subscribers.store(1, std::memory_order_relaxed);
   std::this_thread::sleep_for(2ms);
   ASSERT_TRUE(Advance(core.get(), &runtime));
+  ASSERT_TRUE(WaitUntil([&] {
+    const auto status = StreamStatusFor(runtime, "lidar");
+    return status && status->subscriber_count() == 1;
+  }));
+  ASSERT_TRUE(Advance(core.get(), &runtime));
   ASSERT_TRUE(bus.WaitForFrames(topic, 1));
   ASSERT_TRUE(WaitUntil([&] {
     const auto status = StreamStatusFor(runtime, "lidar");
@@ -797,6 +882,11 @@ TEST(SensorRuntimeTest, LazyStreamReturnsToIdleAfterLastSubscriberLeaves) {
   channel->subscribers.store(0, std::memory_order_relaxed);
   std::this_thread::sleep_for(2ms);
   ASSERT_TRUE(Advance(core.get(), &runtime));
+  ASSERT_TRUE(WaitUntil([&] {
+    const auto current = StreamStatusFor(runtime, "lidar");
+    return current && current->state() == mujoco_sim::v4::STREAM_IDLE &&
+           current->subscriber_count() == 0;
+  }));
   const auto status = StreamStatusFor(runtime, "lidar");
   ASSERT_TRUE(status.has_value());
   EXPECT_EQ(status->state(), mujoco_sim::v4::STREAM_IDLE);
@@ -838,9 +928,10 @@ TEST(SensorRuntimeTest, NoSubscribersAvoidCaptureWork) {
   auto core = LoadCore();
   FakePublisherBus bus(0);
   std::atomic<std::size_t> captures{0};
-  SensorRuntime runtime(
-      {[&bus](const std::string& topic) { return bus.MakePublisher(topic); },
-       [&captures](const std::string&) { captures.fetch_add(1, std::memory_order_relaxed); }});
+  SensorRuntime runtime({[&bus](const std::string& topic) { return bus.MakePublisher(topic); },
+                         [&captures](const std::string&) {
+                           captures.fetch_add(1, std::memory_order_relaxed);
+                         }});
   ServerConfig config = BaseConfig();
   config.sensor_streams = {LidarStream()};
   std::string error;

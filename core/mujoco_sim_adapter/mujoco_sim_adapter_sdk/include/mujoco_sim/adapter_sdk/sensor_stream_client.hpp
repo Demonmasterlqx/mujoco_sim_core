@@ -98,8 +98,12 @@ class SensorStreamClient {
   /// Discovers descriptors, validates them, and creates receive endpoints.
   bool Start(std::string* error_message);
   /// Selects callback delivery for a stream and discards queued old samples.
-  /// Callback exceptions are caught. The client may be destroyed by its own
-  /// callback; it must then return without accessing the destroyed object.
+  /// Same-stream callbacks never overlap; a frame arriving while its callback
+  /// is active is dropped and counted. Callback exceptions are caught. The
+  /// client may be destroyed by its own callback; it must then return without
+  /// accessing the destroyed object.
+  /// 同一数据流的回调不会重叠；回调执行期间到达的新帧会被丢弃并计数。回调异常会被
+  /// 捕获。客户端可以在自身回调中销毁，但随后必须直接返回且不得再访问已销毁对象。
   bool SetCallback(const std::string& stream_name, StreamCallback callback,
                    std::string* error_message);
   /// Selects blocking delivery and waits for one sample.

@@ -13,10 +13,25 @@ void HandleSignal(int) {
 
 }  // namespace
 
-void InstallProcessSignalHandlers() {
+bool InstallProcessSignalHandlers(std::string* error_message) {
+  if (error_message == nullptr) return false;
+  error_message->clear();
   stop_requested = 0;
-  std::signal(SIGINT, HandleSignal);
-  std::signal(SIGTERM, HandleSignal);
+  const auto previous_interrupt = std::signal(SIGINT, HandleSignal);
+  if (previous_interrupt == SIG_ERR) {
+    *error_message = "failed to install the Sensor Demo SIGINT handler";
+    return false;
+  }
+  if (std::signal(SIGTERM, HandleSignal) == SIG_ERR) {
+    if (std::signal(SIGINT, previous_interrupt) == SIG_ERR) {
+      *error_message =
+          "failed to install the Sensor Demo SIGTERM handler and restore the SIGINT handler";
+    } else {
+      *error_message = "failed to install the Sensor Demo SIGTERM handler";
+    }
+    return false;
+  }
+  return true;
 }
 
 bool ProcessStopRequested() noexcept {

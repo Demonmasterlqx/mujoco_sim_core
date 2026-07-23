@@ -1,4 +1,8 @@
-add_library(mujoco_sim_status_lib STATIC status_tool.cpp)
+add_library(mujoco_sim_status_lib STATIC
+  status_monitor.cpp
+  status_monitor_support.cpp
+  status_tool.cpp
+)
 mujoco_sim_generate_config(
   TARGET status_config_generated
   SCHEMA config/status_config.yaml

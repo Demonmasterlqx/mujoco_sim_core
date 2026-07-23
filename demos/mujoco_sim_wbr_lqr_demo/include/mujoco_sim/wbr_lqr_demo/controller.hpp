@@ -1,6 +1,8 @@
 #pragma once
 
+#include <cstddef>
 #include <optional>
+#include <span>
 #include <vector>
 
 #include <control/msgs.hpp>

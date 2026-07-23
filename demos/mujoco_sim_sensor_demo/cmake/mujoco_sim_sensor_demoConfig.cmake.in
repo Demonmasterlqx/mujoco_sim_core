@@ -3,6 +3,7 @@
 include(CMakeFindDependencyMacro)
 find_dependency(Eigen3 CONFIG)
 find_dependency(mujoco_sim_adapter_sdk CONFIG)
+find_dependency(mujoco_sim_protocol CONFIG)
 find_dependency(PkgConfig)
 pkg_check_modules(PCL REQUIRED IMPORTED_TARGET
   pcl_common

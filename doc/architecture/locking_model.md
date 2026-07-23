@@ -12,10 +12,16 @@ The remaining locks have narrow infrastructure responsibilities:
   and its condition variable;
 - the transport callback gate protects accepting/active callback counts so
   teardown can stop new callbacks and wait for current callbacks to return;
-- the simulation-loop lifecycle mutex protects the stop reason, exit code, and
-  completion state shared with callers of `RequestStop()` and `Join()`;
+- the simulation-loop lifecycle mutex protects the stop reason shared with
+  callers of `RequestStop()`; the final exit code is atomic for `Join()`;
+- the Controller Inbox mutex protects bounded per-session mailboxes and short
+  registration prepare/commit sections. Registration reservations make
+  `RequestClose()` reject new callback input without waiting; final `Close()`
+  waits with the mutex released, so Core and transport setup run without an
+  Inbox lock;
 - Sensor worker locks protect their private capture queues, snapshot pools, and
-  completion conditions;
+  completion conditions. Each worker calls subscriber-count and send operations
+  on its eCAL publishers only from its own thread and without that lock;
 - the MuJoCo viewer mutex protects the viewer's copied model/data while the GUI
   thread renders and the simulation thread synchronizes its snapshot;
 - logger and eCAL internals retain their own synchronization.
@@ -26,6 +32,14 @@ waits on its promise and before the loop processes an event. The lifecycle mutex
 is not held while joining threads, waiting for Sensor capture, publishing eCAL
 messages, or invoking Core.
 
+`OffscreenRenderer::Create()` has one deliberate third-party exception. MuJoCo
+caches its OpenGL dispatch table process-wide, so a process-global Sensor
+platform mutex serializes the initial EGL/OSMesa family decision, native context
+creation, and MuJoCo render-context initialization. The mutex must cover those
+third-party calls until the selected platform family and retained dispatch
+library are committed. Capture, publication, callbacks, and worker joins do not
+use this mutex.
+
 Published and queued values own their data. Parsed protobuf events own their
 messages, completed-step results own immutable State and Observer frames, and
 Sensor jobs own snapshots. Each Controller Inbox slot owns only its latest
@@ -34,5 +48,5 @@ decoded Command.
 Blocking Sensor fences intentionally pause the sole Core writer after a step.
 This means registry RPCs queued during the fence wait until it completes; they
 do not run concurrently with Core. A stop request does not enter Core: it closes
-the queue and signals the stop token and Sensor condition, allowing the loop to
-leave the fence and finish teardown.
+the event queue and Inbox and signals the Sensor conditions, allowing the loop
+to leave the fence and finish teardown.

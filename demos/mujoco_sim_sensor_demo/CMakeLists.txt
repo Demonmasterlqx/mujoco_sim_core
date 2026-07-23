@@ -7,6 +7,7 @@ include(GNUInstallDirs)
 find_package(Eigen3 CONFIG REQUIRED)
 find_package(mujoco_sim_adapter_sdk CONFIG REQUIRED)
 find_package(mujoco_sim_config CONFIG REQUIRED)
+find_package(mujoco_sim_protocol CONFIG REQUIRED)
 find_package(PkgConfig REQUIRED)
 pkg_check_modules(PCL REQUIRED IMPORTED_TARGET
   pcl_common
@@ -34,6 +35,7 @@ target_link_libraries(${PROJECT_NAME}
   PUBLIC
     Eigen3::Eigen
     mujoco_sim::adapter_sdk
+    mujoco_sim::protocol
     PkgConfig::PCL
     PNG::PNG
 )
@@ -270,16 +272,10 @@ if(BUILD_TESTING)
     TIMEOUT 200
   )
 
-  set(SENSOR_DEMO_GUI_TEST_PREFIX)
-  if(NOT DEFINED ENV{DISPLAY} OR "$ENV{DISPLAY}" STREQUAL "")
-    find_program(XVFB_RUN_EXECUTABLE NAMES xvfb-run REQUIRED)
-    set(SENSOR_DEMO_GUI_TEST_PREFIX "${XVFB_RUN_EXECUTABLE}" -a)
-  endif()
+  find_program(XVFB_RUN_EXECUTABLE NAMES xvfb-run REQUIRED)
+  set(SENSOR_DEMO_GUI_TEST_PREFIX "${XVFB_RUN_EXECUTABLE}" -a)
 
   add_executable(sensor_demo_gui_render_test test/gui_render_test.cpp)
-  target_include_directories(sensor_demo_gui_render_test PRIVATE
-    "${CMAKE_CURRENT_SOURCE_DIR}/../../core/mujoco_sim_server/src"
-  )
   target_compile_definitions(sensor_demo_gui_render_test PRIVATE
     SENSOR_DEMO_MJCF_DIR="${CMAKE_CURRENT_SOURCE_DIR}/mjcf"
   )

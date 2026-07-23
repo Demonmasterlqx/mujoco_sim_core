@@ -34,7 +34,10 @@ int main(int argc, char** argv) {
     std::cerr << message << '\n';
     return 1;
   }
-  demo::InstallProcessSignalHandlers();
+  if (!demo::InstallProcessSignalHandlers(&message)) {
+    std::cerr << message << '\n';
+    return 1;
+  }
   const auto& config = app_config.camera_consumer;
   mujoco_sim::adapter_sdk::SensorStreamClient client(config.streams);
   if (!client.Start(&message)) {

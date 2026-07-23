@@ -344,4 +344,13 @@ TEST(StatusFormattingTest, WritesUnavailableResourcesAsNdjson) {
   EXPECT_EQ(count, 2);
 }
 
+TEST(StatusFormattingTest, ReportsOutputStreamFailure) {
+  std::ostringstream output;
+  output.setstate(std::ios::badbit);
+  std::string error;
+
+  EXPECT_FALSE(WriteReport(MakeReport(), false, &output, &error));
+  EXPECT_EQ(error, "output stream rejected the status report");
+}
+
 }  // namespace

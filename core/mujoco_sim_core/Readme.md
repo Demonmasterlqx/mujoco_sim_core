@@ -83,6 +83,9 @@ The bundled MuJoCo distribution is used by default. Set
 package. Installed consumers use `find_package(mujoco_sim_core CONFIG
 REQUIRED)` and link `mujoco_sim::core`.
 
+The bundled distribution's source, version, checksum evidence, license, and
+local packaging boundary are recorded in [UPSTREAM.md](UPSTREAM.md).
+
 See [Core components](../../doc/architecture/core_components.md),
 [Controller lifecycle](../../doc/architecture/controller_lifecycle.md), and
 [async sequence](../../doc/architecture/async_controller_sequence.md).

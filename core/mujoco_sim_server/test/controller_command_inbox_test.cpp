@@ -2,12 +2,16 @@
 
 #include <algorithm>
 #include <atomic>
+#include <chrono>
+#include <future>
 #include <thread>
 
 #include "controller_command_inbox.hpp"
 
 namespace mujoco_sim::server {
 namespace {
+
+using namespace std::chrono_literals;
 
 mujoco_sim::core::ControllerCommand Command(std::uint64_t session, std::uint64_t sequence) {
   mujoco_sim::core::ControllerCommand command;
@@ -107,6 +111,57 @@ TEST(ControllerCommandInboxTest, ReservationMoveTransfersPlaceholderOwnership) {
   auto commands = inbox.Drain();
   ASSERT_EQ(commands.size(), 1U);
   EXPECT_EQ(commands.front().session.session_id, 42U);
+}
+
+TEST(ControllerCommandInboxTest, RegistrationReservationDoesNotBlockExistingSessions) {
+  ControllerCommandInbox inbox;
+  ASSERT_TRUE(inbox.Register(7));
+  auto reservation = inbox.PrepareRegistration(true);
+  ASSERT_TRUE(reservation);
+
+  auto publish = std::async(std::launch::async, [&] { return inbox.Publish(Command(7, 1)); });
+  const auto status = publish.wait_for(500ms);
+  if (status != std::future_status::ready) {
+    reservation = {};
+  }
+  ASSERT_EQ(status, std::future_status::ready);
+  EXPECT_TRUE(publish.get());
+  EXPECT_TRUE(reservation.Commit(42, 1));
+}
+
+TEST(ControllerCommandInboxTest, CloseWaitsForRegistrationBoundary) {
+  ControllerCommandInbox inbox;
+  auto reservation = inbox.PrepareRegistration(true);
+  ASSERT_TRUE(reservation);
+  std::promise<void> close_started;
+  auto started = close_started.get_future();
+  auto close = std::async(std::launch::async, [&] {
+    close_started.set_value();
+    inbox.Close();
+  });
+
+  started.get();
+  EXPECT_EQ(close.wait_for(0ms), std::future_status::timeout);
+  EXPECT_TRUE(reservation.Commit(42, 1));
+  ASSERT_EQ(close.wait_for(500ms), std::future_status::ready);
+  close.get();
+  EXPECT_FALSE(inbox.Publish(Command(42, 1)));
+  EXPECT_FALSE(inbox.PrepareRegistration(true));
+}
+
+TEST(ControllerCommandInboxTest, RequestCloseRejectsInputWithoutWaitingForRegistration) {
+  ControllerCommandInbox inbox;
+  ASSERT_TRUE(inbox.Register(7));
+  auto reservation = inbox.PrepareRegistration(true);
+  ASSERT_TRUE(reservation);
+
+  inbox.RequestClose();
+  EXPECT_FALSE(inbox.Publish(Command(7, 1)));
+  EXPECT_FALSE(inbox.PrepareRegistration(false));
+  EXPECT_TRUE(reservation.Commit(42, 1));
+
+  inbox.Close();
+  EXPECT_FALSE(inbox.Publish(Command(42, 1)));
 }
 
 TEST(ControllerCommandInboxTest, InvalidFaultCannotReplaceValidFault) {

@@ -5,13 +5,12 @@
 #include <filesystem>
 #include <string>
 #include <thread>
+#include <utility>
 #include <vector>
 
 #include <png.h>
 
-#include <mujoco_sim/core/simulation_core.hpp>
-
-#include "sim_viewer.hpp"
+#include <mujoco_sim/server/server_application.hpp>
 
 namespace {
 
@@ -37,44 +36,33 @@ class ScopedScreenshot {
 
 TEST(SensorDemoGuiRenderTest, CapturesNonBlankRoomAndVehicleFrame) {
   ScopedScreenshot screenshot;
-  mujoco_sim::core::SimulationCore core;
+  mujoco_sim::server::ServerConfig config;
+  config.server_name = "sensor_demo_gui_render_test";
+  config.model_path = (std::filesystem::path(SENSOR_DEMO_MJCF_DIR) / "scene.xml").string();
+  config.headless = false;
+  config.log_summary_period_ms = 0;
+  mujoco_sim::server::ServerApplication application(std::move(config));
   std::string error;
-  const auto model_load =
-      core.LoadModel((std::filesystem::path(SENSOR_DEMO_MJCF_DIR) / "scene.xml").string());
-  ASSERT_TRUE(model_load.response.loaded) << model_load.response.message;
-  auto snapshot = core.CreateSnapshot(&error);
-  ASSERT_NE(snapshot, nullptr) << error;
+  ASSERT_TRUE(application.Start(&error)) << error;
 
-  mujoco_sim::server::SimViewer viewer;
-  ASSERT_TRUE(viewer.Initialize(&error)) << error;
-
-  bool loaded = false;
+  bool request_accepted = false;
   bool captured = false;
   std::thread worker([&] {
-    if (!viewer.QueueLoad(*snapshot, "MuJoCo Sensor Demo", &error)) {
-      viewer.RequestClose();
-      return;
-    }
-    const auto load_deadline = std::chrono::steady_clock::now() + 3s;
-    while (!viewer.model_loaded() && std::chrono::steady_clock::now() < load_deadline) {
-      std::this_thread::sleep_for(5ms);
-    }
-    loaded = viewer.model_loaded();
-    if (loaded && viewer.Synchronize(core, *snapshot, &error)) {
-      viewer.RequestScreenshot();
-      const auto capture_deadline = std::chrono::steady_clock::now() + 3s;
-      while (!std::filesystem::exists(screenshot.path()) &&
-             std::chrono::steady_clock::now() < capture_deadline) {
-        std::this_thread::sleep_for(5ms);
-      }
+    std::this_thread::sleep_for(250ms);
+    const auto capture_deadline = std::chrono::steady_clock::now() + 5s;
+    while (!captured && std::chrono::steady_clock::now() < capture_deadline) {
+      request_accepted = application.RequestScreenshot() || request_accepted;
+      std::this_thread::sleep_for(20ms);
       captured = std::filesystem::exists(screenshot.path());
     }
-    viewer.RequestClose();
+    application.RequestStop(captured ? "screenshot_captured" : "screenshot_timeout");
   });
 
-  viewer.RenderLoop();
+  const int run_result = application.Run();
   worker.join();
-  ASSERT_TRUE(loaded) << error;
+  ASSERT_EQ(run_result, 0);
+  EXPECT_FALSE(application.RequestScreenshot());
+  ASSERT_TRUE(request_accepted);
   ASSERT_TRUE(captured) << error;
 
   png_image image{};

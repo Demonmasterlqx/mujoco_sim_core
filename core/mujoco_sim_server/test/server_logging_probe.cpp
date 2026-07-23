@@ -30,6 +30,12 @@ bool Call(eCAL::CServiceClient* client, const std::string& method, const std::st
   return false;
 }
 
+bool Send(eCAL::CPublisher* publisher, const std::string& payload, const char* topic) {
+  if (publisher->Send(payload)) return true;
+  std::cerr << "publish failed for " << topic << '\n';
+  return false;
+}
+
 }  // namespace
 
 int main(int argc, char** argv) {
@@ -71,28 +77,30 @@ int main(int argc, char** argv) {
       const std::string rejected_bytes = rejected.SerializeAsString();
 
       for (int index = 0; index < 3; ++index) {
-        if (!Call(&client, mujoco_sim::protocol::kRegisterAdapterMethod, malformed) ||
-            !Call(&client, mujoco_sim::protocol::kRegisterAdapterMethod, rejected_bytes)) {
+        if (!Call(&client, mujoco_sim::protocol::kRegisterAdapterMethod, malformed)) result = 1;
+        if (!Call(&client, mujoco_sim::protocol::kRegisterAdapterMethod, rejected_bytes))
           result = 1;
-        }
-        command.Send(malformed);
-        heartbeat.Send(malformed);
+        if (!Send(&command, malformed, "ControllerCommand")) result = 1;
+        if (!Send(&heartbeat, malformed, "SessionHeartbeat")) result = 1;
       }
       std::this_thread::sleep_for(std::chrono::milliseconds(1100));
-      Call(&client, mujoco_sim::protocol::kRegisterAdapterMethod, malformed);
-      Call(&client, mujoco_sim::protocol::kRegisterAdapterMethod, rejected_bytes);
-      command.Send(malformed);
-      heartbeat.Send(malformed);
+      if (!Call(&client, mujoco_sim::protocol::kRegisterAdapterMethod, malformed)) result = 1;
+      if (!Call(&client, mujoco_sim::protocol::kRegisterAdapterMethod, rejected_bytes)) result = 1;
+      if (!Send(&command, malformed, "ControllerCommand")) result = 1;
+      if (!Send(&heartbeat, malformed, "SessionHeartbeat")) result = 1;
 
       const auto traffic_deadline = std::chrono::steady_clock::now() + std::chrono::seconds(2);
       while (std::chrono::steady_clock::now() < traffic_deadline) {
-        Call(&client, mujoco_sim::protocol::kRegisterAdapterMethod, malformed);
-        command.Send(malformed);
-        heartbeat.Send(malformed);
+        if (!Call(&client, mujoco_sim::protocol::kRegisterAdapterMethod, malformed)) result = 1;
+        if (!Send(&command, malformed, "ControllerCommand")) result = 1;
+        if (!Send(&heartbeat, malformed, "SessionHeartbeat")) result = 1;
         std::this_thread::sleep_for(std::chrono::milliseconds(10));
       }
     }
   }
-  eCAL::Finalize();
+  if (!eCAL::Finalize()) {
+    std::cerr << "failed to finalize eCAL logging probe\n";
+    result = 1;
+  }
   return result;
 }

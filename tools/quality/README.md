@@ -12,8 +12,11 @@ python3 tools/quality/test_check_adapter_sdk_complexity.py
 
 Configuring the Adapter SDK with `MUJOCO_SIM_ENABLE_QUALITY_GATES=ON` adds both
 commands to CTest. `MUJOCO_SIM_BUILD_DOCS=ON` adds the
-`mujoco_sim_adapter_sdk_docs` target and treats undocumented public APIs and
-other Doxygen warnings as errors.
+`mujoco_sim_adapter_sdk_docs` target and fails on the Doxygen warnings it
+emits. The current configuration uses `EXTRACT_ALL=YES` while the repository
+migrates existing bilingual-header debt, so it does not yet diagnose every
+undocumented declaration. New and changed first-party headers must still meet
+the repository's bilingual documentation rule.
 
 Install the pinned analyzer in an isolated environment:
 

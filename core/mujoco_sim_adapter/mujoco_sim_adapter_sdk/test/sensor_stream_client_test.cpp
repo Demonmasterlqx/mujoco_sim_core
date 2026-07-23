@@ -587,6 +587,39 @@ TEST(SensorStreamClientTest, CallbackExceptionsDoNotEscapeTransportThread) {
   EXPECT_EQ(client.stream_diagnostic("rgb"), "stream callback threw: failure");
 }
 
+TEST(SensorStreamClientTest, DropsConcurrentFrameInsteadOfBlockingCallbackThread) {
+  SensorStreamClient client(MakeOptions());
+  SensorStreamClientTestPeer::Configure(&client, {MakeDescriptor()});
+  std::promise<void> callback_entered;
+  auto entered = callback_entered.get_future();
+  std::promise<void> release_callback;
+  auto release = release_callback.get_future().share();
+  std::atomic<std::size_t> callback_count = 0;
+  std::string error;
+  ASSERT_TRUE(client.SetCallback(
+      "rgb",
+      [&](const auto&) {
+        if (++callback_count == 1) {
+          callback_entered.set_value();
+          release.wait();
+        }
+      },
+      &error));
+  auto payload = MakePayload();
+  auto first = std::async(std::launch::async, [&] { Deliver(&client, 1, &payload); });
+  ASSERT_EQ(entered.wait_for(1s), std::future_status::ready);
+
+  auto second = std::async(std::launch::async, [&] { Deliver(&client, 2, &payload); });
+  ASSERT_EQ(second.wait_for(1s), std::future_status::ready);
+  second.get();
+  EXPECT_EQ(callback_count.load(), 1U);
+  EXPECT_EQ(client.dropped_samples("rgb"), 1U);
+
+  release_callback.set_value();
+  ASSERT_EQ(first.wait_for(1s), std::future_status::ready);
+  first.get();
+}
+
 TEST(SensorStreamClientTest, TeardownDrainsAndDisablesCallbacks) {
   SensorStreamClient client(MakeOptions());
   SensorStreamClientTestPeer::Configure(&client, {MakeDescriptor()});

@@ -4,6 +4,7 @@
 #include <condition_variable>
 #include <cstddef>
 #include <cstdint>
+#include <exception>
 #include <future>
 #include <memory>
 #include <mutex>
@@ -35,8 +36,15 @@ class EcalScope {
  public:
   explicit EcalScope(const std::string& name) : initialized_(eCAL::Initialize(name)) {}
 
-  ~EcalScope() {
-    if (initialized_) eCAL::Finalize();
+  ~EcalScope() noexcept {
+    if (!initialized_) return;
+    try {
+      if (!eCAL::Finalize()) ADD_FAILURE() << "failed to finalize test eCAL runtime";
+    } catch (const std::exception& error) {
+      ADD_FAILURE() << "eCAL test finalization threw: " << error.what();
+    } catch (...) {
+      ADD_FAILURE() << "eCAL test finalization threw an unknown exception";
+    }
   }
 
   bool initialized() const { return initialized_; }
@@ -44,6 +52,29 @@ class EcalScope {
  private:
   bool initialized_ = false;
 };
+
+TEST(SensorStreamEcalTest, ServiceExecutionFailurePreservesEcalReturnState) {
+  EcalScope ecal("mujoco-sim-stream-service-failure-test");
+  ASSERT_TRUE(ecal.initialized());
+
+  const std::string server_name =
+      "stream-service-failure-" +
+      std::to_string(std::chrono::steady_clock::now().time_since_epoch().count());
+  eCAL::CServiceServer registry(mujoco_sim::protocol::RegistryServiceName(server_name));
+  ASSERT_TRUE(registry.SetMethodCallback(
+      MethodInfo(mujoco_sim::protocol::kGetSensorStreamsMethod),
+      [](const eCAL::SServiceMethodInformation&, const std::string&, std::string&) { return 7; }));
+
+  mujoco_sim::adapter_sdk::SensorStreamOptions options;
+  options.server_name = server_name;
+  options.stream_names = {"rgb"};
+  options.service_timeout_ms = 3000;
+  mujoco_sim::adapter_sdk::SensorStreamClient client(std::move(options));
+  std::string error;
+  EXPECT_FALSE(client.Start(&error));
+  EXPECT_NE(error.find("service execution failed"), std::string::npos) << error;
+  EXPECT_NE(error.find("ret_state=7"), std::string::npos) << error;
+}
 
 TEST(SensorStreamEcalTest, SameTickStreamErrorWakesWaiterAcrossTransport) {
   EcalScope ecal("mujoco-sim-stream-error-test");

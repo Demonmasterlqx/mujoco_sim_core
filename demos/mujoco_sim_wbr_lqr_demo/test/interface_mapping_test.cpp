@@ -2,6 +2,7 @@
 
 #include <array>
 #include <limits>
+#include <vector>
 
 #include <mujoco_sim/wbr_lqr_demo/controller.hpp>
 
@@ -48,6 +49,26 @@ TEST(InterfaceMappingTest, ValidatesLayoutAndValues) {
   tick.observations[layout.Observation("lwheel_vel")->offset] =
       std::numeric_limits<double>::infinity();
   EXPECT_THROW(demo::StateDecoder(layout).Decode(tick.observations, 0.0), demo::InterfaceError);
+
+  tick = test::MakeValidTick(layout);
+  tick.observations.pop_back();
+  EXPECT_THROW(demo::StateDecoder(layout).Decode(tick.observations, 0.0), demo::InterfaceError);
+  const auto valid_tick = test::MakeValidTick(layout);
+  EXPECT_THROW(demo::StateDecoder(layout).Decode(valid_tick.observations,
+                                                 std::numeric_limits<double>::quiet_NaN()),
+               demo::InterfaceError);
+
+  auto overlapping_observations = layout.observations();
+  overlapping_observations[1].scalars.offset = overlapping_observations[0].scalars.offset;
+  const mujoco_sim::adapter_sdk::ControllerLayout overlapping(
+      overlapping_observations, layout.commands(), layout.observation_scalar_count(),
+      layout.command_scalar_count());
+  EXPECT_THROW((demo::StateDecoder(overlapping)), demo::InterfaceError);
+
+  const mujoco_sim::adapter_sdk::ControllerLayout wrong_scalar_count(
+      layout.observations(), layout.commands(), layout.observation_scalar_count() - 1,
+      layout.command_scalar_count());
+  EXPECT_THROW((demo::StateDecoder(wrong_scalar_count)), demo::InterfaceError);
 }
 
 TEST(InterfaceMappingTest, MapsDenseCommandOrderAndClampsRanges) {

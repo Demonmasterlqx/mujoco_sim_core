@@ -7,9 +7,11 @@ session, runs the upstream LQR state/control pipeline, and updates the latest
 dense Command for each `StateLease`.
 
 `StateDecoder` validates the registered layout and caches every observation
-span in its constructor. `TorqueCommandMapper` caches command offsets and
-ranges. The control loop therefore performs no resource-name lookup and does
-not expose generated Protobuf types.
+span in its constructor. Decode rejects a dense vector whose scalar count does
+not exactly match that frozen layout, as well as non-finite values or simulation
+timestamps. `TorqueCommandMapper` caches command offsets and ranges. The control
+loop therefore performs no resource-name lookup and does not expose generated
+Protobuf types.
 
 The interface configuration supports renamed and reordered MuJoCo resources.
 The frozen Server layout, not lexical resource order, determines dense offsets.

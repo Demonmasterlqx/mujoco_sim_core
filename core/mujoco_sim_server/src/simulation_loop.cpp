@@ -12,8 +12,10 @@
 #include <mujoco_sim/protocol/data_frame.hpp>
 
 #include "adapter_registration.hpp"
+#include "publish_diagnostics.hpp"
 #include "sensor_runtime.hpp"
 #include "server_logging.hpp"
+#include "server_runtime.hpp"
 #include "sim_viewer.hpp"
 
 namespace mujoco_sim::server {
@@ -21,6 +23,17 @@ namespace {
 
 using Clock = std::chrono::steady_clock;
 constexpr auto kPollPeriod = std::chrono::milliseconds(5);
+
+void LogLoopBoundaryFailure(const std::shared_ptr<spdlog::logger>& logger,
+                            std::string_view operation, std::string_view error) noexcept {
+  try {
+    if (logger) {
+      logger->error("event=simulation_loop_boundary_failure operation={} error={}",
+                    LogValue(operation), LogValue(error));
+    }
+  } catch (...) {
+  }
+}
 
 std::optional<std::string> ObserverDeliveryError(
     const mujoco_sim::core::RegisterAdapterRequest& request, const ServerConfig& config,
@@ -307,9 +320,16 @@ SimulationLoop::SimulationLoop(ServerConfig config, std::shared_ptr<spdlog::logg
       sensor_runtime_(std::make_unique<SensorRuntime>()) {}
 
 SimulationLoop::~SimulationLoop() {
-  RequestStop("server_destroyed");
-  if (thread_.joinable()) {
-    thread_.join();
+  std::string error;
+  if (!RunWithExceptionBoundary([this] { RequestStop("server_destroyed"); }, &error)) {
+    LogLoopBoundaryFailure(logger_, "destructor_request_stop", error);
+  }
+  if (!RunWithExceptionBoundary(
+          [this] {
+            if (thread_.joinable()) thread_.join();
+          },
+          &error)) {
+    LogLoopBoundaryFailure(logger_, "destructor_join", error);
   }
 }
 
@@ -393,7 +413,16 @@ bool SimulationLoop::Start(std::string* error) {
     }
     return false;
   }
-  thread_ = std::jthread([this](std::stop_token stop) { Run(stop); });
+  std::string thread_error;
+  if (!RunWithExceptionBoundary(
+          [this] { thread_ = std::jthread([this](std::stop_token stop) { Run(stop); }); },
+          &thread_error)) {
+    *error = "failed to start simulation loop thread";
+    if (!thread_error.empty()) {
+      error->append(": ").append(thread_error);
+    }
+    return false;
+  }
   return true;
 }
 
@@ -403,15 +432,15 @@ void SimulationLoop::RequestStop(std::string reason) {
     std::lock_guard lock(lifecycle_mutex_);
     if (!stop_requested_.load(std::memory_order_relaxed)) {
       stop_reason_ = std::move(reason);
-      if (exit_code_ != 2) {
-        exit_code_ = 0;
+      if (exit_code_.load(std::memory_order_relaxed) != 2) {
+        exit_code_.store(0, std::memory_order_relaxed);
       }
       stop_requested_.store(true, std::memory_order_release);
       first = true;
     }
   }
   if (first) {
-    command_inbox_.Close();
+    command_inbox_.RequestClose();
     queue_.Close();
     if (sensor_runtime_) {
       sensor_runtime_->RequestStop();
@@ -426,8 +455,7 @@ int SimulationLoop::Join() {
   if (thread_.joinable()) {
     thread_.join();
   }
-  std::lock_guard lock(lifecycle_mutex_);
-  return exit_code_;
+  return exit_code_.load(std::memory_order_acquire);
 }
 
 void SimulationLoop::Run(std::stop_token stop) noexcept {
@@ -477,15 +505,16 @@ void SimulationLoop::Run(std::stop_token stop) noexcept {
     {
       std::lock_guard lock(lifecycle_mutex_);
       if (stop_requested_.load(std::memory_order_relaxed)) {
-        final_code = exit_code_;
+        final_code = exit_code_.load(std::memory_order_relaxed);
         final_reason = stop_reason_;
       }
     }
     Finish(final_code, std::move(final_reason));
   } catch (const std::exception& error) {
-    logger_->error("event=simulation_loop_exception error={}", LogValue(error.what()));
+    LogLoopBoundaryFailure(logger_, "run", error.what());
     Finish(2, "run_loop_exception");
   } catch (...) {
+    LogLoopBoundaryFailure(logger_, "run", "non-standard exception");
     Finish(2, "run_loop_exception");
   }
 }
@@ -499,7 +528,6 @@ void SimulationLoop::Handle(GetAvailableResourcesEvent event) {
 }
 
 void SimulationLoop::Handle(RegisterAdapterEvent event) {
-  std::unique_lock lifecycle_lock(lifecycle_mutex_);
   if (stop_requested_.load(std::memory_order_acquire)) {
     event.completion.set_value(
         QueueError<mujoco_sim::v4::RegisterAdapterResponse>("server is stopping"));
@@ -512,6 +540,17 @@ void SimulationLoop::Handle(RegisterAdapterEvent event) {
     event.completion.set_value(std::move(response));
     return;
   }
+  constexpr std::uint64_t kPendingSessionId = 0;
+  auto [pending_entry, reserved] =
+      sessions_.try_emplace(kPendingSessionId, SessionInfo{request.adapter_id(), request.role()});
+  if (!reserved) {
+    event.completion.set_value(QueueError<mujoco_sim::v4::RegisterAdapterResponse>(
+        "adapter session reservation is already active"));
+    RequestStop("adapter_session_reservation_failed");
+    return;
+  }
+  auto pending_session = sessions_.extract(pending_entry);
+
   auto result = RegisterAdapterAtomically(
       &core_, &command_inbox_, request, Clock::now(),
       [this](std::string_view adapter_id, mujoco_sim::core::AdapterRole role) {
@@ -527,7 +566,14 @@ void SimulationLoop::Handle(RegisterAdapterEvent event) {
       });
   auto response = result.response;
   if (response.code() == mujoco_sim::core::OK) {
-    sessions_[response.session_id()] = {response.adapter_id(), response.role()};
+    pending_session.key() = response.session_id();
+    if (!sessions_.insert(std::move(pending_session)).inserted) {
+      ApplyEffects(std::move(result.effects));
+      event.completion.set_value(QueueError<mujoco_sim::v4::RegisterAdapterResponse>(
+          "failed to commit adapter session metadata"));
+      RequestStop("adapter_session_commit_failed");
+      return;
+    }
   }
   ApplyEffects(std::move(result.effects));
   event.completion.set_value(ToWire(response));
@@ -593,7 +639,8 @@ void SimulationLoop::ApplyEffects(mujoco_sim::core::EngineEffects effects) {
       tombstone->set_state_since_tick_id(change.tick_id);
     }
     sensor_runtime_->AppendStatus(&status);
-    transport_->PublishStatus(status);
+    ReportPublishResult(logger_, warning_limiter_, {"ServerStatus", {}, status.tick_id(), 0},
+                        transport_->PublishStatus(status));
   }
 
   for (const auto& change : effects.adapter_changes) {
@@ -639,8 +686,13 @@ void SimulationLoop::PublishControllerStates(
     mujoco_sim::protocol::DataFrameError error;
     auto header = Header(mujoco_sim::protocol::DataFrameKind::kControllerState, frame.identity,
                          frame.sequence);
+    const PublishDiagnosticContext context{"ControllerState", session->second.adapter_id,
+                                           frame.identity.tick_id, frame.sequence};
     if (mujoco_sim::protocol::EncodeDataFrame(header, frame.observations, &bytes, &error)) {
-      transport_->PublishControllerState(session->second.adapter_id, bytes);
+      ReportPublishResult(logger_, warning_limiter_, context,
+                          transport_->PublishControllerState(session->second.adapter_id, bytes));
+    } else {
+      ReportDataFrameEncodingFailure(logger_, warning_limiter_, context, error);
     }
   }
 }
@@ -656,8 +708,13 @@ void SimulationLoop::PublishObservations(
     mujoco_sim::protocol::DataFrameError error;
     auto header =
         Header(mujoco_sim::protocol::DataFrameKind::kObservation, frame.identity, frame.sequence);
+    const PublishDiagnosticContext context{"Observation", session->second.adapter_id,
+                                           frame.identity.tick_id, frame.sequence};
     if (mujoco_sim::protocol::EncodeDataFrame(header, frame.observations, &bytes, &error)) {
-      transport_->PublishObservation(session->second.adapter_id, bytes);
+      ReportPublishResult(logger_, warning_limiter_, context,
+                          transport_->PublishObservation(session->second.adapter_id, bytes));
+    } else {
+      ReportDataFrameEncodingFailure(logger_, warning_limiter_, context, error);
     }
   }
 }
@@ -665,7 +722,8 @@ void SimulationLoop::PublishObservations(
 void SimulationLoop::PublishStatus(bool, bool) {
   auto status = ToWire(core_.MakeStatus());
   sensor_runtime_->AppendStatus(&status);
-  transport_->PublishStatus(status);
+  ReportPublishResult(logger_, warning_limiter_, {"ServerStatus", {}, status.tick_id(), 0},
+                      transport_->PublishStatus(status));
 }
 
 void SimulationLoop::PublishSummary(Clock::time_point now,
@@ -706,7 +764,7 @@ void SimulationLoop::ProcessTimers(Clock::time_point now) {
     if (!viewer_->Synchronize(core_, *viewer_snapshot_, &error) && !viewer_->close_requested()) {
       {
         std::lock_guard lock(lifecycle_mutex_);
-        exit_code_ = 2;
+        exit_code_.store(2, std::memory_order_relaxed);
       }
       RequestStop("viewer_sync_failed");
       return;
@@ -733,19 +791,38 @@ void SimulationLoop::ProcessTimers(Clock::time_point now) {
   }
 }
 
-void SimulationLoop::Finish(int code, std::string reason) {
-  command_inbox_.Close();
-  queue_.Close("server simulation loop stopped");
-  sensor_runtime_->Stop();
-  ApplyEffects(core_.MarkStopped(reason));
-  PublishStatus(true, true);
-  {
-    std::lock_guard lock(lifecycle_mutex_);
-    exit_code_ = code;
-    stop_reason_ = reason;
+void SimulationLoop::Finish(int code, std::string reason) noexcept {
+  int final_code = code;
+  auto finish_stage = [this, &final_code](std::string_view operation, auto&& action) noexcept {
+    std::string error;
+    if (!RunWithExceptionBoundary(std::forward<decltype(action)>(action), &error)) {
+      final_code = 2;
+      LogLoopBoundaryFailure(logger_, operation, error.empty() ? "non-standard exception" : error);
+    }
+  };
+
+  finish_stage("command_inbox_close", [this] { command_inbox_.Close(); });
+  finish_stage("event_queue_close", [this] { queue_.Close("server simulation loop stopped"); });
+  finish_stage("sensor_runtime_stop", [this] { sensor_runtime_->Stop(); });
+  finish_stage("core_mark_stopped", [this, &reason] { ApplyEffects(core_.MarkStopped(reason)); });
+  finish_stage("terminal_status_publish", [this] { PublishStatus(true, true); });
+  finish_stage("server_stopped_log", [this, &reason, &final_code] {
+    logger_->info("event=server_stopped reason={} exit_code={} tick_id={}", LogValue(reason),
+                  final_code, core_.state().current_tick_id);
+  });
+
+  std::string state_error;
+  if (!RunWithExceptionBoundary(
+          [this, &reason] {
+            std::lock_guard lock(lifecycle_mutex_);
+            stop_reason_ = std::move(reason);
+          },
+          &state_error)) {
+    final_code = 2;
+    LogLoopBoundaryFailure(logger_, "record_stop_reason",
+                           state_error.empty() ? "non-standard exception" : state_error);
   }
-  logger_->info("event=server_stopped reason={} exit_code={} tick_id={}", LogValue(reason), code,
-                core_.state().current_tick_id);
+  exit_code_.store(final_code, std::memory_order_release);
 }
 
 }  // namespace mujoco_sim::server

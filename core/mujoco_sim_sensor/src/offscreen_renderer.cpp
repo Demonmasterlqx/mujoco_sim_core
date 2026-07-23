@@ -68,9 +68,9 @@ bool LoadSymbol(void* library, const char* name, Function* function, std::string
   void* symbol = dlsym(library, name);
   const char* error = dlerror();
   if (symbol == nullptr || error != nullptr) {
-    *error_message = std::string("could not load ") + name + ": " +
-                     (error == nullptr ? "symbol not found" : error);
-    return false;
+    return detail::Fail(std::string("could not load ") + name + ": " +
+                            (error == nullptr ? "symbol not found" : error),
+                        error_message);
   }
   *function = reinterpret_cast<Function>(symbol);
   return true;
@@ -84,7 +84,7 @@ void* OpenPlatformLibrary(std::string_view versioned_name, std::string_view unve
   }
   if (library == nullptr) {
     const char* error = dlerror();
-    *error_message = error == nullptr ? "platform library not found" : error;
+    detail::Fail(error == nullptr ? "platform library not found" : error, error_message);
   }
   return library;
 }
@@ -232,26 +232,24 @@ class NativeContext {
     auto get_platform_display = reinterpret_cast<PFNEGLGETPLATFORMDISPLAYEXTPROC>(
         egl_api_.get_proc_address("eglGetPlatformDisplayEXT"));
     if (get_platform_display == nullptr) {
-      *error_message = "EGL_EXT_platform_base is unavailable";
-      return false;
+      return detail::Fail("EGL_EXT_platform_base is unavailable", error_message);
     }
 
     egl_display_ =
         get_platform_display(EGL_PLATFORM_SURFACELESS_MESA, EGL_DEFAULT_DISPLAY, nullptr);
     if (egl_display_ == EGL_NO_DISPLAY) {
-      *error_message = EglErrorString("eglGetPlatformDisplayEXT(surfaceless)");
-      return false;
+      return detail::Fail(EglErrorString("eglGetPlatformDisplayEXT(surfaceless)"), error_message);
     }
     EGLint major = 0;
     EGLint minor = 0;
     if (egl_api_.initialize(egl_display_, &major, &minor) != EGL_TRUE) {
-      *error_message = EglErrorString("eglInitialize");
+      detail::Fail(EglErrorString("eglInitialize"), error_message);
       DestroyEgl();
       return false;
     }
     egl_initialized_ = true;
     if (egl_api_.bind_api(EGL_OPENGL_API) != EGL_TRUE) {
-      *error_message = EglErrorString("eglBindAPI(EGL_OPENGL_API)");
+      detail::Fail(EglErrorString("eglBindAPI(EGL_OPENGL_API)"), error_message);
       DestroyEgl();
       return false;
     }
@@ -276,14 +274,14 @@ class NativeContext {
     if (egl_api_.choose_config(egl_display_, config_attributes, &config, 1, &config_count) !=
             EGL_TRUE ||
         config_count != 1) {
-      *error_message = EglErrorString("eglChooseConfig");
+      detail::Fail(EglErrorString("eglChooseConfig"), error_message);
       DestroyEgl();
       return false;
     }
 
     egl_context_ = egl_api_.create_context(egl_display_, config, EGL_NO_CONTEXT, nullptr);
     if (egl_context_ == EGL_NO_CONTEXT) {
-      *error_message = EglErrorString("eglCreateContext");
+      detail::Fail(EglErrorString("eglCreateContext"), error_message);
       DestroyEgl();
       return false;
     }
@@ -298,12 +296,12 @@ class NativeContext {
     const EGLint pbuffer_attributes[] = {EGL_WIDTH, 1, EGL_HEIGHT, 1, EGL_NONE};
     egl_surface_ = egl_api_.create_pbuffer_surface(egl_display_, config, pbuffer_attributes);
     if (egl_surface_ == EGL_NO_SURFACE) {
-      *error_message = EglErrorString("eglCreatePbufferSurface");
+      detail::Fail(EglErrorString("eglCreatePbufferSurface"), error_message);
       DestroyEgl();
       return false;
     }
     if (egl_api_.make_current(egl_display_, egl_surface_, egl_surface_, egl_context_) != EGL_TRUE) {
-      *error_message = EglErrorString("eglMakeCurrent(pbuffer)");
+      detail::Fail(EglErrorString("eglMakeCurrent(pbuffer)"), error_message);
       DestroyEgl();
       return false;
     }
@@ -322,21 +320,19 @@ class NativeContext {
         !detail::CheckedMultiply(pixel_count, 4, &buffer_bytes) ||
         buffer_bytes > protocol::kMaximumStreamPayloadBytes ||
         buffer_bytes > std::numeric_limits<std::size_t>::max()) {
-      *error_message = "OSMesa backing buffer exceeds supported limits";
-      return false;
+      return detail::Fail("OSMesa backing buffer exceeds supported limits", error_message);
     }
 
     osmesa_context_ = osmesa_api_.create_context(OSMESA_RGBA, 24, 8, 0, nullptr);
     if (osmesa_context_ == nullptr) {
-      *error_message = "OSMesaCreateContextExt failed";
-      return false;
+      return detail::Fail("OSMesaCreateContextExt failed", error_message);
     }
     osmesa_buffer_.resize(static_cast<std::size_t>(buffer_bytes));
     osmesa_width_ = static_cast<GLsizei>(width);
     osmesa_height_ = static_cast<GLsizei>(height);
     if (osmesa_api_.make_current(osmesa_context_, osmesa_buffer_.data(), GL_UNSIGNED_BYTE,
                                  osmesa_width_, osmesa_height_) != GL_TRUE) {
-      *error_message = "OSMesaMakeCurrent failed";
+      detail::Fail("OSMesaMakeCurrent failed", error_message);
       DestroyOsMesa();
       return false;
     }

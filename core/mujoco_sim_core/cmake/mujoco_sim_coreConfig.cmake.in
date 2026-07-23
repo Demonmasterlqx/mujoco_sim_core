@@ -4,7 +4,6 @@ get_filename_component(_mujoco_sim_core_prefix
   "${CMAKE_CURRENT_LIST_DIR}/../../.." ABSOLUTE)
 
 include(CMakeFindDependencyMacro)
-find_dependency(mujoco_sim_protocol)
 
 if(@MUJOCO_SIM_USE_BUNDLED_MUJOCO@ AND NOT TARGET mujoco_vendor)
   add_library(mujoco_vendor SHARED IMPORTED)

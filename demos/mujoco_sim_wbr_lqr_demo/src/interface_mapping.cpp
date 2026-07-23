@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <cmath>
 #include <limits>
+#include <numeric>
 #include <string_view>
 #include <unordered_set>
 #include <utility>
@@ -14,6 +15,19 @@ struct ResourceSpec {
   std::string name;
   std::size_t dimension = 1;
 };
+
+void MarkDenseSpan(mujoco_sim::adapter_sdk::ScalarSpan span, std::string_view resource,
+                   std::vector<bool>* occupied) {
+  if (span.offset > occupied->size() || span.count > occupied->size() - span.offset) {
+    throw InterfaceError("registered scalar span is out of bounds for " + std::string(resource));
+  }
+  for (std::size_t index = span.offset; index < span.offset + span.count; ++index) {
+    if ((*occupied)[index]) {
+      throw InterfaceError("registered scalar span overlaps at " + std::string(resource));
+    }
+    (*occupied)[index] = true;
+  }
+}
 
 std::vector<ResourceSpec> ObservationSpecs(const InterfaceConfig& config) {
   std::vector<ResourceSpec> specs = {
@@ -116,16 +130,28 @@ void ValidateWbrLayout(const InterfaceConfig& config,
   if (layout.observations().size() != specs.size()) {
     throw InterfaceError("observation layout must contain exactly 21 resources");
   }
+  const std::size_t observation_scalar_count = std::accumulate(
+      specs.begin(), specs.end(), std::size_t{0},
+      [](std::size_t total, const ResourceSpec& spec) { return total + spec.dimension; });
+  if (layout.observation_scalar_count() != observation_scalar_count) {
+    throw InterfaceError("observation layout has an invalid dense scalar count");
+  }
+  std::vector<bool> occupied_observations(observation_scalar_count);
   for (const auto& spec : specs) {
     const auto& resource = FindResource(layout.observations(), spec.name);
     if (resource.scalars.count != spec.dimension) {
       throw InterfaceError("observation layout mismatch for " + spec.name);
     }
+    MarkDenseSpan(resource.scalars, spec.name, &occupied_observations);
   }
   const auto commands = CommandNames(config);
   if (layout.commands().size() != commands.size()) {
     throw InterfaceError("command layout must contain exactly 6 resources");
   }
+  if (layout.command_scalar_count() != commands.size()) {
+    throw InterfaceError("command layout has an invalid dense scalar count");
+  }
+  std::vector<bool> occupied_commands(commands.size());
   for (const auto& name : commands) {
     const auto& resource = FindResource(layout.commands(), name);
     if (resource.scalars.count != 1 || !resource.has_command_range ||
@@ -133,6 +159,7 @@ void ValidateWbrLayout(const InterfaceConfig& config,
         resource.command_min > resource.command_max) {
       throw InterfaceError("invalid command layout for " + name);
     }
+    MarkDenseSpan(resource.scalars, name, &occupied_commands);
   }
 }
 
@@ -141,7 +168,7 @@ StateDecoder::StateDecoder(const mujoco_sim::adapter_sdk::ControllerLayout& layo
 
 StateDecoder::StateDecoder(InterfaceConfig config,
                            const mujoco_sim::adapter_sdk::ControllerLayout& layout)
-    : config_(std::move(config)) {
+    : config_(std::move(config)), observation_scalar_count_(layout.observation_scalar_count()) {
   ValidateWbrLayout(config_, layout);
   quaternion_ = *layout.Observation(config_.imu.quaternion);
   acceleration_ = *layout.Observation(config_.imu.linear_acceleration);
@@ -160,6 +187,14 @@ control::msg_raw_state_t StateDecoder::Decode(
 
 control::msg_raw_state_t StateDecoder::Decode(std::span<const double> values,
                                               double simulation_time_s) const {
+  if (values.size() != observation_scalar_count_) {
+    throw InterfaceError("observation vector size mismatch: expected " +
+                         std::to_string(observation_scalar_count_) + ", got " +
+                         std::to_string(values.size()));
+  }
+  if (!std::isfinite(simulation_time_s)) {
+    throw InterfaceError("invalid simulation timestamp");
+  }
   control::msg_raw_state_t raw{};
   raw.time = simulation_time_s;
   for (std::size_t i = 0; i < quaternion_.count; ++i) {

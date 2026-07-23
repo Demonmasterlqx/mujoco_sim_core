@@ -54,14 +54,36 @@ bool IsValidLevel(const std::string& level) {
 }  // namespace
 
 ServerLogger::~ServerLogger() {
-  Flush();
+  try {
+    Flush();
+  } catch (const std::exception& error) {
+    try {
+      std::osyncstream(std::cerr) << "level=error component=server event=log_flush_error error="
+                                  << LogValue(error.what()) << '\n';
+    } catch (...) {
+    }
+  } catch (...) {
+    try {
+      std::osyncstream(std::cerr)
+          << "level=error component=server event=log_flush_error error=\"unknown exception\"\n";
+    } catch (...) {
+    }
+  }
 }
 
 bool ServerLogger::Initialize(const ServerConfig& config, std::string* error_message) {
   if (error_message == nullptr) {
     return false;
   }
-  Flush();
+  try {
+    Flush();
+  } catch (const std::exception& error) {
+    *error_message = "failed to flush previous server logger: " + std::string(error.what());
+    return false;
+  } catch (...) {
+    *error_message = "failed to flush previous server logger: unknown exception";
+    return false;
+  }
   logger_.reset();
   healthy_.reset();
   if (!IsValidLevel(config.log_level)) {
@@ -103,10 +125,14 @@ bool ServerLogger::Initialize(const ServerConfig& config, std::string* error_mes
 
     auto logger = std::make_shared<spdlog::logger>("mujoco-sim-server", sinks.begin(), sinks.end());
     auto healthy = std::make_shared<std::atomic<bool>>(true);
-    logger->set_error_handler([healthy](const std::string& message) {
+    logger->set_error_handler([healthy](const std::string& message) noexcept {
       healthy->store(false);
-      std::osyncstream(std::cerr) << "level=error component=server event=log_sink_error error="
-                                  << LogValue(message) << '\n';
+      try {
+        std::osyncstream(std::cerr)
+            << "level=error component=server event=log_sink_error error=" << LogValue(message)
+            << '\n';
+      } catch (...) {
+      }
     });
     logger->set_level(ParseLevel(config.log_level));
     logger->flush_on(spdlog::level::info);

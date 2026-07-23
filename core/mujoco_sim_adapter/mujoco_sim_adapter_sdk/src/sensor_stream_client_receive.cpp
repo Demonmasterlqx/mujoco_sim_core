@@ -9,6 +9,7 @@
 #include <ecal/ecal.h>
 #include <mujoco_sim/protocol/topics.hpp>
 
+#include "internal/callback_boundary.hpp"
 #include "internal/sensor_stream_client_impl.hpp"
 
 namespace mujoco_sim::adapter_sdk {
@@ -60,6 +61,14 @@ bool HasExpectedStreamPayload(const mujoco_sim::v4::StreamFrameHeader& header,
   *error_message = "sensor stream frame payload mismatch";
   return false;
 }
+
+struct CallbackActivity {
+  ~CallbackActivity() {
+    if (active != nullptr) active->clear(std::memory_order_release);
+  }
+
+  std::atomic_flag* active = nullptr;
+};
 
 }  // namespace
 
@@ -175,6 +184,19 @@ bool SensorStreamClient::Impl::ApplyStreamErrorsLocked(const mujoco_sim::v4::Ser
   return changed;
 }
 
+bool SensorStreamClient::Impl::AcceptStreamSequenceLocked(
+    StreamState* stream, const mujoco_sim::v4::StreamFrameHeader& header) {
+  if (header.stream_sequence() <= stream->last_sequence) {
+    return false;
+  }
+  if (stream->last_sequence > 0 && header.stream_sequence() > stream->last_sequence + 1) {
+    stream->dropped_samples += header.stream_sequence() - stream->last_sequence - 1;
+  }
+  stream->dropped_samples += header.dropped_since_previous();
+  stream->last_sequence = header.stream_sequence();
+  return true;
+}
+
 void SensorStreamClient::Impl::HandleStreamFrame(
     const std::string& stream_name, const mujoco_sim::protocol::ParsedStreamFrame& frame) {
   std::shared_ptr<StreamState> selected_stream;
@@ -186,7 +208,7 @@ void SensorStreamClient::Impl::HandleStreamFrame(
     }
     selected_stream = found->second;
   }
-  std::unique_lock delivery_lock(selected_stream->delivery_mutex);
+  CallbackActivity callback_activity;
   StreamCallback callback;
   bool queued = false;
   {
@@ -197,15 +219,15 @@ void SensorStreamClient::Impl::HandleStreamFrame(
       return;
     }
     auto& stream = *selected_stream;
-    if (frame.header.stream_sequence() <= stream.last_sequence) {
+    if (!AcceptStreamSequenceLocked(&stream, frame.header)) {
       return;
     }
-    if (stream.last_sequence > 0 && frame.header.stream_sequence() > stream.last_sequence + 1) {
-      stream.dropped_samples += frame.header.stream_sequence() - stream.last_sequence - 1;
-    }
-    stream.dropped_samples += frame.header.dropped_since_previous();
-    stream.last_sequence = frame.header.stream_sequence();
     if (stream.mode == DeliveryMode::kCallback) {
+      if (stream.callback_active.test_and_set(std::memory_order_acquire)) {
+        ++stream.dropped_samples;
+        return;
+      }
+      callback_activity.active = &stream.callback_active;
       callback = stream.callback;
     } else {
       stream.dropped_samples += stream.samples.Push(
@@ -242,20 +264,40 @@ void SensorStreamClient::Impl::RecordDiagnostic(const std::string& stream_name,
   }
 }
 
-void SensorStreamClient::Impl::StopSampleReception() {
+void SensorStreamClient::Impl::StopSampleReception() noexcept {
   const auto callback_state = callback_state_;
   CallbackGate::Disable(callback_state);
   {
     std::lock_guard lock(mutex_);
     if (stop_requested_) phase_ = Phase::kStopped;
   }
-  for (auto& [_, subscriber] : subscribers_) {
+  const auto record_teardown_warning = [this](const std::string& warning) {
+    std::lock_guard lock(mutex_);
+    for (auto& [_, stream] : streams_) {
+      if (!stream->terminal_error.empty()) continue;
+      if (stream->diagnostic.empty())
+        stream->diagnostic = warning;
+      else if (stream->diagnostic.find(warning) == std::string::npos)
+        stream->diagnostic += "; " + warning;
+    }
+  };
+  for (auto& [stream_name, subscriber] : subscribers_) {
     if (subscriber) {
-      subscriber->RemoveReceiveCallback();
+      internal::InvokeCallbackBoundary([&] { subscriber->RemoveReceiveCallback(); },
+                                       [&](const char* message) {
+                                         record_teardown_warning("failed to remove stream '" +
+                                                                 stream_name +
+                                                                 "' receive callback: " + message);
+                                       });
     }
   }
   if (status_subscriber_) {
-    status_subscriber_->RemoveReceiveCallback();
+    internal::InvokeCallbackBoundary(
+        [&] { status_subscriber_->RemoveReceiveCallback(); },
+        [&](const char* message) {
+          record_teardown_warning(std::string("failed to remove status receive callback: ") +
+                                  message);
+        });
   }
   CallbackGate::WaitForOtherCallbacks(callback_state);
   subscribers_.clear();

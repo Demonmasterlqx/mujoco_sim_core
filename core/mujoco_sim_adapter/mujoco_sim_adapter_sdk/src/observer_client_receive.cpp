@@ -24,35 +24,46 @@ bool ObserverClient::Impl::StartObservationReception(std::string* error) {
     observation_subscriber_ = std::make_unique<eCAL::CSubscriber>(
         mujoco_sim::protocol::ObservationTopicName(options_.server_name, options_.observer_id));
     observation_subscriber_->SetReceiveCallback(
-        [state, weak_self](const auto&, const auto&, const auto& data) {
-          const auto self = weak_self.lock();
-          if (!self) return;
-          CallbackLease callback(state);
-          if (callback.client() != nullptr) {
-            internal::InvokeCallbackBoundary(
-                [&] { self->HandleObservationBytes(data.buffer, data.buffer_size); },
-                [&](const char* message) {
+        [state, weak_self](const auto&, const auto&, const auto& data) noexcept {
+          internal::InvokeCallbackBoundary(
+              [&] {
+                const auto self = weak_self.lock();
+                if (!self) return;
+                CallbackLease callback(state);
+                if (callback.client() != nullptr) {
+                  self->HandleObservationBytes(data.buffer, data.buffer_size);
+                }
+              },
+              [&](const char* message) {
+                if (const auto self = weak_self.lock()) {
                   self->SetTerminalError(std::string("observation callback failed: ") + message);
-                });
-          }
+                }
+              });
         });
     status_subscriber_ = std::make_unique<eCAL::CSubscriber>(
         mujoco_sim::protocol::StatusTopicName(options_.server_name));
     status_subscriber_->SetReceiveCallback(
-        [state, weak_self](const auto&, const auto&, const auto& data) {
-          const auto self = weak_self.lock();
-          if (!self) return;
-          CallbackLease callback(state);
-          if (callback.client() != nullptr) {
-            internal::InvokeCallbackBoundary(
-                [&] { self->HandleStatusBytes(data.buffer, data.buffer_size); },
-                [&](const char* message) {
+        [state, weak_self](const auto&, const auto&, const auto& data) noexcept {
+          internal::InvokeCallbackBoundary(
+              [&] {
+                const auto self = weak_self.lock();
+                if (!self) return;
+                CallbackLease callback(state);
+                if (callback.client() != nullptr) {
+                  self->HandleStatusBytes(data.buffer, data.buffer_size);
+                }
+              },
+              [&](const char* message) {
+                if (const auto self = weak_self.lock()) {
                   self->SetTerminalError(std::string("status callback failed: ") + message);
-                });
-          }
+                }
+              });
         });
   } catch (const std::exception& exception) {
     *error = std::string("failed to create observer endpoints: ") + exception.what();
+    return false;
+  } catch (...) {
+    *error = "failed to create observer endpoints: unknown exception";
     return false;
   }
   return true;
@@ -137,6 +148,14 @@ void ObserverClient::Impl::SetTerminalError(const std::string& error) {
   heartbeat_condition_.notify_all();
 }
 
+void ObserverClient::Impl::RecordLifecycleWarning(const std::string& warning) {
+  std::lock_guard lock(mutex_);
+  if (lifecycle_warning_.empty())
+    lifecycle_warning_ = warning;
+  else if (lifecycle_warning_.find(warning) == std::string::npos)
+    lifecycle_warning_ += "; " + warning;
+}
+
 std::uint64_t ObserverClient::Impl::dropped_frames() const {
   std::lock_guard lock(mutex_);
   return dropped_frames_;
@@ -146,24 +165,47 @@ std::string ObserverClient::Impl::lifecycle_warning() const {
   return lifecycle_warning_;
 }
 
-void ObserverClient::Impl::StopObservationReception() {
+void ObserverClient::Impl::StopObservationReception() noexcept {
   CallbackGate::Disable(callback_state_);
-  if (observation_subscriber_) observation_subscriber_->RemoveReceiveCallback();
-  if (status_subscriber_) status_subscriber_->RemoveReceiveCallback();
+  const auto remove_callback = [this](auto& subscriber, const char* endpoint) {
+    if (!subscriber) return;
+    internal::InvokeCallbackBoundary([&] { subscriber->RemoveReceiveCallback(); },
+                                     [this, endpoint](const char* message) {
+                                       RecordLifecycleWarning(std::string("failed to remove ") +
+                                                              endpoint +
+                                                              " receive callback: " + message);
+                                     });
+  };
+  remove_callback(observation_subscriber_, "observation");
+  remove_callback(status_subscriber_, "status");
   CallbackGate::WaitForOtherCallbacks(callback_state_);
   observation_subscriber_.reset();
   status_subscriber_.reset();
 }
 
-void ObserverClient::Impl::StartHeartbeatThread() {
+bool ObserverClient::Impl::StartHeartbeatThread() {
   std::lock_guard lock(heartbeat_thread_mutex_);
-  if (!stop_requested_ && !heartbeat_thread_.joinable())
-    heartbeat_thread_ = std::thread([this] { HeartbeatLoop(); });
+  if (stop_requested_) return false;
+  if (!heartbeat_thread_.joinable())
+    heartbeat_thread_ = std::thread([this] { RunHeartbeatLoop(); });
+  return true;
 }
 
 void ObserverClient::Impl::JoinHeartbeatThread() {
-  std::lock_guard lock(heartbeat_thread_mutex_);
-  if (heartbeat_thread_.joinable()) heartbeat_thread_.join();
+  std::thread heartbeat;
+  {
+    std::lock_guard lock(heartbeat_thread_mutex_);
+    if (heartbeat_thread_.joinable()) heartbeat = std::move(heartbeat_thread_);
+  }
+  if (heartbeat.joinable()) heartbeat.join();
+}
+
+void ObserverClient::Impl::RunHeartbeatLoop() noexcept {
+  internal::InvokeCallbackBoundary(
+      [this] { HeartbeatLoop(); },
+      [this](const char* message) {
+        SetTerminalError(std::string("observer heartbeat thread failed: ") + message);
+      });
 }
 
 void ObserverClient::Impl::HeartbeatLoop() {
@@ -176,7 +218,14 @@ void ObserverClient::Impl::HeartbeatLoop() {
     if (!session_.active()) continue;
     const auto heartbeat = BuildHeartbeat();
     lock.unlock();
-    transport_->PublishHeartbeat(heartbeat);
+    const auto result = transport_->PublishHeartbeat(heartbeat);
+    if (!result.error.empty()) {
+      SetTerminalError("observer heartbeat publish failed: " + result.error);
+      return;
+    }
+    if (!result.sent) {
+      RecordLifecycleWarning("observer heartbeat publish failed; retrying");
+    }
     lock.lock();
   }
 }

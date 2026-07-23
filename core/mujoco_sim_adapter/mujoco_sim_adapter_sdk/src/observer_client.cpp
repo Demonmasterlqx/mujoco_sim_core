@@ -99,7 +99,7 @@ bool ObserverClient::Impl::ValidateOptions(std::string* error) const {
 
 bool ObserverClient::Impl::Start(std::string* error) {
   if (error == nullptr) return false;
-  std::lock_guard lifecycle_lock(lifecycle_mutex_);
+  auto lifecycle_operation = lifecycle_.Acquire();
   error->clear();
   {
     std::lock_guard lock(mutex_);
@@ -116,9 +116,17 @@ bool ObserverClient::Impl::Start(std::string* error) {
   ecal_runtime_ =
       internal::AcquireEcalRuntime("mujoco-sim-observer-" + options_.observer_id, error);
   if (!ecal_runtime_) return false;
-  if (!transport_) {
-    transport_ = internal::MakeEcalAdapterTransport(
-        options_.server_name, options_.service_timeout_ms, &stop_requested_, false);
+  try {
+    if (!transport_) {
+      transport_ = internal::MakeEcalAdapterTransport(
+          options_.server_name, options_.service_timeout_ms, &stop_requested_, false);
+    }
+  } catch (const std::exception& exception) {
+    *error = std::string("failed to create Observer transport: ") + exception.what();
+    return false;
+  } catch (...) {
+    *error = "failed to create Observer transport: unknown exception";
+    return false;
   }
   if (!Register(error) || !StartObservationReception(error) || !FinishStart(error) ||
       !StartHeartbeat(error)) {
@@ -197,7 +205,7 @@ bool ObserverClient::Impl::FinishStart(std::string* error) {
 }
 
 bool ObserverClient::Impl::Activate(std::string* error) {
-  std::lock_guard lifecycle_lock(lifecycle_mutex_);
+  auto lifecycle_operation = lifecycle_.Acquire();
   if (error == nullptr) return false;
   error->clear();
   {
@@ -215,13 +223,19 @@ bool ObserverClient::Impl::Activate(std::string* error) {
     *error = "observer activation was cancelled";
     return false;
   }
-  mujoco_sim::v4::ActivateAdapterRequest request;
-  request.set_session_id(session_.identity().session_id);
-  request.set_epoch(session_.identity().epoch);
+  internal::SessionIdentity identity;
   {
     std::lock_guard lock(mutex_);
+    if (stop_requested_ || !session_.has_session()) {
+      *error = "observer activation was cancelled";
+      return false;
+    }
+    identity = session_.identity();
     session_.BeginActivation();
   }
+  mujoco_sim::v4::ActivateAdapterRequest request;
+  request.set_session_id(identity.session_id);
+  request.set_epoch(identity.epoch);
   mujoco_sim::v4::ActivateAdapterResponse response;
   const bool called = transport_->Activate(request, &response, error);
   if (!called || response.code() != mujoco_sim::v4::OK) {
@@ -230,13 +244,20 @@ bool ObserverClient::Impl::Activate(std::string* error) {
     session_.ActivationRejected();
     return false;
   }
+  bool cancelled = false;
   {
     std::lock_guard lock(mutex_);
     if (stop_requested_) {
       *error = "observer activation was cancelled";
-      return false;
+      cancelled = true;
+    } else if (!session_.Activated()) {
+      *error = "observer activation could not be committed locally";
+      cancelled = true;
     }
-    session_.Activated();
+  }
+  if (cancelled) {
+    AbortActivation(error);
+    return false;
   }
   condition_.notify_all();
   heartbeat_condition_.notify_all();
@@ -288,7 +309,7 @@ void ObserverClient::Impl::Stop() {
 }
 
 bool ObserverClient::Impl::Unregister(std::string* error) {
-  std::lock_guard lifecycle_lock(lifecycle_mutex_);
+  auto lifecycle_operation = lifecycle_.Acquire();
   return UnregisterSession(error);
 }
 
@@ -335,9 +356,19 @@ void ObserverClient::Impl::TransitionToStopped() {
 
 bool ObserverClient::Impl::StartHeartbeat(std::string* error) {
   try {
-    StartHeartbeatThread();
+    if (!StartHeartbeatThread()) {
+      *error = "observer start was cancelled before heartbeat startup";
+      return false;
+    }
   } catch (const std::exception& exception) {
     *error = std::string("failed to start observer heartbeat: ") + exception.what();
+    return false;
+  } catch (...) {
+    *error = "failed to start observer heartbeat: unknown exception";
+    return false;
+  }
+  if (stop_requested_) {
+    *error = "observer start was cancelled during heartbeat startup";
     return false;
   }
   return true;
@@ -349,6 +380,18 @@ void ObserverClient::Impl::AbortStart() {
   StopObservationReception();
   std::string ignored;
   UnregisterSession(&ignored);
+}
+
+void ObserverClient::Impl::AbortActivation(std::string* error) {
+  const std::string cause = *error;
+  Stop();
+  JoinHeartbeatThread();
+  StopObservationReception();
+  std::string cleanup_error;
+  if (!UnregisterSession(&cleanup_error)) {
+    *error = cause + "; compensating unregister failed: " + cleanup_error;
+    RecordLifecycleWarning(*error);
+  }
 }
 
 ObserverClient::ObserverClient(ObserverOptions options)

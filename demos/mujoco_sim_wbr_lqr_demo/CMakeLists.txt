@@ -171,16 +171,10 @@ if(BUILD_TESTING)
   if("MUJOCO_SIM_HAS_GUI=1" IN_LIST MUJOCO_SIM_SERVER_DEFINITIONS OR
      "MUJOCO_SIM_HAS_GUI=$<BOOL:ON>" IN_LIST MUJOCO_SIM_SERVER_DEFINITIONS)
     find_package(PNG REQUIRED)
-    set(MUJOCO_SIM_WBR_GUI_TEST_PREFIX)
-    if(NOT DEFINED ENV{DISPLAY} OR "$ENV{DISPLAY}" STREQUAL "")
-      find_program(XVFB_RUN_EXECUTABLE NAMES xvfb-run REQUIRED)
-      set(MUJOCO_SIM_WBR_GUI_TEST_PREFIX "${XVFB_RUN_EXECUTABLE}" -a)
-    endif()
+    find_program(XVFB_RUN_EXECUTABLE NAMES xvfb-run REQUIRED)
+    set(MUJOCO_SIM_WBR_GUI_TEST_PREFIX "${XVFB_RUN_EXECUTABLE}" -a)
 
     add_executable(wbr_gui_render_test test/gui_render_test.cpp)
-    target_include_directories(wbr_gui_render_test PRIVATE
-      "${CMAKE_CURRENT_SOURCE_DIR}/../../core/mujoco_sim_server/src"
-    )
     target_link_libraries(wbr_gui_render_test PRIVATE
       mujoco_sim::server
       GTest::gtest_main

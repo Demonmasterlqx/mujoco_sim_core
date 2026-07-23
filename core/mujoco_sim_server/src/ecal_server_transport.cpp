@@ -49,6 +49,17 @@ void LogCallbackFailure(const std::shared_ptr<spdlog::logger>& logger, std::stri
   }
 }
 
+void LogTransportFailure(const std::shared_ptr<spdlog::logger>& logger, std::string_view operation,
+                         std::string_view endpoint, std::string_view error) noexcept {
+  try {
+    if (logger) {
+      logger->warn("event=ecal_transport_failure operation={} endpoint={} error={}",
+                   LogValue(operation), LogValue(endpoint), LogValue(error));
+    }
+  } catch (...) {
+  }
+}
+
 template <typename Response>
 Response ErrorResponse(mujoco_sim::v4::ErrorCode code, std::string message) {
   Response response;
@@ -129,12 +140,19 @@ void BindSubscriber(std::unique_ptr<eCAL::CSubscriber>* subscriber, const std::s
 }
 
 template <typename Message>
-EcalServerTransport::PublishResult PublishProto(const Message& message,
-                                                eCAL::CPublisher* publisher) {
+EcalServerTransport::PublishResult PublishProto(const Message& message, eCAL::CPublisher* publisher,
+                                                std::string topic) {
   EcalServerTransport::PublishResult result;
-  if (publisher == nullptr) return result;
+  result.topic = std::move(topic);
+  if (publisher == nullptr) {
+    result.transport_error = "publisher is unavailable";
+    return result;
+  }
   std::string bytes;
-  if (!message.SerializeToString(&bytes)) {
+  bool serialized = false;
+  if (!RunWithExceptionBoundary([&] { serialized = message.SerializeToString(&bytes); },
+                                &result.transport_error) ||
+      !serialized) {
     result.serialization_failed = true;
     return result;
   }
@@ -142,16 +160,6 @@ EcalServerTransport::PublishResult PublishProto(const Message& message,
   result.bytes = bytes.size();
   RunWithExceptionBoundary([&] { result.sent = publisher->Send(bytes); }, &result.transport_error);
   return result;
-}
-
-std::uint64_t ReadFingerprintWord(std::string_view bytes, std::size_t offset) {
-  std::uint64_t value = 0;
-  if (bytes.size() < offset + 8) return value;
-  for (std::size_t index = 0; index < 8; ++index) {
-    value |= static_cast<std::uint64_t>(static_cast<unsigned char>(bytes[offset + index]))
-             << (index * 8U);
-  }
-  return value;
 }
 
 void BindCommandSubscriber(std::unique_ptr<eCAL::CSubscriber>* subscriber, const std::string& topic,
@@ -215,95 +223,124 @@ EcalServerTransport::EcalServerTransport(std::string server_name,
       logger_(std::move(logger)),
       callback_state_(std::make_shared<CallbackState>()) {}
 
-EcalServerTransport::~EcalServerTransport() {
-  StopInputs();
-  Reset();
+EcalServerTransport::~EcalServerTransport() noexcept {
+  std::string error;
+  if (!RunWithExceptionBoundary([this] { StopInputs(); }, &error)) {
+    LogTransportFailure(logger_, "transport_destructor_stop_inputs", server_name_, error);
+  }
+  if (!RunWithExceptionBoundary([this] { Reset(); }, &error)) {
+    LogTransportFailure(logger_, "transport_destructor_reset", server_name_, error);
+  }
 }
 
 bool EcalServerTransport::Start(Handlers handlers, std::string* error_message) {
   if (error_message == nullptr) return false;
-  registry_service_ = std::make_unique<eCAL::CServiceServer>(
-      mujoco_sim::protocol::RegistryServiceName(server_name_));
+  try {
+    registry_service_ = std::make_unique<eCAL::CServiceServer>(
+        mujoco_sim::protocol::RegistryServiceName(server_name_));
 
-  const auto bind = [this, &handlers, error_message]<typename Request, typename Response>(
-                        const char* method, std::function<Response(Request)> handler) {
-    if (BindRpc<Request, Response>(registry_service_.get(), method, callback_state_, logger_,
-                                   handlers, std::move(handler))) {
-      methods_.push_back(method);
-      return true;
+    const auto bind = [this, &handlers, error_message]<typename Request, typename Response>(
+                          const char* method, std::function<Response(Request)> handler) {
+      if (BindRpc<Request, Response>(registry_service_.get(), method, callback_state_, logger_,
+                                     handlers, std::move(handler))) {
+        methods_.push_back(method);
+        return true;
+      }
+      *error_message = "failed to register method: " + std::string(method);
+      return false;
+    };
+
+    if (!bind(mujoco_sim::protocol::kGetAvailableResourcesMethod,
+              handlers.get_available_resources) ||
+        !bind(mujoco_sim::protocol::kRegisterAdapterMethod, handlers.register_adapter) ||
+        !bind(mujoco_sim::protocol::kActivateAdapterMethod, handlers.activate_adapter) ||
+        !bind(mujoco_sim::protocol::kUnregisterAdapterMethod, handlers.unregister_adapter) ||
+        !bind(mujoco_sim::protocol::kGetSensorStreamsMethod, handlers.get_sensor_streams)) {
+      StopInputs();
+      return false;
     }
-    *error_message = "failed to register method: " + std::string(method);
-    return false;
-  };
 
-  if (!bind(mujoco_sim::protocol::kGetAvailableResourcesMethod, handlers.get_available_resources) ||
-      !bind(mujoco_sim::protocol::kRegisterAdapterMethod, handlers.register_adapter) ||
-      !bind(mujoco_sim::protocol::kActivateAdapterMethod, handlers.activate_adapter) ||
-      !bind(mujoco_sim::protocol::kUnregisterAdapterMethod, handlers.unregister_adapter) ||
-      !bind(mujoco_sim::protocol::kGetSensorStreamsMethod, handlers.get_sensor_streams)) {
-    StopInputs();
-    return false;
+    BindCommandSubscriber(&command_subscriber_,
+                          mujoco_sim::protocol::ControllerCommandTopicName(server_name_),
+                          callback_state_, logger_, handlers);
+    BindSubscriber<mujoco_sim::v4::SessionHeartbeat>(
+        &heartbeat_subscriber_, mujoco_sim::protocol::SessionHeartbeatTopicName(server_name_),
+        "SessionHeartbeat", callback_state_, logger_, handlers,
+        [handler = handlers.heartbeat](mujoco_sim::v4::SessionHeartbeat wire) {
+          handler({{wire.session_id(), wire.epoch()}, wire.last_seen()});
+        });
+    BindSubscriber<mujoco_sim::v4::ControllerFault>(
+        &fault_subscriber_, mujoco_sim::protocol::ControllerFaultTopicName(server_name_),
+        "ControllerFault", callback_state_, logger_, handlers,
+        [handler = handlers.fault](mujoco_sim::v4::ControllerFault wire) {
+          mujoco_sim::core::ControllerFault fault;
+          fault.session = {wire.session_id(), wire.epoch()};
+          switch (wire.code()) {
+            case mujoco_sim::v4::CONTROLLER_ERROR:
+              fault.code = mujoco_sim::core::FaultCode::kControllerError;
+              break;
+            case mujoco_sim::v4::INVALID_OUTPUT:
+              fault.code = mujoco_sim::core::FaultCode::kInvalidOutput;
+              break;
+            case mujoco_sim::v4::INTERNAL_CONTROLLER_ERROR:
+              fault.code = mujoco_sim::core::FaultCode::kInternalControllerError;
+              break;
+            default:
+              fault.code = mujoco_sim::core::FaultCode::kUnspecified;
+              break;
+          }
+          fault.message = wire.message();
+          handler(std::move(fault));
+        });
+    status_publisher_ =
+        std::make_unique<eCAL::CPublisher>(mujoco_sim::protocol::StatusTopicName(server_name_));
+    return true;
+  } catch (const std::exception& error) {
+    *error_message = "failed to start eCAL server transport: " + std::string(error.what());
+  } catch (...) {
+    *error_message = "failed to start eCAL server transport: unknown exception";
   }
-
-  BindCommandSubscriber(&command_subscriber_,
-                        mujoco_sim::protocol::ControllerCommandTopicName(server_name_),
-                        callback_state_, logger_, handlers);
-  BindSubscriber<mujoco_sim::v4::SessionHeartbeat>(
-      &heartbeat_subscriber_, mujoco_sim::protocol::SessionHeartbeatTopicName(server_name_),
-      "SessionHeartbeat", callback_state_, logger_, handlers,
-      [handler = handlers.heartbeat](mujoco_sim::v4::SessionHeartbeat wire) {
-        handler({{wire.session_id(), wire.epoch()}, wire.last_seen()});
-      });
-  BindSubscriber<mujoco_sim::v4::ControllerFault>(
-      &fault_subscriber_, mujoco_sim::protocol::ControllerFaultTopicName(server_name_),
-      "ControllerFault", callback_state_, logger_, handlers,
-      [handler = handlers.fault](mujoco_sim::v4::ControllerFault wire) {
-        mujoco_sim::core::ControllerFault fault;
-        fault.session = {wire.session_id(), wire.epoch()};
-        switch (wire.code()) {
-          case mujoco_sim::v4::CONTROLLER_ERROR:
-            fault.code = mujoco_sim::core::FaultCode::kControllerError;
-            break;
-          case mujoco_sim::v4::INVALID_OUTPUT:
-            fault.code = mujoco_sim::core::FaultCode::kInvalidOutput;
-            break;
-          case mujoco_sim::v4::INTERNAL_CONTROLLER_ERROR:
-            fault.code = mujoco_sim::core::FaultCode::kInternalControllerError;
-            break;
-          default:
-            fault.code = mujoco_sim::core::FaultCode::kUnspecified;
-            break;
-        }
-        fault.message = wire.message();
-        handler(std::move(fault));
-      });
-  status_publisher_ =
-      std::make_unique<eCAL::CPublisher>(mujoco_sim::protocol::StatusTopicName(server_name_));
-  return true;
+  StopInputs();
+  Reset();
+  return false;
 }
 
 void EcalServerTransport::StopInputs() {
   if (!callback_state_) return;
   callback_state_->StopAccepting();
+  const auto remove_receive_callback = [this](auto* subscriber, std::string_view operation) {
+    if (!*subscriber) return;
+    std::string error;
+    if (!RunWithExceptionBoundary([&] { (*subscriber)->RemoveReceiveCallback(); }, &error)) {
+      LogTransportFailure(logger_, operation, server_name_, error);
+    }
+  };
   if (command_subscriber_) {
-    command_subscriber_->RemoveReceiveCallback();
-    command_subscriber_.reset();
+    remove_receive_callback(&command_subscriber_, "remove_command_callback");
   }
   if (heartbeat_subscriber_) {
-    heartbeat_subscriber_->RemoveReceiveCallback();
-    heartbeat_subscriber_.reset();
+    remove_receive_callback(&heartbeat_subscriber_, "remove_heartbeat_callback");
   }
   if (fault_subscriber_) {
-    fault_subscriber_->RemoveReceiveCallback();
-    fault_subscriber_.reset();
+    remove_receive_callback(&fault_subscriber_, "remove_fault_callback");
   }
   if (registry_service_) {
     for (const auto& method : methods_) {
-      registry_service_->RemoveMethodCallback(method);
+      bool removed = false;
+      std::string error;
+      const bool completed = RunWithExceptionBoundary(
+          [&] { removed = registry_service_->RemoveMethodCallback(method); }, &error);
+      if (!completed || !removed) {
+        LogTransportFailure(logger_, "remove_rpc_callback", method,
+                            completed ? "eCAL returned failure" : error);
+      }
     }
   }
   methods_.clear();
   callback_state_->WaitForIdle();
+  command_subscriber_.reset();
+  heartbeat_subscriber_.reset();
+  fault_subscriber_.reset();
 }
 
 void EcalServerTransport::Reset() {
@@ -312,19 +349,20 @@ void EcalServerTransport::Reset() {
   state_subscriber_counts_.clear();
   status_publisher_.reset();
   registry_service_.reset();
+  reported_transport_failures_.clear();
 }
 
 EcalServerTransport::PublishResult EcalServerTransport::PublishControllerState(
     std::string_view adapter_id, std::string_view encoded_frame) {
   PublishResult result;
+  result.topic =
+      mujoco_sim::protocol::ControllerStateTopicName(server_name_, std::string(adapter_id));
   result.attempted = true;
   result.bytes = encoded_frame.size();
   RunWithExceptionBoundary(
       [&] {
         auto& publisher = state_publishers_[std::string(adapter_id)];
         if (!publisher) {
-          result.topic =
-              mujoco_sim::protocol::ControllerStateTopicName(server_name_, std::string(adapter_id));
           publisher = std::make_unique<eCAL::CPublisher>(result.topic);
           result.publisher_created = true;
         }
@@ -336,25 +374,27 @@ EcalServerTransport::PublishResult EcalServerTransport::PublishControllerState(
 
 EcalServerTransport::PublishResult EcalServerTransport::PublishObservation(
     std::string_view adapter_id, std::string_view encoded_frame) {
-  auto& publisher = observation_publishers_[std::string(adapter_id)];
   PublishResult result;
-  if (!publisher) {
-    result.topic =
-        mujoco_sim::protocol::ObservationTopicName(server_name_, std::string(adapter_id));
-    publisher = std::make_unique<eCAL::CPublisher>(result.topic);
-    result.publisher_created = true;
-  }
+  result.topic = mujoco_sim::protocol::ObservationTopicName(server_name_, std::string(adapter_id));
   result.attempted = true;
   result.bytes = encoded_frame.size();
   RunWithExceptionBoundary(
-      [&] { result.sent = publisher->Send(encoded_frame.data(), encoded_frame.size()); },
+      [&] {
+        auto& publisher = observation_publishers_[std::string(adapter_id)];
+        if (!publisher) {
+          publisher = std::make_unique<eCAL::CPublisher>(result.topic);
+          result.publisher_created = true;
+        }
+        result.sent = publisher->Send(encoded_frame.data(), encoded_frame.size());
+      },
       &result.transport_error);
   return result;
 }
 
 EcalServerTransport::PublishResult EcalServerTransport::PublishStatus(
     const mujoco_sim::v4::ServerStatus& status) {
-  return PublishProto(status, status_publisher_.get());
+  return PublishProto(status, status_publisher_.get(),
+                      mujoco_sim::protocol::StatusTopicName(server_name_));
 }
 
 bool EcalServerTransport::PrepareAdapterPublisher(std::string_view adapter_id,
@@ -380,14 +420,25 @@ bool EcalServerTransport::PrepareAdapterPublisher(std::string_view adapter_id,
         } else if (role == mujoco_sim::v4::CONTROLLER) {
           auto& publisher = state_publishers_[id];
           if (!publisher) {
-            publisher = std::make_unique<eCAL::CPublisher>(
-                mujoco_sim::protocol::ControllerStateTopicName(server_name_, id));
+            const std::string topic =
+                mujoco_sim::protocol::ControllerStateTopicName(server_name_, id);
+            publisher = std::make_unique<eCAL::CPublisher>(topic);
+            *created = true;
             // eCAL 6 does not advertise a raw publisher's transport until its
             // first Send(). Prime it before the registration response, while
             // the adapter cannot yet have created its State subscriber.
             constexpr char kTransportPrime = 0;
-            static_cast<void>(publisher->Send(&kTransportPrime, 1));
-            *created = true;
+            std::string prime_error;
+            const bool completed = RunWithExceptionBoundary(
+                [&] { (void)publisher->Send(&kTransportPrime, 1); }, &prime_error);
+            const std::string failure_key = "prime:" + topic;
+            if (!completed) {
+              if (reported_transport_failures_.insert(failure_key).second) {
+                LogTransportFailure(logger_, "prime_publisher", topic, prime_error);
+              }
+            } else {
+              reported_transport_failures_.erase(failure_key);
+            }
           }
         }
       },
@@ -405,31 +456,67 @@ void EcalServerTransport::RemoveAdapterPublisher(std::string_view adapter_id,
   if (role == mujoco_sim::v4::CONTROLLER) {
     state_publishers_.erase(id);
     state_subscriber_counts_.erase(id);
+    const std::string topic = mujoco_sim::protocol::ControllerStateTopicName(server_name_, id);
+    reported_transport_failures_.erase("sample:" + topic);
+    reported_transport_failures_.erase("prime:" + topic);
   } else if (role == mujoco_sim::v4::OBSERVER) {
     observation_publishers_.erase(id);
+    const std::string topic = mujoco_sim::protocol::ObservationTopicName(server_name_, id);
+    reported_transport_failures_.erase("sample:" + topic);
   }
 }
 
 std::size_t EcalServerTransport::SampleSubscriberCounts() {
   std::size_t queries = 0;
+  const auto sample_count = [this](eCAL::CPublisher* publisher, const std::string& topic) {
+    std::size_t subscribers = 0;
+    std::string error;
+    const bool completed =
+        RunWithExceptionBoundary([&] { subscribers = publisher->GetSubscriberCount(); }, &error);
+    const std::string failure_key = "sample:" + topic;
+    if (!completed) {
+      if (reported_transport_failures_.insert(failure_key).second) {
+        LogTransportFailure(logger_, "sample_subscribers", topic, error);
+      }
+    } else {
+      reported_transport_failures_.erase(failure_key);
+    }
+    return subscribers;
+  };
+  const auto prime = [this](eCAL::CPublisher* publisher, const std::string& topic) {
+    constexpr char kTransportPrime = 0;
+    std::string error;
+    const bool completed =
+        RunWithExceptionBoundary([&] { (void)publisher->Send(&kTransportPrime, 1); }, &error);
+    const std::string failure_key = "prime:" + topic;
+    if (!completed) {
+      if (reported_transport_failures_.insert(failure_key).second) {
+        LogTransportFailure(logger_, "prime_publisher", topic, error);
+      }
+    } else {
+      reported_transport_failures_.erase(failure_key);
+    }
+  };
   for (const auto& [adapter_id, publisher] : state_publishers_) {
-    const auto subscribers = publisher->GetSubscriberCount();
+    const std::string topic =
+        mujoco_sim::protocol::ControllerStateTopicName(server_name_, adapter_id);
+    const auto subscribers = sample_count(publisher.get(), topic);
     state_subscriber_counts_[adapter_id] = subscribers;
     if (subscribers == 0) {
       // Raw eCAL publishers may remain undiscoverable until Send() occurs
       // while the subscriber exists. Keep bootstrap traffic on this sampled
       // lifecycle path, never on the State publish path.
-      constexpr char kTransportPrime = 0;
-      static_cast<void>(publisher->Send(&kTransportPrime, 1));
+      prime(publisher.get(), topic);
     }
     ++queries;
   }
-  for (const auto& [_, publisher] : observation_publishers_) {
-    static_cast<void>(publisher->GetSubscriberCount());
+  for (const auto& [adapter_id, publisher] : observation_publishers_) {
+    sample_count(publisher.get(),
+                 mujoco_sim::protocol::ObservationTopicName(server_name_, adapter_id));
     ++queries;
   }
   if (status_publisher_) {
-    static_cast<void>(status_publisher_->GetSubscriberCount());
+    sample_count(status_publisher_.get(), mujoco_sim::protocol::StatusTopicName(server_name_));
     ++queries;
   }
   return queries;

@@ -38,7 +38,7 @@ TEST(ServerStopConcurrencyTest, PublishesOneCompleteStopResult) {
     EXPECT_EQ(application.Run(), 0);
   }
 
-  eCAL::Finalize();
+  EXPECT_TRUE(eCAL::Finalize());
 }
 
 }  // namespace

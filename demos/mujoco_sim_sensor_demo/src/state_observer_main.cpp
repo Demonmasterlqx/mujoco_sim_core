@@ -23,13 +23,19 @@ int main(int argc, char** argv) {
     std::cerr << message << '\n';
     return 1;
   }
-  demo::InstallProcessSignalHandlers();
+  if (!demo::InstallProcessSignalHandlers(&message)) {
+    std::cerr << message << '\n';
+    return 1;
+  }
   const auto& config = app_config.state_observer;
   mujoco_sim::adapter_sdk::ObserverClient client(config.observer);
   if (!client.Start(&message) || !client.Activate(&message)) {
     std::cerr << "state observer start failed: " << message << '\n';
-    std::string ignored;
-    client.Unregister(&ignored);
+    std::string unregister_error;
+    if (!client.Unregister(&unregister_error)) {
+      std::cerr << "state observer cleanup after start failure failed: " << unregister_error
+                << '\n';
+    }
     return 1;
   }
   const demo::StateDecoder decoder(client.layout(), config.interfaces);
@@ -67,7 +73,7 @@ int main(int argc, char** argv) {
   std::string unregister_error;
   if (!client.Unregister(&unregister_error)) {
     std::cerr << "state observer unregister failed: " << unregister_error << '\n';
-    if (result == 0 && !demo::ProcessStopRequested()) result = 1;
+    result = 1;
   }
   std::cout << "sensor-demo state observer summary frames=" << frames
             << " dropped=" << client.dropped_frames() << '\n';

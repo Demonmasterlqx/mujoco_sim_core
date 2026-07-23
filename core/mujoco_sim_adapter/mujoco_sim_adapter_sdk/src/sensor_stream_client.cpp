@@ -87,7 +87,7 @@ bool SensorStreamClient::Impl::Start(std::string* error_message) {
   if (error_message == nullptr) {
     return false;
   }
-  std::lock_guard lifecycle_lock(lifecycle_mutex_);
+  auto lifecycle_operation = lifecycle_.Acquire();
   error_message->clear();
   {
     std::lock_guard lock(mutex_);
@@ -108,9 +108,17 @@ bool SensorStreamClient::Impl::Start(std::string* error_message) {
   if (!ecal_runtime_) {
     return false;
   }
-  if (!transport_) {
-    transport_ = internal::MakeEcalSensorStreamTransport(
-        options_.server_name, options_.service_timeout_ms, &stop_requested_);
+  try {
+    if (!transport_) {
+      transport_ = internal::MakeEcalSensorStreamTransport(
+          options_.server_name, options_.service_timeout_ms, &stop_requested_);
+    }
+  } catch (const std::exception& error) {
+    *error_message = std::string("failed to create Sensor Stream transport: ") + error.what();
+    return false;
+  } catch (...) {
+    *error_message = "failed to create Sensor Stream transport: unknown exception";
+    return false;
   }
   if (!DiscoverStreams(error_message) || !ConfigureDiscoveredStreams(error_message)) {
     transport_.reset();
@@ -144,18 +152,22 @@ bool SensorStreamClient::Impl::StartSampleReception(std::string* error_message) 
           mujoco_sim::protocol::SensorStreamTopicName(options_.server_name, stream_name));
       subscriber->SetReceiveCallback([callback_state, weak_self, stream_name](
                                          const eCAL::STopicId&, const eCAL::SDataTypeInformation&,
-                                         const eCAL::SReceiveCallbackData& data) {
-        const auto self = weak_self.lock();
-        if (!self) return;
-        CallbackLease callback(callback_state);
-        if (callback.client() != nullptr) {
-          internal::InvokeCallbackBoundary(
-              [&] { self->HandleStreamBytes(stream_name, data.buffer, data.buffer_size); },
-              [&](const char* error) {
+                                         const eCAL::SReceiveCallbackData& data) noexcept {
+        internal::InvokeCallbackBoundary(
+            [&] {
+              const auto self = weak_self.lock();
+              if (!self) return;
+              CallbackLease callback(callback_state);
+              if (callback.client() != nullptr) {
+                self->HandleStreamBytes(stream_name, data.buffer, data.buffer_size);
+              }
+            },
+            [&](const char* error) {
+              if (const auto self = weak_self.lock()) {
                 self->RecordDiagnostic(stream_name,
                                        std::string("stream callback failed: ") + error);
-              });
-        }
+              }
+            });
       });
       subscribers_.emplace(stream_name, std::move(subscriber));
     }
@@ -163,19 +175,27 @@ bool SensorStreamClient::Impl::StartSampleReception(std::string* error_message) 
         mujoco_sim::protocol::StatusTopicName(options_.server_name));
     status_subscriber_->SetReceiveCallback(
         [callback_state, weak_self](const eCAL::STopicId&, const eCAL::SDataTypeInformation&,
-                                    const eCAL::SReceiveCallbackData& data) {
-          const auto self = weak_self.lock();
-          if (!self) return;
-          CallbackLease callback(callback_state);
-          if (callback.client() != nullptr) {
-            internal::InvokeCallbackBoundary(
-                [&] { self->HandleStatusBytes(data.buffer, data.buffer_size); },
-                [&](const char*) { self->Stop(); });
-          }
+                                    const eCAL::SReceiveCallbackData& data) noexcept {
+          internal::InvokeCallbackBoundary(
+              [&] {
+                const auto self = weak_self.lock();
+                if (!self) return;
+                CallbackLease callback(callback_state);
+                if (callback.client() != nullptr) {
+                  self->HandleStatusBytes(data.buffer, data.buffer_size);
+                }
+              },
+              [&](const char*) {
+                if (const auto self = weak_self.lock()) self->Stop();
+              });
         });
   } catch (const std::exception& error) {
     StopSampleReception();
     *error_message = std::string("failed to create stream endpoints: ") + error.what();
+    return false;
+  } catch (...) {
+    StopSampleReception();
+    *error_message = "failed to create stream endpoints: unknown exception";
     return false;
   }
   return true;

@@ -25,19 +25,20 @@ GLFW 和 libpng，传感器及 demo 还依赖 EGL、OSMesa、Eigen 和 PCL。
 ```bash
 sudo apt update
 sudo apt install --yes \
-  build-essential cmake ecal libcli11-dev libegl1-mesa-dev libeigen3-dev \
+  binutils build-essential clang-format cmake doxygen ecal graphviz libcli11-dev \
+  libegl1-mesa-dev libeigen3-dev \
   libglfw3-dev libgtest-dev libosmesa6-dev libpcl-dev libpng-dev \
   libprotobuf-dev libspdlog-dev libyaml-cpp-dev pkg-config protobuf-compiler \
-  python3-colcon-common-extensions python3-yaml xvfb
+  python3-colcon-common-extensions python3-venv python3-yaml xvfb
 ```
 
 ```bash
 colcon list --topological-order
-colcon build --cmake-args -DBUILD_TESTING=ON
+colcon build --symlink-install --cmake-args -DBUILD_TESTING=ON
 colcon test --packages-select \
   mujoco_sim_config mujoco_sim_protocol mujoco_sim_core mujoco_sim_sensor \
   mujoco_sim_server mujoco_sim_adapter_sdk mujoco_sim_wbr_lqr_demo \
-  mujoco_sim_sensor_demo
+  mujoco_sim_sensor_demo --event-handlers console_cohesion+
 colcon test-result --all --verbose
 ```
 

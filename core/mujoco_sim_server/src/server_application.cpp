@@ -24,7 +24,7 @@ void LogBoundaryFailure(const std::shared_ptr<spdlog::logger>& logger, std::stri
                         std::string_view operation, std::string_view error) noexcept {
   try {
     if (logger) {
-      logger->error("event=ecal_exception boundary={} operation={} error={}", boundary,
+      logger->error("event=boundary_failure boundary={} operation={} error={}", boundary,
                     LogValue(operation), LogValue(error));
     }
   } catch (...) {
@@ -56,19 +56,31 @@ class ServerApplication::Impl {
       return false;
     }
     const auto log = logger->get();
-    log->info(
-        "event=server_starting server_name={} model_path={} initial_keyframe={} "
-        "mode={} pacing_mode={} realtime_factor={} max_ticks={} "
-        "command_timeout_ms={} command_keepalive_ms={} "
-        "activation_timeout_ms={} status_period_ms={} "
-        "log_level={} log_file={} log_summary_period_ms={}",
-        LogValue(config.server_name), LogValue(config.model_path),
-        LogValue(config.initial_keyframe), config.headless ? "headless" : "gui", config.pacing_mode,
-        config.realtime_factor, config.max_ticks, config.command_timeout_ms,
-        config.command_keepalive_ms, config.activation_timeout_ms, config.status_period_ms,
-        config.log_level, LogValue(config.log_file), config.log_summary_period_ms);
-
     std::string boundary_error;
+    if (!RunWithExceptionBoundary(
+            [&] {
+              log->info(
+                  "event=server_starting server_name={} model_path={} initial_keyframe={} "
+                  "mode={} pacing_mode={} realtime_factor={} max_ticks={} "
+                  "command_timeout_ms={} command_keepalive_ms={} "
+                  "activation_timeout_ms={} status_period_ms={} "
+                  "log_level={} log_file={} log_summary_period_ms={}",
+                  LogValue(config.server_name), LogValue(config.model_path),
+                  LogValue(config.initial_keyframe), config.headless ? "headless" : "gui",
+                  config.pacing_mode, config.realtime_factor, config.max_ticks,
+                  config.command_timeout_ms, config.command_keepalive_ms,
+                  config.activation_timeout_ms, config.status_period_ms, config.log_level,
+                  LogValue(config.log_file), config.log_summary_period_ms);
+            },
+            &boundary_error)) {
+      *error_message = "failed to write server startup log: " + boundary_error;
+      return false;
+    }
+    if (!logger->healthy()) {
+      *error_message = "server logging failed during startup";
+      return false;
+    }
+
     bool initialized = false;
     if (!RunWithExceptionBoundary(
             [&] {
@@ -90,9 +102,23 @@ class ServerApplication::Impl {
     if (!config.headless) {
       viewer = std::make_unique<SimViewer>();
       if (!viewer->Initialize(error_message)) return false;
-      log->info("event=viewer_initialized mode=gui");
+      if (!RunWithExceptionBoundary([&] { log->info("event=viewer_initialized mode=gui"); },
+                                    &boundary_error) ||
+          !logger->healthy()) {
+        *error_message = boundary_error.empty()
+                             ? "server logging failed during viewer startup"
+                             : "failed to write viewer startup log: " + boundary_error;
+        return false;
+      }
     } else {
-      log->info("event=viewer_initialized mode=headless");
+      if (!RunWithExceptionBoundary([&] { log->info("event=viewer_initialized mode=headless"); },
+                                    &boundary_error) ||
+          !logger->healthy()) {
+        *error_message = boundary_error.empty()
+                             ? "server logging failed during viewer startup"
+                             : "failed to write viewer startup log: " + boundary_error;
+        return false;
+      }
     }
 
     transport = std::make_unique<EcalServerTransport>(config.server_name, logger->get());
@@ -102,8 +128,17 @@ class ServerApplication::Impl {
     if (!transport->Start(loop->MakeHandlers(), error_message)) return false;
     if (!loop->Start(error_message)) return false;
 
+    if (!RunWithExceptionBoundary(
+            [&] { log->info("event=server_started server_name={}", LogValue(config.server_name)); },
+            &boundary_error) ||
+        !logger->healthy()) {
+      *error_message = boundary_error.empty()
+                           ? "server logging failed while recording startup"
+                           : "failed to write server started log: " + boundary_error;
+      RequestStop("logging_startup_failure");
+      return false;
+    }
     started = true;
-    log->info("event=server_started server_name={}", LogValue(config.server_name));
     return true;
   }
 
@@ -124,11 +159,27 @@ class ServerApplication::Impl {
       RequestStop(render_succeeded ? "viewer_closed" : "viewer_render_exception");
     }
 
-    int result = loop->Join();
+    int result = 2;
+    std::string join_error;
+    if (!RunWithExceptionBoundary([&] { result = loop->Join(); }, &join_error)) {
+      LogBoundaryFailure(logger->get(), "server_run", "simulation_loop_join", join_error);
+    }
     if (!render_succeeded) result = 2;
-    transport->StopInputs();
-    transport->Reset();
-    logger->Flush();
+    std::string transport_error;
+    if (!RunWithExceptionBoundary([this] { transport->StopInputs(); }, &transport_error)) {
+      LogBoundaryFailure(logger->get(), "server_run", "transport_stop_inputs", transport_error);
+      result = 2;
+    }
+    if (!RunWithExceptionBoundary([this] { transport->Reset(); }, &transport_error)) {
+      LogBoundaryFailure(logger->get(), "server_run", "transport_reset", transport_error);
+      result = 2;
+    }
+    std::string flush_error;
+    if (!RunWithExceptionBoundary([this] { logger->Flush(); }, &flush_error)) {
+      LogBoundaryFailure(logger->get(), "server_run", "logger_flush", flush_error);
+      result = 2;
+    }
+    if (!logger->healthy()) result = 2;
     {
       std::lock_guard lock(mutex);
       exit_code = result;
@@ -137,37 +188,60 @@ class ServerApplication::Impl {
     return result;
   }
 
-  void RequestStop(std::string reason) {
-    if (loop) loop->RequestStop(std::move(reason));
+  void RequestStop(std::string reason) noexcept {
+    std::string error;
+    if (!RunWithExceptionBoundary(
+            [this, &reason] {
+              if (loop) loop->RequestStop(std::move(reason));
+            },
+            &error)) {
+      LogBoundaryFailure(logger ? logger->get() : nullptr, "server_request_stop", "simulation_loop",
+                         error);
+    }
+  }
+
+  bool RequestScreenshot() {
+    SimViewer* active_viewer = nullptr;
+    {
+      std::lock_guard lock(mutex);
+      if (!started || run_completed || !viewer) return false;
+      active_viewer = viewer.get();
+    }
+    active_viewer->RequestScreenshot();
+    return true;
   }
 
   void Shutdown() noexcept {
     std::string error;
-    RunWithExceptionBoundary(
-        [this] {
-          if (loop) {
-            loop->RequestStop("server_destroyed");
-            loop->Join();
-          }
-        },
-        &error);
-    if (!error.empty()) {
-      LogBoundaryFailure(logger ? logger->get() : nullptr, "server_destructor", "simulation_loop",
+    if (loop &&
+        !RunWithExceptionBoundary([this] { loop->RequestStop("server_destroyed"); }, &error)) {
+      LogBoundaryFailure(logger ? logger->get() : nullptr, "server_destructor",
+                         "simulation_loop_stop", error);
+    }
+    if (loop && !RunWithExceptionBoundary([this] { loop->Join(); }, &error)) {
+      LogBoundaryFailure(logger ? logger->get() : nullptr, "server_destructor",
+                         "simulation_loop_join", error);
+    }
+    if (transport && !RunWithExceptionBoundary([this] { transport->StopInputs(); }, &error)) {
+      LogBoundaryFailure(logger ? logger->get() : nullptr, "server_destructor",
+                         "transport_stop_inputs", error);
+    }
+    if (transport && !RunWithExceptionBoundary([this] { transport->Reset(); }, &error)) {
+      LogBoundaryFailure(logger ? logger->get() : nullptr, "server_destructor", "transport_reset",
                          error);
     }
-    RunWithExceptionBoundary(
-        [this] {
-          if (transport) {
-            transport->StopInputs();
-            transport->Reset();
-          }
-        },
-        nullptr);
     loop.reset();
     viewer.reset();
     transport.reset();
     if (owns_ecal) {
-      RunWithExceptionBoundary([] { eCAL::Finalize(); }, nullptr);
+      bool finalized = false;
+      std::string finalize_error;
+      const bool completed =
+          RunWithExceptionBoundary([&] { finalized = eCAL::Finalize(); }, &finalize_error);
+      if (!completed || !finalized) {
+        LogBoundaryFailure(logger ? logger->get() : nullptr, "server_destructor", "eCAL::Finalize",
+                           finalize_error.empty() ? "eCAL returned failure" : finalize_error);
+      }
       owns_ecal = false;
     }
     if (logger) RunWithExceptionBoundary([this] { logger->Flush(); }, nullptr);
@@ -199,8 +273,12 @@ int ServerApplication::Run() {
   return impl_->Run();
 }
 
-void ServerApplication::RequestStop(std::string reason) {
+void ServerApplication::RequestStop(std::string reason) noexcept {
   impl_->RequestStop(std::move(reason));
+}
+
+bool ServerApplication::RequestScreenshot() {
+  return impl_->RequestScreenshot();
 }
 
 const ServerConfig& ServerApplication::config() const noexcept {

@@ -12,6 +12,7 @@
 #include "internal/adapter_session.hpp"
 #include "internal/blocking_mailbox.hpp"
 #include "internal/callback_gate.hpp"
+#include "internal/lifecycle_operation.hpp"
 
 namespace mujoco_sim::adapter_sdk::internal {
 namespace {
@@ -138,6 +139,22 @@ TEST(CallbackGateTest, WaitsForCallbackOnAnotherThread) {
   release.set_value();
   EXPECT_EQ(waiter.wait_for(1s), std::future_status::ready);
   worker.join();
+}
+
+TEST(LifecycleOperationTest, SerializesOperationsWithoutRetainingItsMutex) {
+  LifecycleOperation operation;
+  auto first = operation.Acquire();
+  std::promise<void> second_started;
+  auto started = second_started.get_future();
+  auto second = std::async(std::launch::async, [&] {
+    second_started.set_value();
+    auto lease = operation.Acquire();
+  });
+
+  started.get();
+  EXPECT_EQ(second.wait_for(0ms), std::future_status::timeout);
+  first = {};
+  EXPECT_EQ(second.wait_for(1s), std::future_status::ready);
 }
 
 }  // namespace

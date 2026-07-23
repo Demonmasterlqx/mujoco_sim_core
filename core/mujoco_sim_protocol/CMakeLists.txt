@@ -88,4 +88,15 @@ if(BUILD_TESTING)
   add_executable(data_frame_performance_test test/data_frame_performance_test.cpp)
   target_link_libraries(data_frame_performance_test PRIVATE ${PROJECT_NAME})
   add_test(NAME data_frame_performance_test COMMAND data_frame_performance_test)
+
+  configure_file(
+    test/package_consumer_test.cmake.in
+    "${CMAKE_CURRENT_BINARY_DIR}/package_consumer_test.cmake"
+    @ONLY
+  )
+  add_test(
+    NAME protocol_package_consumer_test
+    COMMAND "${CMAKE_COMMAND}"
+            -P "${CMAKE_CURRENT_BINARY_DIR}/package_consumer_test.cmake"
+  )
 endif()

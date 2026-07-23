@@ -15,6 +15,7 @@
 #include "adapter_transport.hpp"
 #include "blocking_mailbox.hpp"
 #include "callback_gate.hpp"
+#include "lifecycle_operation.hpp"
 
 namespace mujoco_sim::adapter_sdk {
 
@@ -47,7 +48,12 @@ class SensorStreamClient::Impl : public std::enable_shared_from_this<Impl> {
     kWait
   };
   struct StreamState {
-    std::mutex delivery_mutex;
+    // The shared StreamState owns callback admission for its full lifetime.
+    // test_and_set() drops concurrent delivery instead of blocking an eCAL
+    // callback thread; the admitted callback clears the flag on every exit.
+    // 共享 StreamState 在完整生命周期内持有回调准入状态。test_and_set() 会丢弃
+    // 并发投递而不阻塞 eCAL 回调线程；获准执行的回调会在所有退出路径清除该标志。
+    std::atomic_flag callback_active = ATOMIC_FLAG_INIT;
     mujoco_sim::v4::StreamDescriptor descriptor;
     DeliveryMode mode = DeliveryMode::kUnset;
     StreamCallback callback;
@@ -70,12 +76,29 @@ class SensorStreamClient::Impl : public std::enable_shared_from_this<Impl> {
   bool CanAcceptStatusLocked(const mujoco_sim::v4::ServerStatus& status) const;
   bool ApplyGlobalStatusLocked(const mujoco_sim::v4::ServerStatus& status);
   bool ApplyStreamErrorsLocked(const mujoco_sim::v4::ServerStatus& status);
+  /**
+   * @brief Accepts a newer stream sequence and updates drop accounting.
+   *        接受较新的数据流序列号并更新丢帧计数。
+   *
+   * The caller must hold mutex_. A stale or repeated sequence leaves the
+   * stream state unchanged.
+   * 调用方必须持有 mutex_。过期或重复的序列号不会改变数据流状态。
+   */
+  bool AcceptStreamSequenceLocked(StreamState* stream,
+                                  const mujoco_sim::v4::StreamFrameHeader& header);
   void HandleStreamBytes(const std::string& stream_name, const void* data, std::size_t size);
   void HandleStatusBytes(const void* data, std::size_t size);
   void HandleStreamFrame(const std::string& stream_name,
                          const mujoco_sim::protocol::ParsedStreamFrame& frame);
   void RecordDiagnostic(const std::string& stream_name, const std::string& diagnostic);
-  void StopSampleReception();
+  /**
+   * @brief Disables sample reception, removes eCAL callbacks, and drains active callbacks.
+   *        禁用样本接收、移除 eCAL 回调并等待活动回调退出。
+   *
+   * eCAL teardown exceptions are retained in stream diagnostics.
+   * eCAL 拆除异常会保存在数据流诊断中。
+   */
+  void StopSampleReception() noexcept;
   using CallbackGate = internal::CallbackGate<Impl>;
   using CallbackState = CallbackGate::State;
   using CallbackLease = CallbackGate::Lease;
@@ -88,7 +111,7 @@ class SensorStreamClient::Impl : public std::enable_shared_from_this<Impl> {
   std::unordered_map<std::string, std::shared_ptr<StreamState>> streams_;
   std::optional<std::uint64_t> last_status_tick_id_;
   std::shared_ptr<CallbackState> callback_state_;
-  std::mutex lifecycle_mutex_;
+  internal::LifecycleOperation lifecycle_;
   mutable std::mutex mutex_;
   std::condition_variable condition_;
   std::atomic<bool> stop_requested_{false};

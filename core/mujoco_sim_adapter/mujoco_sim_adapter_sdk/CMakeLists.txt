@@ -92,6 +92,20 @@ if(BUILD_TESTING)
     COMMAND ecal_runtime_static_lifetime_test
   )
 
+  add_executable(ecal_runtime_concurrency_test
+    test/ecal_runtime_concurrency_test.cpp
+  )
+  target_include_directories(ecal_runtime_concurrency_test PRIVATE
+    "${CMAKE_CURRENT_SOURCE_DIR}/src"
+  )
+  target_link_libraries(ecal_runtime_concurrency_test PRIVATE
+    ${PROJECT_NAME}
+    GTest::gtest_main
+  )
+  add_test(NAME ecal_runtime_concurrency_test
+    COMMAND ecal_runtime_concurrency_test
+  )
+
   add_executable(sensor_stream_ecal_test
     test/sensor_stream_ecal_test.cpp
   )
@@ -102,6 +116,7 @@ if(BUILD_TESTING)
   add_test(NAME sensor_stream_ecal_test COMMAND sensor_stream_ecal_test)
   set_tests_properties(sensor_stream_ecal_test PROPERTIES TIMEOUT 15)
 
+  find_package(mujoco_sim_core CONFIG REQUIRED)
   find_package(mujoco_sim_server CONFIG REQUIRED)
   if(NOT TARGET mujoco_sim::mujoco-sim-server)
     message(FATAL_ERROR "mujoco_sim_server package did not export mujoco-sim-server")
@@ -117,6 +132,7 @@ if(BUILD_TESTING)
   )
   target_link_libraries(sensor_runtime_ecal_test PRIVATE
     ${PROJECT_NAME}
+    mujoco_sim::core
     mujoco_sim::server
     GTest::gtest_main
   )
@@ -140,6 +156,17 @@ if(BUILD_TESTING)
       "${CMAKE_CURRENT_SOURCE_DIR}/../../mujoco_sim_core/test/testdata/simple_actuator.xml"
   )
   set_tests_properties(adapter_sdk_lifecycle_e2e PROPERTIES TIMEOUT 20)
+
+  configure_file(
+    test/package_consumer_test.cmake.in
+    "${CMAKE_CURRENT_BINARY_DIR}/package_consumer_test.cmake"
+    @ONLY
+  )
+  add_test(
+    NAME adapter_sdk_package_consumer_test
+    COMMAND "${CMAKE_COMMAND}"
+            -P "${CMAKE_CURRENT_BINARY_DIR}/package_consumer_test.cmake"
+  )
 
 endif()
 

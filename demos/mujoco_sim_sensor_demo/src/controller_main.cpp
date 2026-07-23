@@ -26,7 +26,10 @@ int main(int argc, char** argv) {
     std::cerr << message << '\n';
     return 1;
   }
-  demo::InstallProcessSignalHandlers();
+  if (!demo::InstallProcessSignalHandlers(&message)) {
+    std::cerr << message << '\n';
+    return 1;
+  }
   const auto& config = app_config.controller;
 
   mujoco_sim::adapter_sdk::ControllerClient client(config.adapter);
@@ -36,8 +39,11 @@ int main(int argc, char** argv) {
   }
   if (!client.Activate(&message)) {
     std::cerr << "controller activation failed: " << message << '\n';
-    std::string ignored;
-    client.Unregister(&ignored);
+    std::string unregister_error;
+    if (!client.Unregister(&unregister_error)) {
+      std::cerr << "controller cleanup after activation failure failed: " << unregister_error
+                << '\n';
+    }
     return 1;
   }
   demo::WaypointController controller(config.control);
@@ -103,7 +109,7 @@ int main(int argc, char** argv) {
   std::string unregister_error;
   if (!client.Unregister(&unregister_error)) {
     std::cerr << "controller unregister failed: " << unregister_error << '\n';
-    if (result == 0 && !demo::ProcessStopRequested()) result = 1;
+    result = 1;
   }
   std::cout << "sensor-demo controller summary ticks=" << handled_ticks
             << " laps=" << completed_laps << " test_limit=" << (test_limit_reached ? 1 : 0) << '\n';

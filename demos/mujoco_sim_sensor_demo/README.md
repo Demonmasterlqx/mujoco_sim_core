@@ -14,8 +14,11 @@ Observer whose data is used only for post-run scoring.
 All Controller/Observer layouts are resolved once after registration.
 `VehicleDecoder`, `StateDecoder`, `ImuOrientationDecoder`, and
 `WheelCommandMapper` cache scalar spans and perform no resource-name lookup per
-frame. Sensor payloads retain their separate `MJSTREAM` framing with a Protocol
-V4 `StreamFrameHeader`; they are not inserted into State or Observation frames.
+frame. They reject mismatched dense scalar counts, overlapping command spans,
+non-finite values, and invalid simulation timestamps without partially updating
+outputs. Sensor payloads retain their separate `MJSTREAM` framing with a
+Protocol V4 `StreamFrameHeader`; they are not inserted into State or Observation
+frames.
 
 Configuration is generated from
 [`config/sensor_demo.schema.yaml`](config/sensor_demo.schema.yaml) and strict.

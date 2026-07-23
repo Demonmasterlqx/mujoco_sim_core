@@ -32,6 +32,7 @@ add_library(${PROJECT_NAME}_lib
   src/adapter_registration.cpp
   src/controller_command_inbox.cpp
   src/ecal_server_transport.cpp
+  src/publish_diagnostics.cpp
   src/server_application.cpp
   src/server_config.cpp
   src/server_event.cpp
@@ -50,6 +51,8 @@ if(MUJOCO_SIM_BUILD_GUI)
   target_sources(${PROJECT_NAME}_lib PRIVATE
     src/lodepng_compat.cpp src/sim_viewer.cpp
     ${MUJOCO_SIMULATE_SOURCES})
+  # These files are unmodified sources from the bundled MuJoCo distribution.
+  # Keep warning suppression scoped to that third-party source list.
   set_source_files_properties(${MUJOCO_SIMULATE_SOURCES} PROPERTIES
     COMPILE_OPTIONS "-w")
 else()
@@ -76,12 +79,10 @@ target_include_directories(${PROJECT_NAME}_lib SYSTEM PRIVATE
   "${MUJOCO_SIMULATE_ROOT}")
 
 target_link_libraries(${PROJECT_NAME}_lib
-  PUBLIC
+  PRIVATE
     mujoco_sim::core
     mujoco_sim::protocol
     eCAL::core
-  PRIVATE
-    mujoco_sim::config
     mujoco::mujoco
     spdlog::spdlog
     Threads::Threads
@@ -145,7 +146,7 @@ if(BUILD_TESTING)
   target_include_directories(adapter_registration_test PRIVATE
     "${CMAKE_CURRENT_SOURCE_DIR}/src")
   target_link_libraries(adapter_registration_test PRIVATE
-    ${PROJECT_NAME}_lib GTest::gtest_main)
+    ${PROJECT_NAME}_lib mujoco_sim::core GTest::gtest_main)
   target_compile_definitions(adapter_registration_test PRIVATE
     MUJOCO_SIM_SERVER_TEST_MODEL="${CMAKE_CURRENT_SOURCE_DIR}/../mujoco_sim_core/test/testdata/simple_actuator.xml")
   add_test(NAME adapter_registration_test COMMAND adapter_registration_test)
@@ -155,14 +156,23 @@ if(BUILD_TESTING)
   target_include_directories(controller_command_inbox_test PRIVATE
     "${CMAKE_CURRENT_SOURCE_DIR}/src")
   target_link_libraries(controller_command_inbox_test PRIVATE
-    ${PROJECT_NAME}_lib GTest::gtest_main)
+    ${PROJECT_NAME}_lib mujoco_sim::core GTest::gtest_main)
   add_test(NAME controller_command_inbox_test COMMAND controller_command_inbox_test)
+
+  add_executable(publish_diagnostics_test test/publish_diagnostics_test.cpp)
+  target_include_directories(publish_diagnostics_test PRIVATE
+    "${CMAKE_CURRENT_SOURCE_DIR}/src")
+  target_link_libraries(publish_diagnostics_test PRIVATE
+    ${PROJECT_NAME}_lib mujoco_sim::core mujoco_sim::protocol
+    GTest::gtest_main)
+  add_test(NAME publish_diagnostics_test COMMAND publish_diagnostics_test)
 
   add_executable(server_event_queue_test test/server_event_queue_test.cpp)
   target_include_directories(server_event_queue_test PRIVATE
     "${CMAKE_CURRENT_SOURCE_DIR}/src")
   target_link_libraries(server_event_queue_test PRIVATE
-    ${PROJECT_NAME}_lib GTest::gtest_main)
+    ${PROJECT_NAME}_lib mujoco_sim::core mujoco_sim::protocol
+    GTest::gtest_main)
   add_test(NAME server_event_queue_test COMMAND server_event_queue_test)
 
   add_executable(server_config_test test/server_config_test.cpp)
@@ -173,49 +183,60 @@ if(BUILD_TESTING)
   add_executable(server_stop_concurrency_test
     test/server_stop_concurrency_test.cpp)
   target_link_libraries(server_stop_concurrency_test PRIVATE
-    ${PROJECT_NAME}_lib GTest::gtest_main)
+    ${PROJECT_NAME}_lib eCAL::core GTest::gtest_main)
   target_compile_definitions(server_stop_concurrency_test PRIVATE
     MUJOCO_SIM_SERVER_TEST_MODEL="${CMAKE_CURRENT_SOURCE_DIR}/../mujoco_sim_core/test/testdata/simple_actuator.xml")
   add_test(NAME server_stop_concurrency_test COMMAND server_stop_concurrency_test)
   set_tests_properties(server_stop_concurrency_test PROPERTIES TIMEOUT 15)
 
   if(MUJOCO_SIM_RUN_BUILD_MATRIX_TESTS)
+    set(MUJOCO_SIM_BUILD_MATRIX_PREFIX_PATH "${CMAKE_PREFIX_PATH}")
+    if(NOT MUJOCO_SIM_BUILD_MATRIX_PREFIX_PATH AND DEFINED ENV{CMAKE_PREFIX_PATH})
+      set(MUJOCO_SIM_BUILD_MATRIX_PREFIX_PATH "$ENV{CMAKE_PREFIX_PATH}")
+    endif()
+    if(NOT MUJOCO_SIM_BUILD_MATRIX_PREFIX_PATH)
+      message(FATAL_ERROR
+        "MUJOCO_SIM_RUN_BUILD_MATRIX_TESTS requires an installed dependency prefix"
+      )
+    endif()
     add_test(NAME server_build_matrix
       COMMAND bash "${CMAKE_CURRENT_SOURCE_DIR}/test/build_matrix.sh"
-              "${CMAKE_PREFIX_PATH}"
+              "${MUJOCO_SIM_BUILD_MATRIX_PREFIX_PATH}"
               "${CMAKE_CURRENT_BINARY_DIR}/build_matrix")
     set_tests_properties(server_build_matrix PROPERTIES TIMEOUT 600)
   endif()
 
   if(MUJOCO_SIM_BUILD_SENSOR_STREAMS)
     add_executable(sensor_runtime_test test/sensor_runtime_test.cpp)
-  target_include_directories(sensor_runtime_test PRIVATE
-    "${CMAKE_CURRENT_SOURCE_DIR}/src"
-  )
-  target_link_libraries(sensor_runtime_test PRIVATE
-    ${PROJECT_NAME}_lib
-    GTest::gtest_main
-  )
-  target_compile_definitions(sensor_runtime_test PRIVATE
-    MUJOCO_SIM_SENSOR_RUNTIME_TEST_MODEL="${CMAKE_CURRENT_SOURCE_DIR}/test/testdata/sensor_runtime_scene.xml"
-  )
-  add_test(NAME sensor_runtime_test COMMAND sensor_runtime_test)
+    target_include_directories(sensor_runtime_test PRIVATE
+      "${CMAKE_CURRENT_SOURCE_DIR}/src"
+    )
+    target_link_libraries(sensor_runtime_test PRIVATE
+      ${PROJECT_NAME}_lib
+      mujoco_sim::core
+      mujoco_sim::protocol
+      GTest::gtest_main
+    )
+    target_compile_definitions(sensor_runtime_test PRIVATE
+      MUJOCO_SIM_SENSOR_RUNTIME_TEST_MODEL="${CMAKE_CURRENT_SOURCE_DIR}/test/testdata/sensor_runtime_scene.xml"
+    )
+    add_test(NAME sensor_runtime_test COMMAND sensor_runtime_test)
     set_tests_properties(sensor_runtime_test PROPERTIES
-    ENVIRONMENT "DISPLAY=;WAYLAND_DISPLAY="
-    TIMEOUT 30
+      ENVIRONMENT "DISPLAY=;WAYLAND_DISPLAY="
+      TIMEOUT 30
     )
   endif()
 
   if(MUJOCO_SIM_BUILD_GUI)
     add_executable(png_writer_test test/png_writer_test.cpp)
-  target_include_directories(png_writer_test PRIVATE
-    "${CMAKE_CURRENT_SOURCE_DIR}/src"
-  )
-  target_link_libraries(png_writer_test PRIVATE
-    ${PROJECT_NAME}_lib
-    GTest::gtest_main
-    PNG::PNG
-  )
+    target_include_directories(png_writer_test PRIVATE
+      "${CMAKE_CURRENT_SOURCE_DIR}/src"
+    )
+    target_link_libraries(png_writer_test PRIVATE
+      ${PROJECT_NAME}_lib
+      GTest::gtest_main
+      PNG::PNG
+    )
     add_test(NAME png_writer_test COMMAND png_writer_test)
   endif()
 
@@ -253,38 +274,36 @@ if(BUILD_TESTING)
   )
 
   if(MUJOCO_SIM_BUILD_GUI)
-    set(MUJOCO_SIM_GUI_TEST_PREFIX)
-  if(NOT DEFINED ENV{DISPLAY} OR "$ENV{DISPLAY}" STREQUAL "")
     find_program(XVFB_RUN_EXECUTABLE NAMES xvfb-run REQUIRED)
     set(MUJOCO_SIM_GUI_TEST_PREFIX "${XVFB_RUN_EXECUTABLE}" -a)
-  endif()
 
-  add_executable(sim_viewer_test test/sim_viewer_test.cpp)
-  target_include_directories(sim_viewer_test PRIVATE
-    "${CMAKE_CURRENT_SOURCE_DIR}/src"
-  )
-  target_link_libraries(sim_viewer_test PRIVATE
-    ${PROJECT_NAME}_lib
-    GTest::gtest_main
-  )
-  target_compile_definitions(sim_viewer_test PRIVATE
-    MUJOCO_SIM_SERVER_TEST_MODEL="${CMAKE_CURRENT_SOURCE_DIR}/../mujoco_sim_core/test/testdata/simple_actuator.xml"
-  )
-  add_test(
-    NAME sim_viewer_test
-    COMMAND ${MUJOCO_SIM_GUI_TEST_PREFIX} $<TARGET_FILE:sim_viewer_test>
-  )
-  set_tests_properties(sim_viewer_test PROPERTIES TIMEOUT 15)
+    add_executable(sim_viewer_test test/sim_viewer_test.cpp)
+    target_include_directories(sim_viewer_test PRIVATE
+      "${CMAKE_CURRENT_SOURCE_DIR}/src"
+    )
+    target_link_libraries(sim_viewer_test PRIVATE
+      ${PROJECT_NAME}_lib
+      mujoco_sim::core
+      GTest::gtest_main
+    )
+    target_compile_definitions(sim_viewer_test PRIVATE
+      MUJOCO_SIM_SERVER_TEST_MODEL="${CMAKE_CURRENT_SOURCE_DIR}/../mujoco_sim_core/test/testdata/simple_actuator.xml"
+    )
+    add_test(
+      NAME sim_viewer_test
+      COMMAND ${MUJOCO_SIM_GUI_TEST_PREFIX} $<TARGET_FILE:sim_viewer_test>
+    )
+    set_tests_properties(sim_viewer_test PROPERTIES TIMEOUT 15)
 
-  add_test(
-    NAME server_gui_autonomous_run
-    COMMAND
-      ${MUJOCO_SIM_GUI_TEST_PREFIX}
-      bash
-      "${CMAKE_CURRENT_SOURCE_DIR}/test/gui_autonomous_run_test.sh"
-      $<TARGET_FILE:mujoco-sim-server>
-      "${CMAKE_CURRENT_SOURCE_DIR}/../mujoco_sim_core/test/testdata/simple_actuator.xml"
-  )
+    add_test(
+      NAME server_gui_autonomous_run
+      COMMAND
+        ${MUJOCO_SIM_GUI_TEST_PREFIX}
+        bash
+        "${CMAKE_CURRENT_SOURCE_DIR}/test/gui_autonomous_run_test.sh"
+        $<TARGET_FILE:mujoco-sim-server>
+        "${CMAKE_CURRENT_SOURCE_DIR}/../mujoco_sim_core/test/testdata/simple_actuator.xml"
+    )
     set_tests_properties(server_gui_autonomous_run PROPERTIES TIMEOUT 15)
   endif()
 endif()

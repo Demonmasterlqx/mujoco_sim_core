@@ -490,6 +490,21 @@ TEST_F(SensorTest, InvalidProfilesAreRejectedBeforeAllocation) {
   EXPECT_FALSE(DescribeRayLidarStream(*snapshot_, lidar, &descriptor, &error));
 }
 
+TEST_F(SensorTest, OptionalDiagnosticsMayBeOmittedOnFailure) {
+  CameraProfile camera = FullCameraProfile();
+  camera.camera_name = "missing";
+  std::vector<mujoco_sim::v4::StreamDescriptor> descriptors;
+  EXPECT_FALSE(DescribeCameraStreams(*snapshot_, camera, &descriptors, nullptr));
+  EXPECT_EQ(OffscreenRenderer::Create(*snapshot_, std::move(camera), nullptr), nullptr);
+
+  RayLidarProfile lidar_profile = LidarProfile();
+  lidar_profile.site_name = "missing";
+  EXPECT_EQ(RayLidar::Create(*snapshot_, std::move(lidar_profile), nullptr), nullptr);
+
+  StreamShape shape;
+  EXPECT_FALSE(StreamShapeFor(mujoco_sim::v4::STREAM_FORMAT_UNSPECIFIED, 1, 1, &shape, nullptr));
+}
+
 TEST_F(SensorTest, CaptureRejectsInvalidMetadataAndForeignSnapshot) {
   std::string error;
   auto lidar = RayLidar::Create(*snapshot_, LidarProfile(), &error);

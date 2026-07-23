@@ -31,8 +31,15 @@ class EcalScope {
  public:
   explicit EcalScope(const std::string& name) : initialized_(eCAL::Initialize(name)) {}
 
-  ~EcalScope() {
-    if (initialized_) eCAL::Finalize();
+  ~EcalScope() noexcept {
+    if (!initialized_) return;
+    try {
+      if (!eCAL::Finalize()) ADD_FAILURE() << "failed to finalize test eCAL runtime";
+    } catch (const std::exception& error) {
+      ADD_FAILURE() << "eCAL test finalization threw: " << error.what();
+    } catch (...) {
+      ADD_FAILURE() << "eCAL test finalization threw an unknown exception";
+    }
   }
 
   bool initialized() const { return initialized_; }
@@ -72,7 +79,9 @@ TEST(SensorRuntimeEcalTest, CaptureErrorReachesStreamClient) {
       "runtime-error-" +
       std::to_string(std::chrono::steady_clock::now().time_since_epoch().count());
   auto config = MakeConfig(server_name);
-  mujoco_sim::core::SimulationCore core(mujoco_sim::core::CoreOptions{server_name});
+  mujoco_sim::core::CoreOptions core_options;
+  core_options.server_name = server_name;
+  mujoco_sim::core::SimulationCore core(std::move(core_options));
   std::string error;
   const auto loaded = core.LoadModel(config.model_path);
   ASSERT_TRUE(loaded.response.loaded) << loaded.response.message;
@@ -124,7 +133,7 @@ TEST(SensorRuntimeEcalTest, CaptureErrorReachesStreamClient) {
     status.set_simulation_time_s(core.state().simulation_time_s);
     status.set_state(mujoco_sim::v4::RUNNING);
     runtime.AppendStatus(&status);
-    status_publisher.Send(status.SerializeAsString());
+    ASSERT_TRUE(status_publisher.Send(status.SerializeAsString()));
     std::this_thread::sleep_for(20ms);
   }
 

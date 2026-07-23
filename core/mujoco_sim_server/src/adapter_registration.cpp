@@ -1,7 +1,7 @@
 #include "adapter_registration.hpp"
 
+#include <array>
 #include <utility>
-#include <vector>
 
 namespace mujoco_sim::server {
 
@@ -50,16 +50,21 @@ mujoco_sim::core::EngineResult<mujoco_sim::core::RegisterAdapterResponse> Regist
     return result;
   }
 
-  std::vector<std::uint64_t> replaced_sessions;
+  std::array<std::uint64_t, 1> replaced_sessions{};
+  std::size_t replaced_session_count = 0;
   for (const auto& change : result.effects.adapter_changes) {
     if (change.new_state == mujoco_sim::core::UNREGISTERED) {
-      replaced_sessions.push_back(change.session_id);
+      if (replaced_session_count == replaced_sessions.size()) {
+        return SetupError("registration replaced more than one adapter session");
+      }
+      replaced_sessions[replaced_session_count++] = change.session_id;
     }
   }
   if (!reservation.Commit(result.response.session_id(), result.response.epoch(),
-                          replaced_sessions)) {
-    // Commit is allocation-free and Close() cannot run while the reservation
-    // is held. Reaching this branch indicates an internal invariant failure.
+                          std::span(replaced_sessions).first(replaced_session_count))) {
+    // Commit is allocation-free, and Close() cannot clear slots while a
+    // reservation is active. Reaching this branch indicates an internal
+    // invariant failure.
     return SetupError("failed to commit adapter runtime resources");
   }
   return result;

@@ -2,16 +2,16 @@
 <package format="3">
   <name>mujoco_sim_wbr_lqr_demo</name>
   <version>0.1.0</version>
-  <description>Synchronous WBR LQR controller demo for mujoco_sim.</description>
+  <description>Asynchronous Protocol V4 WBR LQR controller demo for mujoco_sim.</description>
   <maintainer email="pnx@example.com">pnx</maintainer>
   <license>NOASSERTION</license>
 
   <buildtool_depend>cmake</buildtool_depend>
+  <build_depend>mujoco_sim_config</build_depend>
   <depend>mujoco_sim_adapter_sdk</depend>
-  <depend>mujoco_sim_config</depend>
-  <depend>mujoco_sim_protocol</depend>
   <exec_depend>mujoco_sim_server</exec_depend>
-  <test_depend>gtest</test_depend>
+  <test_depend>libgtest-dev</test_depend>
+  <test_depend>libpng-dev</test_depend>
   <test_depend>mujoco_sim_core</test_depend>
   <test_depend>mujoco_sim_server</test_depend>
   <test_depend>xvfb</test_depend>

@@ -7,10 +7,10 @@
   <license>Apache-2.0</license>
 
   <buildtool_depend>cmake</buildtool_depend>
-  <depend>cli11</depend>
+  <depend>libcli11-dev</depend>
   <depend>python3</depend>
   <depend>python3-yaml</depend>
-  <depend>yaml-cpp</depend>
+  <depend>libyaml-cpp-dev</depend>
 
   <export>
     <build_type>cmake</build_type>

@@ -1,19 +1,59 @@
 #!/usr/bin/env bash
 set -euo pipefail
+shopt -s nullglob
 
 source_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-workspace_prefix="${1:?usage: build_matrix.sh WORKSPACE_PREFIX [WORK_DIR]}"
+prefix_input="${1:?usage: build_matrix.sh PREFIX_PATH [WORK_DIR]}"
 work_root="${2:-${TMPDIR:-/tmp}/mujoco_sim_server_matrix}"
 model="${source_dir}/../mujoco_sim_core/test/testdata/simple_actuator.xml"
-core_library_path="${workspace_prefix}/mujoco_sim_core/lib"
+
+declare -a package_prefixes=()
+
+append_prefix() {
+  local candidate="$1"
+  local existing
+  for existing in "${package_prefixes[@]:-}"; do
+    if [[ "${existing}" == "${candidate}" ]]; then
+      return
+    fi
+  done
+  package_prefixes+=("${candidate}")
+}
+
+IFS=':;' read -r -a requested_prefixes <<< "${prefix_input}"
+for requested_prefix in "${requested_prefixes[@]}"; do
+  [[ -n "${requested_prefix}" ]] || continue
+  if [[ -d "${requested_prefix}/lib/cmake" || -d "${requested_prefix}/share" ]]; then
+    append_prefix "${requested_prefix}"
+  fi
+  for package_prefix in "${requested_prefix}"/*; do
+    if [[ -d "${package_prefix}/lib/cmake" || -d "${package_prefix}/share" ]]; then
+      append_prefix "${package_prefix}"
+    fi
+  done
+done
+
+if ((${#package_prefixes[@]} == 0)); then
+  echo "no installed package prefixes found in: ${prefix_input}" >&2
+  exit 1
+fi
 
 cmake_prefix_path=""
-for package_prefix in "${workspace_prefix}"/*; do
-  if [[ -d "${package_prefix}/lib/cmake" || -d "${package_prefix}/share" ]]; then
-    cmake_prefix_path="${cmake_prefix_path:+${cmake_prefix_path};}${package_prefix}"
-  fi
+core_library_path=""
+for package_prefix in "${package_prefixes[@]}"; do
+  cmake_prefix_path="${cmake_prefix_path:+${cmake_prefix_path};}${package_prefix}"
+  for mujoco_library in "${package_prefix}"/lib/libmujoco.so*; do
+    if [[ -e "${mujoco_library}" ]]; then
+      core_library_path="${package_prefix}/lib"
+      break
+    fi
+  done
 done
-cmake_prefix_path="${cmake_prefix_path:+${cmake_prefix_path};}${workspace_prefix}"
+
+if [[ -z "${core_library_path}" ]]; then
+  echo "MuJoCo runtime library not found in installed prefixes" >&2
+  exit 1
+fi
 
 rm -rf "${work_root}"
 mkdir -p "${work_root}"

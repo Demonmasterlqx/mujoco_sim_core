@@ -157,6 +157,58 @@ TEST(DataPipelineTest, ObservationDecodeFailureIsTransactional) {
   EXPECT_DOUBLE_EQ(sample.simulation_time, 99.0);
 }
 
+TEST(DataPipelineTest, DenseDecodersRejectInvalidSizeTimeAndOverlappingSpans) {
+  const auto interfaces = ControllerNames();
+  const auto layout = MakeLayout(
+      {{"fl_pos", 1}, {"fr_pos", 1}, {"rl_pos", 1}, {"rr_pos", 1}, {"quat", 4}, {"gyro", 3}},
+      {"fl_cmd", "fr_cmd", "rl_cmd", "rr_cmd"});
+  std::vector<double> values(layout.observation_scalar_count());
+  demo::VehicleSample sample;
+  sample.simulation_time = 99.0;
+  std::string error = "stale";
+  const demo::VehicleDecoder decoder(layout, interfaces);
+
+  values.pop_back();
+  EXPECT_FALSE(decoder.Decode(values, 1.0, &sample, &error));
+  EXPECT_NE(error.find("size mismatch"), std::string::npos);
+  EXPECT_DOUBLE_EQ(sample.simulation_time, 99.0);
+
+  values.resize(layout.observation_scalar_count());
+  EXPECT_FALSE(decoder.Decode(values, std::numeric_limits<double>::infinity(), &sample, &error));
+  EXPECT_NE(error.find("timestamp"), std::string::npos);
+  EXPECT_DOUBLE_EQ(sample.simulation_time, 99.0);
+
+  auto overlapping_observations = layout.observations();
+  overlapping_observations[1].scalars.offset = overlapping_observations[0].scalars.offset;
+  const mujoco_sim::adapter_sdk::ControllerLayout overlapping_observation_layout(
+      overlapping_observations, layout.commands(), layout.observation_scalar_count(),
+      layout.command_scalar_count());
+  const demo::VehicleDecoder overlapping_decoder(overlapping_observation_layout, interfaces);
+  EXPECT_FALSE(overlapping_decoder.Decode(values, 1.0, &sample, &error));
+  EXPECT_NE(error.find("overlapping"), std::string::npos);
+  EXPECT_DOUBLE_EQ(sample.simulation_time, 99.0);
+
+  const mujoco_sim::adapter_sdk::ControllerLayout oversized_observation_layout(
+      layout.observations(), layout.commands(), layout.observation_scalar_count() + 1,
+      layout.command_scalar_count());
+  const demo::VehicleDecoder oversized_decoder(oversized_observation_layout, interfaces);
+  values.resize(oversized_observation_layout.observation_scalar_count());
+  EXPECT_FALSE(oversized_decoder.Decode(values, 1.0, &sample, &error));
+  EXPECT_NE(error.find("scalar count"), std::string::npos);
+  EXPECT_DOUBLE_EQ(sample.simulation_time, 99.0);
+
+  auto overlapping_commands = layout.commands();
+  overlapping_commands[1].scalars.offset = overlapping_commands[0].scalars.offset;
+  const mujoco_sim::adapter_sdk::ControllerLayout overlapping(
+      layout.observations(), overlapping_commands, layout.observation_scalar_count(),
+      layout.command_scalar_count());
+  const demo::WheelCommandMapper mapper(overlapping, interfaces);
+  std::vector<double> commands{42.0};
+  EXPECT_FALSE(mapper.Map({1.0, 2.0, 3.0, 4.0}, &commands, &error));
+  EXPECT_NE(error.find("overlapping"), std::string::npos);
+  EXPECT_EQ(commands, (std::vector<double>{42.0}));
+}
+
 TEST(DataPipelineTest, DecodesObserverJointStateAndImuWithoutBarrierData) {
   demo::StateObserverInterfaces interfaces{{{"fl_pos", "fr_pos", "rl_pos", "rr_pos"}},
                                            {{"fl_vel", "fr_vel", "rl_vel", "rr_vel"}},

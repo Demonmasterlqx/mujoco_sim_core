@@ -3,13 +3,21 @@
 ## Source
 
 - Repository: `https://github.com/CosmosMount/wbr_mujoco.git`
-- Local source checkout: `/tmp/wbr_mujoco`
 - Commit: `6a8b37517803db616d4fb19dcdd5ab448bff7847`
 - Commit date: `2026-07-09T23:26:40+08:00`
 - Subject: `fix : wheel & forces`
 
-License handling was explicitly outside the scope of this import. No license
-files or license conclusions are added by this package.
+## License status
+
+The upstream tree at the pinned commit contains no `LICENSE`, `COPYING`, or
+`NOTICE` file and its English and Chinese README files state no license. This
+was verified against the GitHub tree API on 2026-07-22. Consequently this
+package declares `NOASSERTION`; it does not claim that the imported files are
+covered by an open-source license.
+
+There was no upstream license or notice file to copy into the vendored tree.
+Any future vendor update must repeat the license audit and preserve any license
+or notice that upstream has added before importing new bytes.
 
 ## Imported runtime files
 

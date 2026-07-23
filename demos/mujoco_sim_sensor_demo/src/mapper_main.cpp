@@ -50,28 +50,41 @@ int main(int argc, char** argv) {
     std::cerr << message << '\n';
     return 1;
   }
-  demo::InstallProcessSignalHandlers();
+  if (!demo::InstallProcessSignalHandlers(&message)) {
+    std::cerr << message << '\n';
+    return 1;
+  }
   const auto& config = app_config.mapper;
 
   mujoco_sim::adapter_sdk::ObserverClient observer(config.observer);
   if (!observer.Start(&message) || !observer.Activate(&message)) {
     std::cerr << "mapper observer start failed: " << message << '\n';
-    std::string ignored;
-    observer.Unregister(&ignored);
+    std::string unregister_error;
+    if (!observer.Unregister(&unregister_error)) {
+      std::cerr << "mapper observer cleanup after start failure failed: " << unregister_error
+                << '\n';
+    }
     return 1;
   }
   mujoco_sim::adapter_sdk::SensorStreamClient streams(config.streams);
   if (!streams.Start(&message)) {
     std::cerr << "mapper LiDAR stream start failed: " << message << '\n';
-    std::string ignored;
-    observer.Unregister(&ignored);
+    std::string unregister_error;
+    if (!observer.Unregister(&unregister_error)) {
+      std::cerr << "mapper observer cleanup after stream failure failed: " << unregister_error
+                << '\n';
+    }
     return 1;
   }
   const auto lidar_descriptor = streams.descriptor(config.lidar_stream);
   if (!lidar_descriptor.has_value()) {
     std::cerr << "mapper LiDAR descriptor is missing\n";
-    std::string ignored;
-    observer.Unregister(&ignored);
+    streams.Stop();
+    std::string unregister_error;
+    if (!observer.Unregister(&unregister_error)) {
+      std::cerr << "mapper observer cleanup after descriptor failure failed: " << unregister_error
+                << '\n';
+    }
     return 1;
   }
 
@@ -173,7 +186,7 @@ int main(int argc, char** argv) {
   std::string unregister_error;
   if (!observer.Unregister(&unregister_error)) {
     std::cerr << "mapper observer unregister failed: " << unregister_error << '\n';
-    if (result == 0 && !demo::ProcessStopRequested()) result = 1;
+    result = 1;
   }
   if (mapper.scan_count() > 0) {
     try {

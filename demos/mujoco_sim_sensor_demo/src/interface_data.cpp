@@ -12,10 +12,23 @@ bool Fail(const std::string& message, std::string* error) {
   return false;
 }
 
+bool ValidateDenseInput(std::span<const double> values, std::size_t expected_count,
+                        double simulation_time_s, std::string* error) {
+  if (values.size() != expected_count) {
+    return Fail("observation vector size mismatch: expected " + std::to_string(expected_count) +
+                    ", got " + std::to_string(values.size()),
+                error);
+  }
+  if (!std::isfinite(simulation_time_s) || simulation_time_s < 0.0) {
+    return Fail("simulation timestamp must be finite and non-negative", error);
+  }
+  return true;
+}
+
 template <std::size_t Size>
 bool Copy(std::span<const double> values, mujoco_sim::adapter_sdk::ScalarSpan span,
           const char* name, std::array<double, Size>* output, std::string* error) {
-  if (span.count != Size || span.offset + Size > values.size()) {
+  if (span.count != Size || span.offset > values.size() || Size > values.size() - span.offset) {
     return Fail(std::string("observation layout mismatch for ") + name, error);
   }
   for (std::size_t i = 0; i < Size; ++i) {
@@ -32,13 +45,43 @@ bool ResolveObservation(const mujoco_sim::adapter_sdk::ControllerLayout& layout,
                         const std::string& name, std::size_t count,
                         mujoco_sim::adapter_sdk::ScalarSpan* output, std::string* error) {
   const auto span = layout.Observation(name);
-  if (!span || span->count != count ||
-      span->offset + span->count > layout.observation_scalar_count()) {
+  const std::size_t scalar_count = layout.observation_scalar_count();
+  if (!span || span->count != count || span->offset > scalar_count ||
+      span->count > scalar_count - span->offset) {
     if (error->empty()) *error = "observation layout mismatch for " + name;
     return false;
   }
   *output = *span;
   return true;
+}
+
+template <std::size_t Size>
+void ValidateDenseLayout(const std::array<mujoco_sim::adapter_sdk::ScalarSpan, Size>& spans,
+                         std::size_t expected_resource_count, std::size_t expected_scalar_count,
+                         const mujoco_sim::adapter_sdk::ControllerLayout& layout,
+                         std::string* error) {
+  if (!error->empty()) return;
+  if (layout.observations().size() != expected_resource_count) {
+    *error = "observation layout has an unexpected resource count";
+    return;
+  }
+  if (layout.observation_scalar_count() != expected_scalar_count) {
+    *error = "observation layout has an unexpected scalar count";
+    return;
+  }
+  std::vector<bool> occupied(expected_scalar_count);
+  for (const auto span : spans) {
+    for (std::size_t index = span.offset; index < span.offset + span.count; ++index) {
+      if (occupied[index]) {
+        *error = "observation layout contains overlapping scalar spans";
+        return;
+      }
+      occupied[index] = true;
+    }
+  }
+  if (std::find(occupied.begin(), occupied.end(), false) != occupied.end()) {
+    *error = "observation layout does not cover the dense scalar vector";
+  }
 }
 
 template <std::size_t Size>
@@ -71,13 +114,17 @@ std::vector<std::string> StateObservationNames(const StateObserverInterfaces& in
 }
 
 VehicleDecoder::VehicleDecoder(const mujoco_sim::adapter_sdk::ControllerLayout& layout,
-                               const ControllerInterfaces& interfaces) {
+                               const ControllerInterfaces& interfaces)
+    : scalar_count_(layout.observation_scalar_count()) {
   for (std::size_t i = 0; i < wheel_positions_.size(); ++i) {
     ResolveObservation(layout, interfaces.wheel_positions[i], 1, &wheel_positions_[i],
                        &layout_error_);
   }
   ResolveObservation(layout, interfaces.imu_quaternion, 4, &imu_quaternion_, &layout_error_);
   ResolveObservation(layout, interfaces.imu_angular_velocity, 3, &imu_gyro_, &layout_error_);
+  const std::array spans{wheel_positions_[0], wheel_positions_[1], wheel_positions_[2],
+                         wheel_positions_[3], imu_quaternion_,     imu_gyro_};
+  ValidateDenseLayout(spans, spans.size(), 11, layout, &layout_error_);
 }
 
 bool VehicleDecoder::Decode(const mujoco_sim::adapter_sdk::StateLease& tick, VehicleSample* sample,
@@ -88,7 +135,9 @@ bool VehicleDecoder::Decode(const mujoco_sim::adapter_sdk::StateLease& tick, Veh
 bool VehicleDecoder::Decode(std::span<const double> values, double simulation_time_s,
                             VehicleSample* sample, std::string* error) const {
   if (!sample || !error) return Fail("invalid output arguments", error);
+  error->clear();
   if (!layout_error_.empty()) return Fail(layout_error_, error);
+  if (!ValidateDenseInput(values, scalar_count_, simulation_time_s, error)) return false;
   VehicleSample next;
   next.simulation_time = simulation_time_s;
   for (std::size_t i = 0; i < wheel_positions_.size(); ++i) {
@@ -104,7 +153,8 @@ bool VehicleDecoder::Decode(std::span<const double> values, double simulation_ti
 }
 
 StateDecoder::StateDecoder(const mujoco_sim::adapter_sdk::ControllerLayout& layout,
-                           const StateObserverInterfaces& interfaces) {
+                           const StateObserverInterfaces& interfaces)
+    : scalar_count_(layout.observation_scalar_count()) {
   for (std::size_t i = 0; i < wheel_positions_.size(); ++i) {
     ResolveObservation(layout, interfaces.wheel_positions[i], 1, &wheel_positions_[i],
                        &layout_error_);
@@ -116,6 +166,11 @@ StateDecoder::StateDecoder(const mujoco_sim::adapter_sdk::ControllerLayout& layo
                      &layout_error_);
   ResolveObservation(layout, interfaces.imu_linear_acceleration, 3, &imu_linear_acceleration_,
                      &layout_error_);
+  const std::array spans{wheel_positions_[0],   wheel_positions_[1],     wheel_positions_[2],
+                         wheel_positions_[3],   wheel_velocities_[0],    wheel_velocities_[1],
+                         wheel_velocities_[2],  wheel_velocities_[3],    imu_quaternion_,
+                         imu_angular_velocity_, imu_linear_acceleration_};
+  ValidateDenseLayout(spans, spans.size(), 18, layout, &layout_error_);
 }
 
 bool StateDecoder::Decode(const mujoco_sim::adapter_sdk::ObservationLease& frame,
@@ -126,7 +181,9 @@ bool StateDecoder::Decode(const mujoco_sim::adapter_sdk::ObservationLease& frame
 bool StateDecoder::Decode(std::span<const double> values, double simulation_time_s,
                           StateSample* sample, std::string* error) const {
   if (!sample || !error) return Fail("invalid output arguments", error);
+  error->clear();
   if (!layout_error_.empty()) return Fail(layout_error_, error);
+  if (!ValidateDenseInput(values, scalar_count_, simulation_time_s, error)) return false;
   StateSample next;
   next.simulation_time = simulation_time_s;
   for (std::size_t i = 0; i < wheel_positions_.size(); ++i) {
@@ -148,7 +205,8 @@ bool StateDecoder::Decode(std::span<const double> values, double simulation_time
 }
 
 ImuOrientationDecoder::ImuOrientationDecoder(
-    const mujoco_sim::adapter_sdk::ControllerLayout& layout, const std::string& name) {
+    const mujoco_sim::adapter_sdk::ControllerLayout& layout, const std::string& name)
+    : scalar_count_(layout.observation_scalar_count()) {
   ResolveObservation(layout, name, 4, &quaternion_, &layout_error_);
 }
 
@@ -160,7 +218,9 @@ bool ImuOrientationDecoder::Decode(const mujoco_sim::adapter_sdk::ObservationLea
 bool ImuOrientationDecoder::Decode(std::span<const double> values, double simulation_time_s,
                                    ImuOrientationSample* sample, std::string* error) const {
   if (!sample || !error) return Fail("invalid output arguments", error);
+  error->clear();
   if (!layout_error_.empty()) return Fail(layout_error_, error);
+  if (!ValidateDenseInput(values, scalar_count_, simulation_time_s, error)) return false;
   ImuOrientationSample next;
   next.simulation_time = simulation_time_s;
   if (!Copy(values, quaternion_, "IMU quaternion", &next.quaternion, error)) return false;
@@ -171,6 +231,11 @@ bool ImuOrientationDecoder::Decode(std::span<const double> values, double simula
 WheelCommandMapper::WheelCommandMapper(const mujoco_sim::adapter_sdk::ControllerLayout& layout,
                                        const ControllerInterfaces& interfaces)
     : scalar_count_(layout.command_scalar_count()) {
+  if (layout.commands().size() != offsets_.size() || scalar_count_ != offsets_.size()) {
+    layout_error_ = "command layout must contain exactly four scalar resources";
+    return;
+  }
+  std::array<bool, 4> occupied{};
   for (std::size_t i = 0; i < offsets_.size(); ++i) {
     const auto span = layout.Command(interfaces.wheel_velocity_commands[i]);
     if (!span || span->count != 1 || span->offset >= scalar_count_) {
@@ -180,12 +245,18 @@ WheelCommandMapper::WheelCommandMapper(const mujoco_sim::adapter_sdk::Controller
       continue;
     }
     offsets_[i] = span->offset;
+    if (occupied[offsets_[i]]) {
+      if (layout_error_.empty()) layout_error_ = "command layout contains overlapping spans";
+      continue;
+    }
+    occupied[offsets_[i]] = true;
   }
 }
 
 bool WheelCommandMapper::Map(const std::array<double, 4>& velocities, std::vector<double>* commands,
                              std::string* error) const {
   if (!commands || !error) return Fail("invalid output arguments", error);
+  error->clear();
   if (!layout_error_.empty()) return Fail(layout_error_, error);
   std::vector<double> next(scalar_count_);
   for (std::size_t i = 0; i < velocities.size(); ++i) {

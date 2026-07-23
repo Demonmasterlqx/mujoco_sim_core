@@ -7,9 +7,9 @@
   <license>Apache-2.0</license>
 
   <buildtool_depend>cmake</buildtool_depend>
-  <build_depend>protobuf</build_depend>
-  <exec_depend>protobuf</exec_depend>
-  <test_depend>gtest</test_depend>
+  <depend>libprotobuf-dev</depend>
+  <build_depend>protobuf-compiler</build_depend>
+  <test_depend>libgtest-dev</test_depend>
 
   <export>
     <build_type>cmake</build_type>

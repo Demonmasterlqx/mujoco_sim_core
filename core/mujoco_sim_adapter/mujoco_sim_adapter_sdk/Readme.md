@@ -4,6 +4,17 @@ The Adapter SDK provides Protocol V4 clients for asynchronous Controllers,
 Observers, and Sensor streams. Public APIs expose domain DTOs, immutable leases,
 spans, and dense scalar arrays rather than generated Protobuf types.
 
+Lifecycle operations are serialized by a short-lock admission gate. The gate's
+mutex is released before RPC, transport publication, callback teardown, or
+thread joins begin. `Stop()` publishes cancellation state before waiting for an
+in-progress lifecycle operation, so bounded RPC loops and blocking reads can
+observe shutdown without acquiring the lifecycle gate.
+
+Sensor callbacks for one stream never overlap. If another frame arrives while
+that stream's user callback is still running, the new frame is dropped and
+included in `dropped_samples()` instead of blocking a transport thread or
+building an unbounded callback backlog.
+
 ## Controller
 
 ```cpp
@@ -39,9 +50,11 @@ reads permit one user thread and `SetCommand()` permits one control thread.
 `SetCommand()` validates exact scalar count, finite values, and registered
 ranges before replacing the depth-1 latest-command mailbox. A publisher thread
 sends each new generation and republishes the latest value at the granted
-keepalive cadence. A failed send retains the same sequence and bytes for retry;
-newer mailbox generations remain pending until that retry succeeds. Controllers
-do not send session heartbeats.
+keepalive cadence. A plain transport rejection retains the same sequence and
+bytes for retry; newer mailbox generations remain pending until that retry
+succeeds. A structured serialization, endpoint, or eCAL error is terminal and
+is returned by subsequent State reads instead of being retried indefinitely.
+Controllers do not send session heartbeats.
 
 The registration response supplies the Server-granted command timeout,
 keepalive, State cadence, control policies, and offline expiry. `Stop()` wakes
@@ -51,15 +64,20 @@ reception; it preserves session identity after a failed RPC so the call can be
 retried. Destruction attempts both local shutdown and best-effort unregister.
 `ReportFault()` publishes one of `kControllerError`, `kInvalidOutput`, or
 `kInternalControllerError`; an accepted fault makes the current Server session
-terminal `ERROR`. A received `ERROR`/`UNREGISTERED` status, or disappearance of
-a session after it has appeared in status, terminates subsequent State waits.
+terminal `ERROR`. Rejection or a structured transport failure is returned to
+the `ReportFault()` caller with its contextual diagnostic. A received
+`ERROR`/`UNREGISTERED` status, or disappearance of a session after it has
+appeared in status, terminates subsequent State waits.
 
 `Start()` registers and starts State/status reception but does not activate the
 session. `Activate()` starts Server-side liveness and the Command publisher;
 `SetCommand()` is rejected before activation. Activation does not synthesize
 State: the first lease is produced by the next completed Step for which the
-Server-granted cadence is due. A client is single-use and cannot be restarted
-after `Stop()` or successful `Unregister()`.
+Server-granted cadence is due. If the Server accepts activation but local
+cancellation or publisher-thread creation prevents local completion, the SDK
+stops local reception and attempts a compensating unregister. A failed cleanup
+keeps the session identity so `Unregister()` can retry it. A client is
+single-use and cannot be restarted after `Stop()` or successful `Unregister()`.
 
 ## Observer and Sensor streams
 
@@ -68,6 +86,9 @@ semantics. `ObserverClient::Start()` registers and begins reception and
 heartbeat, `Activate()` transitions the provisional session to `ONLINE`, and
 `Unregister()` provides retryable remote cleanup. `ObservationLease` includes
 sequence, completed-step tick, simulation time, and dense observations.
+An ordinary heartbeat rejection is recorded by `lifecycle_warning()` and
+retried at the next cadence; serialization, missing-endpoint, and eCAL errors
+are terminal and wake observation waiters with `kError`.
 
 Sensor clients do not create an Adapter session. They discover V4 stream
 descriptors and receive raw payloads with the separate `MJSTREAM` 1.0 framing

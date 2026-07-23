@@ -5,7 +5,10 @@
 #include <atomic>
 #include <cmath>
 #include <condition_variable>
+#include <functional>
+#include <limits>
 #include <mutex>
+#include <stdexcept>
 #include <thread>
 #include <utility>
 #include <mujoco_sim/protocol/data_frame.hpp>
@@ -15,7 +18,10 @@
 #include <mujoco_sim/v4/sync.pb.h>
 #include "ecal_runtime.hpp"
 #include "internal/adapter_transport.hpp"
+#include "internal/callback_boundary.hpp"
+#include "internal/callback_gate.hpp"
 #include "internal/controller_client_test_peer.hpp"
+#include "internal/lifecycle_operation.hpp"
 namespace mujoco_sim::adapter_sdk {
 namespace {
 std::uint64_t Word(std::string_view b, std::size_t o) {
@@ -46,6 +52,10 @@ bool ValidFault(FaultCode c) {
   return c == FaultCode::kControllerError || c == FaultCode::kInvalidOutput ||
          c == FaultCode::kInternalControllerError;
 }
+bool UnregisterCompleted(mujoco_sim::v4::ErrorCode code) {
+  return code == mujoco_sim::v4::OK || code == mujoco_sim::v4::NOT_FOUND ||
+         code == mujoco_sim::v4::INVALID_SESSION;
+}
 }  // namespace
 struct StateLease::Data {
   mujoco_sim::protocol::DataFrameHeader header;
@@ -74,7 +84,10 @@ StateLease::operator bool() const noexcept {
 class ControllerClient::Impl : public std::enable_shared_from_this<Impl> {
  public:
   friend class ControllerClientTestPeer;
-  explicit Impl(ControllerOptions o) : options(std::move(o)) {}
+  explicit Impl(ControllerOptions o)
+      : options(std::move(o)), callback_state(std::make_shared<CallbackState>()) {
+    callback_state->client = this;
+  }
   ~Impl() {
     Stop();
     JoinPublisher();
@@ -148,7 +161,7 @@ class ControllerClient::Impl : public std::enable_shared_from_this<Impl> {
   }
   bool Start(std::string* e) {
     if (!e) return false;
-    std::lock_guard life(lifecycle);
+    auto life = lifecycle.Acquire();
     e->clear();
     if (started || remote_registered || stop) {
       *e = "controller client cannot be started";
@@ -157,8 +170,18 @@ class ControllerClient::Impl : public std::enable_shared_from_this<Impl> {
     if (!Validate(e)) return false;
     runtime = internal::AcquireEcalRuntime("mujoco-sim-controller-" + options.adapter_id, e);
     if (!runtime) return false;
-    transport = internal::MakeEcalAdapterTransport(options.server_name, options.service_timeout_ms,
-                                                   &stop, true);
+    try {
+      if (!transport) {
+        transport = internal::MakeEcalAdapterTransport(options.server_name,
+                                                       options.service_timeout_ms, &stop, true);
+      }
+    } catch (const std::exception& exception) {
+      *e = std::string("failed to create Controller transport: ") + exception.what();
+      return false;
+    } catch (...) {
+      *e = "failed to create Controller transport: unknown exception";
+      return false;
+    }
     if (!transport->Register(RegistrationRequest(), &wire, e) ||
         wire.code() != mujoco_sim::v4::OK) {
       if (e->empty()) *e = wire.message();
@@ -166,12 +189,36 @@ class ControllerClient::Impl : public std::enable_shared_from_this<Impl> {
     }
     remote_registered = true;
     unregistered = false;
-    if (!AcceptRegistration(e) || !StartReception(e)) {
+    return FinishStart(e);
+  }
+  bool FinishStart(std::string* e) {
+    if (!AcceptRegistration(e)) {
+      CompensateRegistration(e);
+      return false;
+    }
+    if (stop) {
+      *e = "controller start was cancelled";
+      CompensateRegistration(e);
+      return false;
+    }
+    if (!StartReception(e)) {
       StopReception();
       CompensateRegistration(e);
       return false;
     }
-    started = true;
+    {
+      std::lock_guard lock(mutex);
+      if (stop) {
+        *e = "controller start was cancelled";
+      } else {
+        started = true;
+      }
+    }
+    if (!e->empty()) {
+      StopReception();
+      CompensateRegistration(e);
+      return false;
+    }
     return true;
   }
   void CompensateRegistration(std::string* e) {
@@ -181,7 +228,7 @@ class ControllerClient::Impl : public std::enable_shared_from_this<Impl> {
     req.set_epoch(wire.epoch());
     mujoco_sim::v4::UnregisterAdapterResponse res;
     std::string cleanup_error;
-    if (transport->Unregister(req, &res, &cleanup_error) && res.code() == mujoco_sim::v4::OK) {
+    if (transport->Unregister(req, &res, &cleanup_error) && UnregisterCompleted(res.code())) {
       remote_registered = false;
       unregistered = true;
     } else {
@@ -189,44 +236,96 @@ class ControllerClient::Impl : public std::enable_shared_from_this<Impl> {
       *e = cause + "; compensating unregister failed: " + cleanup_error;
     }
   }
+  void AbortActivation(std::string* e) {
+    StopLocal();
+    CompensateRegistration(e);
+    StopReception();
+  }
   bool StartReception(std::string* e) {
     try {
+      {
+        std::lock_guard callback_lock(callback_state->mutex);
+        callback_state->client = this;
+        callback_state->enabled = true;
+      }
+      const auto state = callback_state;
       auto weak = weak_from_this();
       state_sub = std::make_unique<eCAL::CSubscriber>(
           mujoco_sim::protocol::ControllerStateTopicName(options.server_name, options.adapter_id));
-      state_sub->SetReceiveCallback([weak](const eCAL::STopicId&, const eCAL::SDataTypeInformation&,
-                                           const eCAL::SReceiveCallbackData& d) {
-        if (auto self = weak.lock()) self->OnState(d.buffer, d.buffer_size);
+      state_sub->SetReceiveCallback([state, weak](const eCAL::STopicId&,
+                                                  const eCAL::SDataTypeInformation&,
+                                                  const eCAL::SReceiveCallbackData& d) noexcept {
+        internal::InvokeCallbackBoundary(
+            [&] {
+              const auto self = weak.lock();
+              if (!self) return;
+              CallbackLease callback(state);
+              if (callback.client() != nullptr) self->OnState(d.buffer, d.buffer_size);
+            },
+            [&](const char* message) {
+              if (const auto self = weak.lock()) {
+                self->SetTerminalError(std::string("controller state callback failed: ") + message);
+              }
+            });
       });
       status_sub = std::make_unique<eCAL::CSubscriber>(
           mujoco_sim::protocol::StatusTopicName(options.server_name));
-      status_sub->SetReceiveCallback([weak](const eCAL::STopicId&,
-                                            const eCAL::SDataTypeInformation&,
-                                            const eCAL::SReceiveCallbackData& d) {
-        if (auto self = weak.lock()) self->OnStatus(d.buffer, d.buffer_size);
+      status_sub->SetReceiveCallback([state, weak](const eCAL::STopicId&,
+                                                   const eCAL::SDataTypeInformation&,
+                                                   const eCAL::SReceiveCallbackData& d) noexcept {
+        internal::InvokeCallbackBoundary(
+            [&] {
+              const auto self = weak.lock();
+              if (!self) return;
+              CallbackLease callback(state);
+              if (callback.client() != nullptr) self->OnStatus(d.buffer, d.buffer_size);
+            },
+            [&](const char* message) {
+              if (const auto self = weak.lock()) {
+                self->SetTerminalError(std::string("controller status callback failed: ") +
+                                       message);
+              }
+            });
       });
       return true;
     } catch (const std::exception& x) {
       *e = x.what();
       return false;
+    } catch (...) {
+      *e = "failed to create Controller receive endpoints: unknown exception";
+      return false;
     }
   }
-  void StopReception() {
+  void StopReception() noexcept {
+    CallbackGate::Disable(callback_state);
+    const auto remove_callback = [this](auto& subscriber, const char* endpoint) {
+      if (!subscriber) return;
+      internal::InvokeCallbackBoundary([&] { subscriber->RemoveReceiveCallback(); },
+                                       [this, endpoint](const char* message) {
+                                         SetTerminalError(std::string("failed to remove ") +
+                                                          endpoint +
+                                                          " receive callback: " + message);
+                                       });
+    };
     if (state_sub) {
-      state_sub->RemoveReceiveCallback();
-      state_sub.reset();
+      remove_callback(state_sub, "controller state");
     }
     if (status_sub) {
-      status_sub->RemoveReceiveCallback();
-      status_sub.reset();
+      remove_callback(status_sub, "controller status");
     }
+    CallbackGate::WaitForOtherCallbacks(callback_state);
+    state_sub.reset();
+    status_sub.reset();
   }
   bool Activate(std::string* e) {
     if (!e) return false;
-    std::lock_guard life(lifecycle);
-    if (!started || active || stop) {
-      *e = "controller client is not ready to activate";
-      return false;
+    auto life = lifecycle.Acquire();
+    {
+      std::lock_guard lock(mutex);
+      if (!started || active || stop) {
+        *e = "controller client is not ready to activate";
+        return false;
+      }
     }
     mujoco_sim::v4::ActivateAdapterRequest req;
     req.set_session_id(registration.session_id);
@@ -237,11 +336,32 @@ class ControllerClient::Impl : public std::enable_shared_from_this<Impl> {
       if (e->empty()) *e = res.message();
       return false;
     }
+    bool cancelled = false;
     {
       std::lock_guard lock(mutex);
-      active = true;
+      if (stop) {
+        *e = "controller activation was cancelled";
+        cancelled = true;
+      } else {
+        active = true;
+      }
     }
-    publisher = std::thread([this] { PublishLoop(); });
+    if (cancelled) {
+      AbortActivation(e);
+      return false;
+    }
+    try {
+      if (before_publisher_start) before_publisher_start();
+      publisher = std::thread([this] { RunPublishLoop(); });
+    } catch (const std::exception& exception) {
+      *e = std::string("failed to start Controller publisher: ") + exception.what();
+      AbortActivation(e);
+      return false;
+    } catch (...) {
+      *e = "failed to start Controller publisher: unknown exception";
+      AbortActivation(e);
+      return false;
+    }
     return true;
   }
   bool StateReady(bool require_new) const {
@@ -330,7 +450,7 @@ class ControllerClient::Impl : public std::enable_shared_from_this<Impl> {
       if (e) *e = "invalid fault";
       return false;
     }
-    std::lock_guard life(lifecycle);
+    auto life = lifecycle.Acquire();
     {
       std::lock_guard lock(mutex);
       if (!started || !active || unregistered || stop || !terminal.empty()) {
@@ -343,11 +463,20 @@ class ControllerClient::Impl : public std::enable_shared_from_this<Impl> {
     fault.set_epoch(registration.epoch);
     fault.set_code(WireFault(code));
     fault.set_message(std::string(message));
-    if (!transport || !transport->PublishFault(fault)) {
-      *e = "failed to publish ControllerFault";
+    if (!transport) {
+      *e = "failed to publish ControllerFault: transport is unavailable";
       return false;
     }
-    return true;
+    const auto result = transport->PublishFault(fault);
+    if (!result.error.empty()) {
+      *e = "failed to publish ControllerFault: " + result.error;
+      return false;
+    }
+    if (!result.sent) {
+      *e = "failed to publish ControllerFault: eCAL rejected the payload";
+      return false;
+    }
+    return result.sent;
   }
   void PublishLoop() {
     std::unique_lock lock(mutex);
@@ -378,9 +507,13 @@ class ControllerClient::Impl : public std::enable_shared_from_this<Impl> {
       }
       auto bytes = pending;
       lock.unlock();
-      const bool sent = transport->PublishCommand(bytes);
+      const auto result = transport->PublishCommand(bytes);
+      if (!result.error.empty()) {
+        SetTerminalError("failed to publish ControllerCommand: " + result.error);
+        return;
+      }
       lock.lock();
-      if (sent) {
+      if (result.sent) {
         pending.clear();
         sent_generation = pending_generation;
         next = Clock::now() + keepalive;
@@ -388,6 +521,22 @@ class ControllerClient::Impl : public std::enable_shared_from_this<Impl> {
         condition.wait_for(lock, std::chrono::milliseconds(10), [&] { return stop.load(); });
       }
     }
+  }
+  void RunPublishLoop() noexcept {
+    internal::InvokeCallbackBoundary(
+        [this] { PublishLoop(); },
+        [this](const char* message) {
+          SetTerminalError(std::string("Controller publisher thread failed: ") + message);
+        });
+  }
+  void SetTerminalError(std::string message) {
+    {
+      std::lock_guard lock(mutex);
+      active = false;
+      if (terminal.empty()) terminal = std::move(message);
+    }
+    stop = true;
+    condition.notify_all();
   }
   void OnState(const void* data, std::size_t size) {
     if (!data || !size) return;
@@ -411,7 +560,8 @@ class ControllerClient::Impl : public std::enable_shared_from_this<Impl> {
   }
   void OnStatus(const void* data, std::size_t size) {
     mujoco_sim::v4::ServerStatus status;
-    if (!data || !size || !status.ParseFromArray(data, static_cast<int>(size)) ||
+    if (!data || !size || size > static_cast<std::size_t>(std::numeric_limits<int>::max()) ||
+        !status.ParseFromArray(data, static_cast<int>(size)) ||
         status.epoch() != registration.epoch)
       return;
     bool found = false;
@@ -441,8 +591,8 @@ class ControllerClient::Impl : public std::enable_shared_from_this<Impl> {
     condition.notify_all();
   }
   void Stop() {
-    std::lock_guard life(lifecycle);
     StopLocal();
+    auto life = lifecycle.Acquire();
     JoinPublisher();
     StopReception();
   }
@@ -451,13 +601,13 @@ class ControllerClient::Impl : public std::enable_shared_from_this<Impl> {
   }
   bool Unregister(std::string* e) {
     if (!e) return false;
-    std::lock_guard life(lifecycle);
+    auto life = lifecycle.Acquire();
     if (!remote_registered || unregistered) return true;
     mujoco_sim::v4::UnregisterAdapterRequest req;
     req.set_session_id(wire.session_id());
     req.set_epoch(wire.epoch());
     mujoco_sim::v4::UnregisterAdapterResponse res;
-    if (!transport->Unregister(req, &res, e) || res.code() != mujoco_sim::v4::OK) {
+    if (!transport->Unregister(req, &res, e) || !UnregisterCompleted(res.code())) {
       if (e->empty()) *e = res.message();
       return false;
     }
@@ -476,10 +626,16 @@ class ControllerClient::Impl : public std::enable_shared_from_this<Impl> {
   std::chrono::milliseconds keepalive{100};
   std::shared_ptr<internal::AdapterTransport> transport;
   std::shared_ptr<void> runtime;
+  using CallbackGate = internal::CallbackGate<Impl>;
+  using CallbackState = CallbackGate::State;
+  using CallbackLease = CallbackGate::Lease;
+  std::shared_ptr<CallbackState> callback_state;
   std::unique_ptr<eCAL::CSubscriber> state_sub, status_sub;
-  std::mutex lifecycle, mutex;
+  internal::LifecycleOperation lifecycle;
+  std::mutex mutex;
   std::condition_variable condition;
   std::thread publisher;
+  std::function<void()> before_publisher_start;
   std::atomic<bool> stop{false};
   bool started = false, active = false, remote_registered = false, unregistered = false,
        waiting = false, seen_status = false;
@@ -572,23 +728,44 @@ void ControllerClientTestPeer::HandleState(ControllerClient* client, std::uint64
 
 void ControllerClientTestPeer::StartPublisher(ControllerClient* client) {
   auto& impl = *client->impl_;
-  std::lock_guard lifecycle_lock(impl.lifecycle);
+  auto lifecycle_operation = impl.lifecycle.Acquire();
   if (!impl.publisher.joinable()) {
-    impl.publisher = std::thread([&impl] { impl.PublishLoop(); });
+    impl.publisher = std::thread([&impl] { impl.RunPublishLoop(); });
   }
 }
 
 void ControllerClientTestPeer::EnableRemoteRegistration(ControllerClient* client) {
   auto& impl = *client->impl_;
-  std::lock_guard lifecycle_lock(impl.lifecycle);
+  auto lifecycle_operation = impl.lifecycle.Acquire();
   impl.wire.set_session_id(impl.registration.session_id);
   impl.wire.set_epoch(impl.registration.epoch);
   impl.remote_registered = true;
   impl.unregistered = false;
 }
 
+void ControllerClientTestPeer::FailPublisherStart(ControllerClient* client) {
+  auto& impl = *client->impl_;
+  auto lifecycle_operation = impl.lifecycle.Acquire();
+  impl.before_publisher_start = [] {
+    throw std::runtime_error("injected publisher thread creation failure");
+  };
+}
+
 bool ControllerClientTestPeer::IsWaiting(ControllerClient* client) {
   std::lock_guard lock(client->impl_->mutex);
   return client->impl_->waiting;
+}
+
+void ControllerClientTestPeer::PrepareActivation(ControllerClient* client) {
+  auto& impl = *client->impl_;
+  auto lifecycle_operation = impl.lifecycle.Acquire();
+  std::lock_guard lock(impl.mutex);
+  impl.started = true;
+  impl.active = false;
+  impl.stop = false;
+}
+
+bool ControllerClientTestPeer::StopRequested(ControllerClient* client) {
+  return client->impl_->stop.load();
 }
 }  // namespace mujoco_sim::adapter_sdk

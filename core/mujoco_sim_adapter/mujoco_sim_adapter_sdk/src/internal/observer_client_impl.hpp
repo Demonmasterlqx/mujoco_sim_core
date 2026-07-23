@@ -15,6 +15,7 @@
 #include "adapter_transport.hpp"
 #include "blocking_mailbox.hpp"
 #include "callback_gate.hpp"
+#include "lifecycle_operation.hpp"
 
 namespace mujoco_sim::adapter_sdk {
 
@@ -45,6 +46,27 @@ class ObserverClient::Impl : public std::enable_shared_from_this<Impl> {
   bool StartObservationReception(std::string* error_message);
   bool StartHeartbeat(std::string* error_message);
   void AbortStart();
+
+  /**
+   * @brief Rolls back a remotely accepted activation that cannot be committed locally.
+   *
+   * Local cancellation is published first, then the heartbeat thread and receive
+   * callbacks are drained before the remote session is unregistered. A failed
+   * compensating unregister preserves the session identity for an explicit retry
+   * and appends its diagnostic to error_message.
+   *
+   * 回滚已被远端接受、但无法在本地提交的激活操作。
+   *
+   * 本函数先发布本地取消状态，再等待心跳线程退出并清空接收回调，最后注销远端会话。
+   * 补偿注销失败时会保留会话标识以供显式重试，并将诊断附加到 error_message。
+   *
+   * @param error_message Non-null activation diagnostic updated on cleanup failure.
+   *                      非空的激活诊断；清理失败时会更新该诊断。
+   * @par Thread safety / 线程安全
+   * The caller must own lifecycle-operation admission and no project mutex may be held.
+   * 调用方必须持有生命周期操作准入权，且不得持有项目互斥锁。
+   */
+  void AbortActivation(std::string* error_message);
   bool Register(std::string* error_message);
   bool FinishStart(std::string* error_message);
   bool WaitBeforeActivation(std::chrono::milliseconds delay);
@@ -57,9 +79,47 @@ class ObserverClient::Impl : public std::enable_shared_from_this<Impl> {
   void HandleStatusBytes(const void* data, std::size_t size);
   void HandleObservation(std::shared_ptr<const ObservationLease::Data> frame);
   void SetTerminalError(const std::string& error);
-  void StopObservationReception();
-  void StartHeartbeatThread();
+
+  /**
+   * @brief Records a non-terminal lifecycle diagnostic without duplicating it.
+   *        记录非终止生命周期诊断，并避免重复记录。
+   * @param warning Contextual diagnostic text. 带上下文的诊断文本。
+   * @par Thread safety / 线程安全
+   * May be called by the heartbeat thread.
+   * 可由心跳线程调用。
+   */
+  void RecordLifecycleWarning(const std::string& warning);
+  /**
+   * @brief Disables reception, removes eCAL callbacks, and drains active callbacks.
+   *        禁用接收、移除 eCAL 回调并等待活动回调退出。
+   *
+   * eCAL teardown exceptions are retained as non-terminal lifecycle warnings.
+   * eCAL 拆除异常会保存为非终止生命周期警告。
+   */
+  void StopObservationReception() noexcept;
+
+  /**
+   * @brief Starts the owned heartbeat thread unless cancellation was requested.
+   *        在尚未请求取消时启动持有的心跳线程。
+   *
+   * @return true if the thread is running; false if startup was cancelled.
+   *         线程正在运行时返回 true；启动已取消时返回 false。
+   * @par Thread safety / 线程安全
+   * Serializes heartbeat-thread ownership internally.
+   * 在内部串行化心跳线程所有权。
+   */
+  bool StartHeartbeatThread();
   void JoinHeartbeatThread();
+
+  /**
+   * @brief Runs the heartbeat thread entry and converts exceptions into a terminal client error.
+   *        运行心跳线程入口，并将异常转换为客户端终止错误。
+   *
+   * @par Thread safety / 线程安全
+   * This function is called only by the owned heartbeat thread.
+   * 本函数仅由持有的心跳线程调用。
+   */
+  void RunHeartbeatLoop() noexcept;
   void HeartbeatLoop();
   mujoco_sim::v4::SessionHeartbeat BuildHeartbeat() const;
 
@@ -75,7 +135,7 @@ class ObserverClient::Impl : public std::enable_shared_from_this<Impl> {
   std::unique_ptr<eCAL::CSubscriber> observation_subscriber_;
   std::unique_ptr<eCAL::CSubscriber> status_subscriber_;
   std::shared_ptr<CallbackState> callback_state_;
-  std::mutex lifecycle_mutex_;
+  internal::LifecycleOperation lifecycle_;
   std::mutex heartbeat_thread_mutex_;
   mutable std::mutex mutex_;
   std::condition_variable condition_;

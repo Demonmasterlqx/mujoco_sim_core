@@ -5,13 +5,12 @@
 namespace mujoco_sim::server {
 
 ControllerCommandInbox::RegistrationReservation::RegistrationReservation(
-    ControllerCommandInbox* owner, std::unique_lock<std::mutex> lock, bool controller_slot)
-    : owner_(owner), lock_(std::move(lock)), controller_slot_(controller_slot) {}
+    ControllerCommandInbox* owner, bool controller_slot)
+    : owner_(owner), controller_slot_(controller_slot) {}
 
 ControllerCommandInbox::RegistrationReservation::RegistrationReservation(
     RegistrationReservation&& other) noexcept
     : owner_(std::exchange(other.owner_, nullptr)),
-      lock_(std::move(other.lock_)),
       controller_slot_(std::exchange(other.controller_slot_, false)) {}
 
 ControllerCommandInbox::RegistrationReservation&
@@ -19,7 +18,6 @@ ControllerCommandInbox::RegistrationReservation::operator=(
     RegistrationReservation&& other) noexcept {
   if (this != &other) {
     Reset();
-    lock_ = std::move(other.lock_);
     owner_ = std::exchange(other.owner_, nullptr);
     controller_slot_ = std::exchange(other.controller_slot_, false);
   }
@@ -31,9 +29,11 @@ ControllerCommandInbox::RegistrationReservation::~RegistrationReservation() {
 }
 
 void ControllerCommandInbox::RegistrationReservation::Reset() noexcept {
-  if (owner_ && controller_slot_) {
-    owner_->slots_.erase(kReservedSessionId);
-  }
+  if (!owner_) return;
+  std::lock_guard lock(owner_->mutex_);
+  if (controller_slot_) owner_->slots_.erase(kReservedSessionId);
+  --owner_->active_registrations_;
+  owner_->registration_condition_.notify_all();
   owner_ = nullptr;
   controller_slot_ = false;
 }
@@ -41,26 +41,36 @@ void ControllerCommandInbox::RegistrationReservation::Reset() noexcept {
 bool ControllerCommandInbox::RegistrationReservation::Commit(
     std::uint64_t session_id, std::uint64_t epoch,
     std::span<const std::uint64_t> removed_sessions) {
-  if (!owner_ || session_id == kReservedSessionId) {
+  if (!owner_) return false;
+  if (session_id == kReservedSessionId) {
+    Reset();
     return false;
   }
+  std::lock_guard lock(owner_->mutex_);
+  bool committed = true;
   if (controller_slot_) {
     auto node = owner_->slots_.extract(kReservedSessionId);
     if (node.empty()) {
-      return false;
+      committed = false;
+    } else {
+      node.key() = session_id;
+      if (!owner_->slots_.insert(std::move(node)).inserted) {
+        committed = false;
+      } else {
+        owner_->slots_.at(session_id).epoch = epoch;
+      }
     }
-    node.key() = session_id;
-    if (!owner_->slots_.insert(std::move(node)).inserted) {
-      return false;
+  }
+  if (committed) {
+    for (const auto removed_session : removed_sessions) {
+      owner_->slots_.erase(removed_session);
     }
-    owner_->slots_.at(session_id).epoch = epoch;
   }
-  for (const auto removed_session : removed_sessions) {
-    owner_->slots_.erase(removed_session);
-  }
+  --owner_->active_registrations_;
+  owner_->registration_condition_.notify_all();
   owner_ = nullptr;
-  lock_.unlock();
-  return true;
+  controller_slot_ = false;
+  return committed;
 }
 
 ControllerCommandInbox::RegistrationReservation ControllerCommandInbox::PrepareRegistration(
@@ -72,7 +82,8 @@ ControllerCommandInbox::RegistrationReservation ControllerCommandInbox::PrepareR
   if (controller_slot && !slots_.try_emplace(kReservedSessionId).second) {
     return {};
   }
-  return {this, std::move(lock), controller_slot};
+  ++active_registrations_;
+  return {this, controller_slot};
 }
 
 bool ControllerCommandInbox::Register(std::uint64_t session_id, std::uint64_t epoch) {
@@ -140,9 +151,15 @@ std::vector<mujoco_sim::core::ControllerFault> ControllerCommandInbox::DrainFaul
   return output;
 }
 
-void ControllerCommandInbox::Close() {
+void ControllerCommandInbox::RequestClose() {
   std::lock_guard lock(mutex_);
   closed_ = true;
+}
+
+void ControllerCommandInbox::Close() {
+  std::unique_lock lock(mutex_);
+  closed_ = true;
+  registration_condition_.wait(lock, [this] { return active_registrations_ == 0; });
   slots_.clear();
 }
 

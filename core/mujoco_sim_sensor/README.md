@@ -15,7 +15,11 @@ exactly one vertical-angle mode (an explicit angle list or a sampled FOV).
 Offscreen rendering selects surfaceless EGL, EGL pbuffer, then OSMesa when the
 backend preference is automatic. MuJoCo's OpenGL dispatch is process-global,
 so after the first renderer selects EGL or OSMesa, the same process cannot
-switch to the other platform family.
+switch to the other platform family. Renderer creation therefore holds one
+process-global platform mutex across backend selection, native context setup,
+and MuJoCo render-context initialization. This is the deliberate exception to
+the rule against holding project locks while calling third-party APIs; capture
+and renderer destruction do not use that lock.
 
 The Server maps captured buffers into the independent `MJSTREAM` 1.0 Sensor
 stream framing. This stream is not a Protocol V4 `MJDATA4` frame: its header is
@@ -30,7 +34,11 @@ wait up to one sample period for lazy capture to begin.
 epoch/tick/time/sequence metadata. It returns a Protobuf
 `StreamFrameHeader` plus raw payload bytes; transport serialization and queue
 ownership remain Server responsibilities. The source must be used with the
-same model instance from which it was created.
+same model instance from which it was created. A renderer and its native
+context must not be captured from multiple threads concurrently; separate
+renderer instances may run on separate Sensor workers. Diagnostic string
+pointers are optional, and failure is still reported through the boolean or
+null return value when no diagnostic destination is supplied.
 
 ## Build and test
 

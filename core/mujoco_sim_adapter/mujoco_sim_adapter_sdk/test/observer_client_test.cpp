@@ -3,7 +3,10 @@
 #include <chrono>
 #include <future>
 #include <memory>
+#include <mutex>
+#include <stdexcept>
 #include <string>
+#include <thread>
 
 #include <mujoco_sim/adapter_sdk/observer_client.hpp>
 #include <mujoco_sim/protocol/data_frame.hpp>
@@ -20,25 +23,94 @@ class FakeObserverTransport final : public internal::AdapterTransport {
   }
   bool Activate(const mujoco_sim::v4::ActivateAdapterRequest&,
                 mujoco_sim::v4::ActivateAdapterResponse* response, std::string*) override {
+    std::unique_lock lock(mutex_);
+    activate_entered_ = true;
+    heartbeat_condition_.notify_all();
+    heartbeat_condition_.wait(lock, [this] { return !block_activate_; });
     response->set_code(mujoco_sim::v4::OK);
     return true;
   }
   bool Unregister(const mujoco_sim::v4::UnregisterAdapterRequest& request,
                   mujoco_sim::v4::UnregisterAdapterResponse* response, std::string*) override {
+    std::lock_guard lock(mutex_);
+    ++unregister_calls_;
     last_unregister = request;
     response->set_code(unregister_code);
     return unregister_transport_ok;
   }
-  bool PublishCommand(std::string_view) override { return false; }
-  bool PublishFault(const mujoco_sim::v4::ControllerFault&) override { return false; }
-  void PublishHeartbeat(const mujoco_sim::v4::SessionHeartbeat& heartbeat) override {
+  internal::PublishResult PublishCommand(std::string_view) override { return {false, {}}; }
+  internal::PublishResult PublishFault(const mujoco_sim::v4::ControllerFault&) override {
+    return {false, {}};
+  }
+  internal::PublishResult PublishHeartbeat(
+      const mujoco_sim::v4::SessionHeartbeat& heartbeat) override {
+    std::lock_guard lock(mutex_);
     last_heartbeat = heartbeat;
+    heartbeat_published_ = true;
+    heartbeat_condition_.notify_all();
+    if (throw_on_heartbeat_) throw std::runtime_error("injected heartbeat publish failure");
+    return {heartbeat_publish_result_, heartbeat_error_};
+  }
+
+  void ThrowOnHeartbeat() {
+    std::lock_guard lock(mutex_);
+    throw_on_heartbeat_ = true;
+  }
+
+  void RejectHeartbeat() {
+    std::lock_guard lock(mutex_);
+    heartbeat_publish_result_ = false;
+  }
+
+  void FailHeartbeat(std::string error) {
+    std::lock_guard lock(mutex_);
+    heartbeat_error_ = std::move(error);
+  }
+
+  bool WaitForHeartbeat(std::chrono::milliseconds timeout) {
+    std::unique_lock lock(mutex_);
+    return heartbeat_condition_.wait_for(lock, timeout, [this] { return heartbeat_published_; });
+  }
+
+  void BlockActivate() {
+    std::lock_guard lock(mutex_);
+    block_activate_ = true;
+    activate_entered_ = false;
+  }
+
+  bool WaitForActivate(std::chrono::milliseconds timeout) {
+    std::unique_lock lock(mutex_);
+    return heartbeat_condition_.wait_for(lock, timeout, [this] { return activate_entered_; });
+  }
+
+  void ReleaseActivate() {
+    {
+      std::lock_guard lock(mutex_);
+      block_activate_ = false;
+    }
+    heartbeat_condition_.notify_all();
+  }
+
+  std::size_t UnregisterCalls() const {
+    std::lock_guard lock(mutex_);
+    return unregister_calls_;
   }
 
   bool unregister_transport_ok = true;
   mujoco_sim::v4::ErrorCode unregister_code = mujoco_sim::v4::OK;
   mujoco_sim::v4::UnregisterAdapterRequest last_unregister;
   mujoco_sim::v4::SessionHeartbeat last_heartbeat;
+
+ private:
+  mutable std::mutex mutex_;
+  std::condition_variable heartbeat_condition_;
+  std::size_t unregister_calls_ = 0;
+  bool heartbeat_published_ = false;
+  bool throw_on_heartbeat_ = false;
+  bool heartbeat_publish_result_ = true;
+  bool block_activate_ = false;
+  bool activate_entered_ = false;
+  std::string heartbeat_error_;
 };
 
 class ObserverClientTestPeer {
@@ -97,6 +169,22 @@ class ObserverClientTestPeer {
 
   static bool Unregister(ObserverClient* client, std::string* error) {
     return client->Unregister(error);
+  }
+
+  static bool StartHeartbeatThread(ObserverClient* client) {
+    return client->impl_->StartHeartbeatThread();
+  }
+
+  static bool StartHeartbeat(ObserverClient* client, std::string* error) {
+    return client->impl_->StartHeartbeat(error);
+  }
+
+  static void PrepareActivation(ObserverClient* client) {
+    std::lock_guard lock(client->impl_->mutex_);
+    client->impl_->stop_requested_ = false;
+    client->impl_->session_ = internal::AdapterSession{};
+    client->impl_->session_.Registered({42, 7});
+    client->impl_->session_.StartCompleted();
   }
 };
 
@@ -191,6 +279,84 @@ TEST(ObserverClientTest, FailedUnregisterPreservesSessionForRetry) {
   EXPECT_TRUE(ObserverClientTestPeer::Unregister(&client, &error)) << error;
   EXPECT_EQ(transport->last_unregister.session_id(), 42U);
   EXPECT_EQ(transport->last_unregister.epoch(), 7U);
+}
+
+TEST(ObserverClientTest, HeartbeatExceptionBecomesTerminalWaitError) {
+  ObserverClient client(Options());
+  const auto transport = ObserverClientTestPeer::Configure(&client);
+  transport->ThrowOnHeartbeat();
+  ASSERT_TRUE(ObserverClientTestPeer::StartHeartbeatThread(&client));
+  ASSERT_TRUE(transport->WaitForHeartbeat(1s));
+
+  ObservationLease frame;
+  std::string error;
+  EXPECT_EQ(client.WaitForObservation(1s, &frame, &error), ObservationWaitResult::kError);
+  EXPECT_NE(error.find("observer heartbeat thread failed"), std::string::npos) << error;
+  EXPECT_NE(error.find("injected heartbeat publish failure"), std::string::npos) << error;
+}
+
+TEST(ObserverClientTest, HeartbeatRejectionBecomesNonTerminalDiagnostic) {
+  ObserverClient client(Options());
+  const auto transport = ObserverClientTestPeer::Configure(&client);
+  transport->RejectHeartbeat();
+  ASSERT_TRUE(ObserverClientTestPeer::StartHeartbeatThread(&client));
+  ASSERT_TRUE(transport->WaitForHeartbeat(1s));
+
+  const auto deadline = std::chrono::steady_clock::now() + 1s;
+  while (client.lifecycle_warning().empty() && std::chrono::steady_clock::now() < deadline) {
+    std::this_thread::yield();
+  }
+  EXPECT_EQ(client.lifecycle_warning(), "observer heartbeat publish failed; retrying");
+  client.Stop();
+}
+
+TEST(ObserverClientTest, HeartbeatTransportErrorBecomesTerminalWaitError) {
+  ObserverClient client(Options());
+  const auto transport = ObserverClientTestPeer::Configure(&client);
+  transport->FailHeartbeat("injected heartbeat serialization failure");
+  ASSERT_TRUE(ObserverClientTestPeer::StartHeartbeatThread(&client));
+  ASSERT_TRUE(transport->WaitForHeartbeat(1s));
+
+  ObservationLease frame;
+  std::string error;
+  EXPECT_EQ(client.WaitForObservation(1s, &frame, &error), ObservationWaitResult::kError);
+  EXPECT_NE(error.find("observer heartbeat publish failed"), std::string::npos) << error;
+  EXPECT_NE(error.find("injected heartbeat serialization failure"), std::string::npos) << error;
+}
+
+TEST(ObserverClientTest, StopCancelsHeartbeatStartupCommit) {
+  ObserverClient client(Options());
+  ObserverClientTestPeer::Configure(&client);
+  client.Stop();
+
+  std::string error;
+  EXPECT_FALSE(ObserverClientTestPeer::StartHeartbeat(&client, &error));
+  EXPECT_EQ(error, "observer start was cancelled before heartbeat startup");
+}
+
+TEST(ObserverClientTest, StopDuringRemoteActivationCompensatesRegistration) {
+  ObserverClient client(Options());
+  const auto transport = ObserverClientTestPeer::Configure(&client);
+  ObserverClientTestPeer::PrepareActivation(&client);
+  transport->BlockActivate();
+
+  std::string activation_error;
+  auto activating =
+      std::async(std::launch::async, [&] { return client.Activate(&activation_error); });
+  ASSERT_TRUE(transport->WaitForActivate(1s));
+
+  client.Stop();
+  transport->ReleaseActivate();
+
+  EXPECT_FALSE(activating.get());
+  EXPECT_EQ(activation_error, "observer activation was cancelled");
+  EXPECT_EQ(transport->UnregisterCalls(), 1U);
+  EXPECT_EQ(transport->last_unregister.session_id(), 42U);
+  EXPECT_EQ(transport->last_unregister.epoch(), 7U);
+
+  std::string error;
+  EXPECT_TRUE(client.Unregister(&error)) << error;
+  EXPECT_EQ(transport->UnregisterCalls(), 1U);
 }
 
 static_assert(!std::is_copy_constructible_v<ObservationLease>);

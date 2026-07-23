@@ -123,7 +123,6 @@ struct SensorRuntime::Impl {
     std::vector<StreamInfo> streams;
 
     mutable std::mutex mutex;
-    std::mutex publisher_mutex;
     std::condition_variable condition;
     std::condition_variable ready_condition;
     std::deque<Job> jobs;
@@ -132,6 +131,7 @@ struct SensorRuntime::Impl {
     std::thread thread;
     bool stopping = false;
     bool ready = false;
+    bool subscriber_sample_requested = false;
     std::string initialization_error;
     std::uint64_t sequence = 0;
     std::uint64_t pending_dropped = 0;
@@ -147,7 +147,6 @@ struct SensorRuntime::Impl {
       for (auto& stream : streams) {
         std::size_t subscribers = 0;
         try {
-          std::lock_guard publisher_lock(publisher_mutex);
           subscribers = stream.publisher.subscriber_count();
         } catch (const std::exception& exception) {
           std::lock_guard lock(mutex);
@@ -169,6 +168,15 @@ struct SensorRuntime::Impl {
           stream.message.clear();
         }
       }
+    }
+
+    void RequestSubscriberSample() {
+      {
+        std::lock_guard lock(mutex);
+        if (stopping) return;
+        subscriber_sample_requested = true;
+      }
+      condition.notify_one();
     }
 
     bool HasLiveSubscriber() const {
@@ -260,6 +268,10 @@ struct SensorRuntime::Impl {
       job.tick_id = core_state.current_tick_id;
       job.simulation_time_s = simulation_time;
       lock.lock();
+      if (stopping) {
+        free.push_back(std::move(job.snapshot));
+        return true;
+      }
       job.dropped_since_previous = pending_dropped;
       pending_dropped = 0;
       if (defer_blocking_enqueue) {
@@ -348,6 +360,11 @@ struct SensorRuntime::Impl {
         stream.state = mujoco_sim::v4::STREAM_ERROR;
         stream.message = error;
       }
+      DiscardQueuedJobsLocked();
+      condition.notify_all();
+    }
+
+    void DiscardQueuedJobsLocked() {
       while (!jobs.empty()) {
         free.push_back(std::move(jobs.front().snapshot));
         jobs.pop_front();
@@ -356,7 +373,6 @@ struct SensorRuntime::Impl {
         free.push_back(std::move(pending_blocking_job->snapshot));
         pending_blocking_job.reset();
       }
-      condition.notify_all();
     }
 
     void SetStreamError(StreamInfo* stream, const std::string& error) {
@@ -379,14 +395,7 @@ struct SensorRuntime::Impl {
             stream.state = mujoco_sim::v4::STREAM_ERROR;
             stream.message = error;
           }
-          while (!jobs.empty()) {
-            free.push_back(std::move(jobs.front().snapshot));
-            jobs.pop_front();
-          }
-          if (pending_blocking_job.has_value()) {
-            free.push_back(std::move(pending_blocking_job->snapshot));
-            pending_blocking_job.reset();
-          }
+          DiscardQueuedJobsLocked();
         }
       } catch (...) {
       }
@@ -411,6 +420,9 @@ struct SensorRuntime::Impl {
         } else {
           lidar = mujoco_sim::sensor::RayLidar::Create(*initial, lidar_profile, &error);
         }
+        if ((renderer && is_camera) || (lidar && !is_camera)) {
+          UpdateSubscriberCache();
+        }
         lock.lock();
         if ((!renderer && is_camera) || (!lidar && !is_camera)) {
           initialization_error = error.empty() ? "sensor initialization failed" : std::move(error);
@@ -423,13 +435,31 @@ struct SensorRuntime::Impl {
 
       while (true) {
         Job job;
+        bool has_job = false;
+        bool sample_subscribers = false;
         {
           std::unique_lock lock(mutex);
-          condition.wait(lock, [this] { return stopping || !jobs.empty(); });
+          condition.wait(
+              lock, [this] { return stopping || subscriber_sample_requested || !jobs.empty(); });
           if (stopping && jobs.empty()) break;
-          job = std::move(jobs.front());
-          jobs.pop_front();
+          sample_subscribers = std::exchange(subscriber_sample_requested, false);
+          if (!jobs.empty()) {
+            job = std::move(jobs.front());
+            jobs.pop_front();
+            has_job = true;
+            condition.notify_all();
+          }
+        }
+        if (sample_subscribers) UpdateSubscriberCache();
+        if (!has_job) continue;
+        if (!HasLiveSubscriber()) {
+          {
+            std::lock_guard lock(mutex);
+            completed_capture_id = std::max(completed_capture_id, job.capture_id);
+            free.push_back(std::move(job.snapshot));
+          }
           condition.notify_all();
+          continue;
         }
 
         try {
@@ -509,11 +539,7 @@ struct SensorRuntime::Impl {
             has_subscriber = found->subscribers > 0;
           }
           if (!has_subscriber) continue;
-          bool sent = false;
-          {
-            std::lock_guard publisher_lock(publisher_mutex);
-            sent = found->publisher.send(bytes);
-          }
+          const bool sent = found->publisher.send(bytes);
           std::lock_guard lock(mutex);
           if (sent) {
             found->state = mujoco_sim::v4::STREAM_RUNNING;
@@ -537,6 +563,8 @@ struct SensorRuntime::Impl {
       {
         std::lock_guard lock(mutex);
         stopping = true;
+        subscriber_sample_requested = false;
+        DiscardQueuedJobsLocked();
       }
       condition.notify_all();
     }
@@ -620,7 +648,17 @@ struct SensorRuntime::Impl {
     worker->before_serialize = hooks.before_serialize;
     worker->before_initialize = hooks.before_initialize;
     Worker* raw = worker.get();
-    raw->thread = std::thread([raw] { raw->Run(); });
+    try {
+      raw->thread = std::thread([raw] { raw->Run(); });
+    } catch (const std::exception& exception) {
+      *error_message = "failed to start sensor worker for source '" + raw->source_name +
+                       "': " + exception.what();
+      return false;
+    } catch (...) {
+      *error_message =
+          "failed to start sensor worker for source '" + raw->source_name + "': unknown exception";
+      return false;
+    }
     {
       std::unique_lock lock(raw->mutex);
       raw->ready_condition.wait(lock, [raw] { return raw->ready; });
@@ -760,7 +798,7 @@ void SensorRuntime::OnStepCompleted(mujoco_sim::core::SimulationCore& core) {
   const auto now = Clock::now();
   if (now >= impl_->next_subscriber_sample) {
     for (auto& worker : impl_->workers)
-      worker->UpdateSubscriberCache();
+      worker->RequestSubscriberSample();
     impl_->next_subscriber_sample = now + impl_->subscriber_sample_period;
   }
   for (auto& worker : impl_->workers) {
