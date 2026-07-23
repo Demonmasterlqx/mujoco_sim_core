@@ -22,8 +22,17 @@ The remaining locks have narrow infrastructure responsibilities:
 - Sensor worker locks protect their private capture queues, snapshot pools, and
   completion conditions. Each worker calls subscriber-count and send operations
   on its eCAL publishers only from its own thread and without that lock;
-- the MuJoCo viewer mutex protects the viewer's copied model/data while the GUI
-  thread renders and the simulation thread synchronizes its snapshot;
+- the viewer mailbox mutex protects one pending buffer index and submission
+  closure. Simulation-side acquire and submit use only `try_lock`; lease return
+  and free-buffer ownership use an atomic two-bit mask. The GUI sync worker
+  removes a pending index before any potentially blocking operation;
+- the MuJoCo viewer mutex protects the lifetime-stable display snapshot and
+  its independent model copy while the GUI sync worker calls `Simulate::Sync()`
+  and the main thread renders or cleans up. The two production buffers share a
+  different model copy, and the simulation thread never acquires this mutex;
+- the viewer sync-metrics mutex protects one coherent count-and-duration
+  record. The worker may wait for it after releasing MuJoCo state; summary
+  collection uses `try_lock` and retains the whole record on contention;
 - logger and eCAL internals retain their own synchronization.
 
 The Adapter SDK has separate client-side synchronization responsibilities:
@@ -57,7 +66,7 @@ join. A failed remote unregister preserves session identity independently from
 local terminal state so cleanup can be retried later.
 
 No Server lock serializes Core calls, and no callback, Sensor worker, or GUI
-render thread may call Core. The event queue mutex is released before an RPC
+render/sync thread may call Core. The event queue mutex is released before an RPC
 waits on its promise and before the loop processes an event. The lifecycle mutex
 is not held while joining threads, waiting for Sensor capture, publishing eCAL
 messages, or invoking Core.
@@ -80,3 +89,10 @@ This means registry RPCs queued during the fence wait until it completes; they
 do not run concurrently with Core. A stop request does not enter Core: it closes
 the event queue and Inbox and signals the Sensor conditions, allowing the loop
 to leave the fence and finish teardown.
+
+Viewer backpressure is never a blocking fence. With one buffer in the sync
+worker and one pending, the next capture is skipped. With a pending buffer and
+one free buffer, a newer submission replaces the pending frame. RequestClose()
+closes submission before waking the worker and setting MuJoCo's atomic exit
+request; RenderLoop() owns the worker join after the render loop has serialized
+final passive-model cleanup with the same MuJoCo mutex.

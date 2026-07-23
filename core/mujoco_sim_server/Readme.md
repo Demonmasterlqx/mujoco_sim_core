@@ -22,9 +22,12 @@ Step per iteration without a wall-clock wait. Missing Controllers, OFFLINE
 sessions, missing subscribers, and publish failures never block Step.
 
 Completed-step ordering remains Sensor snapshot/blocking fence, Controller
-State and Observer publication, viewer snapshot, status, and metrics. The
-Sensor blocking fence may pause the single writer after a Step, but external
-Controller computation is never in that path.
+State and Observer publication, non-blocking viewer snapshot capture, status,
+and metrics. The Sensor blocking fence may pause the single writer after a
+Step, but external Controller computation is never in that path. Viewer
+capture uses two reusable producer buffers and a depth-one latest mailbox. A
+dedicated GUI sync worker may wait for MuJoCo rendering, while the simulation
+thread skips a frame immediately on mailbox contention or buffer exhaustion.
 
 ## Configuration
 
@@ -52,6 +55,7 @@ release_ctrl_policy: zero
 controller_overrides: []
 session_timeout_ms: 1000
 observer_heartbeat_period_ms: 250
+viewer_sync_period_ms: 16
 log_summary_period_ms: 1000
 headless: true
 ```
@@ -87,9 +91,11 @@ simulation-time cadence; otherwise `state_every_n_steps` applies. The global
 maximum State rate can only slow the granted cadence.
 
 Only identity, model selection, run limit, activation timeout, viewer mode,
-and logging fields have direct CLI flags; pacing and Controller policy are YAML
-fields. CLI values override their YAML counterparts. `--max-ticks 0` runs until
-interruption or runtime shutdown.
+viewer snapshot period, and logging fields have direct CLI flags; pacing and
+Controller policy are YAML fields. CLI values override their YAML
+counterparts. `viewer_sync_period_ms` is a positive `uint32` value and defaults
+to 16 ms. It is parsed and validated in headless mode but has no runtime effect
+there. `--max-ticks 0` runs until interruption or runtime shutdown.
 
 ```bash
 mujoco-sim-server --config server.yaml --headless
@@ -116,6 +122,8 @@ record describes the interval since the preceding summary and includes:
 - `target_realtime_factor` and `pacing_mode`
 - active/online/offline/error Controller counts, online Observer count,
   sampled transport endpoint count, and interval-local malformed-message count
+- viewer capture attempts, submitted/skipped frames, pending replacements,
+  completed/failed syncs, and capture/sync average and maximum microseconds
 
 `realtime_factor_rate` is the measured simulation advance rate, not the
 configured target. In `realtime` mode it can be compared with
@@ -126,6 +134,13 @@ summary. `active_controllers` counts `ACTIVE_NO_COMMAND`, `ONLINE`, and
 `transport_endpoints` is refreshed at
 `transport_subscriber_sample_period_ms`; it is diagnostic only and never gates
 simulation stepping or State publication.
+
+Viewer counters are interval-local and reset with each summary. Capture timing
+covers `SimulationCore::UpdateSnapshot()` for an acquired reusable buffer.
+Sync timing includes any wait for the MuJoCo viewer mutex, the copy into the
+lifetime-stable display snapshot, and `Simulate::Sync()`. Dropped or replaced
+frames are expected degradation and never pause physics, Controller traffic,
+or Sensor processing. In headless mode all viewer fields are zero.
 
 An ordinary publish rejection caused by having no subscriber is non-blocking
 and is not logged as a failure. Dense-frame encoding failures, Protobuf

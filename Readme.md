@@ -92,6 +92,7 @@ observer_max_rate_hz: 500
 allow_every_step_observer: false
 transport_subscriber_sample_period_ms: 1000
 sensor_subscriber_sample_period_ms: 200
+viewer_sync_period_ms: 16
 log_summary_period_ms: 1000
 log_level: info
 log_file: ""
@@ -106,15 +107,19 @@ YAML 中的相对路径按配置文件所在目录解析，CLI 路径按进程�
 `mujoco-sim-server --config server.yaml` 加载配置；`--model`、`--initial-keyframe`、
 `--server-name`、`--max-ticks` 和 `--activation-timeout-ms` 可以覆盖对应 YAML 字段；
 `--log-level`、`--log-file`、`--log-file-max-size-mb`、`--log-file-max-files` 及
-`--log-summary-period-ms` 也有 CLI 覆盖。其余未声明 CLI flag 的运行策略必须写入 YAML。
+`--log-summary-period-ms` 也有 CLI 覆盖。`--viewer-sync-period-ms` 覆盖 GUI 快照采集周期；
+取值必须是 `[1, UINT32_MAX]` 内的毫秒数，默认 `16`。headless 模式仍严格解析该值，但运行时
+不使用它。其余未声明 CLI flag 的运行策略必须写入 YAML。
 默认启动 MuJoCo 官方
 `simulate` 图形界面；远程服务、CI 或无显示环境使用 `--headless`，该模式不会初始化
 GLFW viewer。若配置 camera Stream，sensor worker 仍会初始化 EGL 或 OSMesa offscreen
 OpenGL context。若 YAML 设置了 `headless: true`，可用 `--gui` 在命令行恢复图形模式。
 
 图形界面读取 Core 生成的隔离快照，支持官方相机旋转、平移、缩放、左右侧栏、
-渲染选项、传感器和性能面板。UI 不持有也不会修改真实 `mjModel/mjData`，控制器所有权
-和异步 State/Command 行为在 GUI 与 headless 模式下完全一致。
+渲染选项、传感器和性能面板。仿真线程以非阻塞方式使用两个固定生产缓冲和 depth-1
+latest 邮箱；锁竞争、缓冲耗尽或 GUI 变慢时允许跳过或替换显示帧。独立 GUI sync worker
+可以等待 MuJoCo viewer mutex，但仿真步进不会等待它。UI 不持有也不会修改真实
+`mjModel/mjData`，控制器所有权和异步 State/Command 行为在 GUI 与 headless 模式下完全一致。
 
 ## Protocol V4 运行示例
 
@@ -167,6 +172,9 @@ Server 默认每 1000 ms 输出一次 `event=server_summary` 基本运行统计�
 目标值；`step_rate_hz` 是同一窗口的 `interval_steps / interval_wall_s`。
 `target_realtime_factor` 单独记录 `realtime_factor` 配置；在 `unthrottled` 模式下实际倍率
 可以远高于该值。通过 `log_summary_period_ms` 调整周期，设为 `0` 可完全关闭周期汇总。
+GUI 模式还输出 `viewer_capture_attempts/submitted/skipped`、
+`viewer_pending_replaced`、`viewer_sync_completed/failures`，以及 capture/sync 平均和最大
+微秒耗时；headless 模式下这些字段均为零。
 
 server 是唯一物理状态所有者。Controller 激活后从下一次 cadence 到期的 completed Step
 接收首帧 State。超过 command timeout 后会进入 `OFFLINE`，但 Server 继续 Step 和发布 State；

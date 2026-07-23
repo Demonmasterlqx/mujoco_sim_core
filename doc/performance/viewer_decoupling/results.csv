@@ -1,0 +1,7 @@
+mode,run,online_intervals,mean_rtf,online_wall_s,online_cpu_s,online_cpu_percent,max_rss_kib,viewer_capture_attempts,viewer_capture_submitted,viewer_capture_skipped,viewer_pending_replaced,viewer_sync_completed,viewer_sync_failures,viewer_capture_avg_us,viewer_capture_max_us,viewer_sync_avg_us,viewer_sync_max_us
+headless,1,6,0.999393190,6.000642220,1.450,24.164,325748,0,0,0,0,0,0,0.000,0.000,0.000,0.000
+headless,2,6,0.999379073,6.002726585,1.530,25.488,325428,0,0,0,0,0,0,0.000,0.000,0.000,0.000
+headless,3,6,0.999627562,6.001234800,1.580,26.328,325424,0,0,0,0,0,0,0.000,0.000,0.000,0.000
+gui,1,6,0.974347361,6.002986697,28.740,478.762,892144,364,364,0,0,365,0,85.653,611.078,5557.598,14487.204
+gui,2,6,0.973967682,6.004309408,28.140,468.663,892608,364,364,0,0,364,0,99.957,3240.067,5587.414,11841.523
+gui,3,6,0.973434994,6.004520029,29.080,484.302,891948,364,364,0,0,365,0,91.458,829.562,5540.020,13752.749

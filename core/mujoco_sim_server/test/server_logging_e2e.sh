@@ -55,6 +55,8 @@ for log in "${work_dir}/server.err" "${work_dir}/file/server.log"; do
     "${log}"
   grep -Eq 'event=server_summary .*transport_endpoints=[0-9]+ .*malformed_messages=[0-9]+' \
     "${log}"
+  grep -Eq 'event=server_summary .*viewer_capture_attempts=0 .*viewer_capture_submitted=0 .*viewer_capture_skipped=0 .*viewer_pending_replaced=0 .*viewer_sync_completed=0 .*viewer_sync_failures=0 .*viewer_capture_avg_us=0(\.0+)? .*viewer_capture_max_us=0(\.0+)? .*viewer_sync_avg_us=0(\.0+)? .*viewer_sync_max_us=0(\.0+)?' \
+    "${log}"
   awk '
     /event=server_summary/ {
       interval_simulation = ""

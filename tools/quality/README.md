@@ -77,3 +77,14 @@ setarch "$(uname -m)" -R env \
   ctest --test-dir build/mujoco_sim_server_tsan --output-on-failure \
     -R 'controller_command_inbox_test|server_event_queue_test|server_stop_concurrency_test'
 ```
+
+Viewer mailbox, worker, active-sync shutdown, and metric-reset coverage requires
+a GUI-enabled TSan build and Xvfb:
+
+```bash
+setarch "$(uname -m)" -R env \
+  GALLIUM_DRIVER=softpipe LIBGL_ALWAYS_SOFTWARE=1 \
+  TSAN_OPTIONS="halt_on_error=1:suppressions=$PWD/tools/quality/tsan.supp" \
+  xvfb-run -a ctest --test-dir build/mujoco_sim_server_gui_tsan \
+    --output-on-failure -R sim_viewer_test
+```

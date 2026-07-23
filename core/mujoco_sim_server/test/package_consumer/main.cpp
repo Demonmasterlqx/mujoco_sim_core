@@ -6,8 +6,13 @@
 int main() {
   mujoco_sim::server::ServerConfig config;
   config.headless = true;
+  config.viewer_sync_period_ms = 16;
   mujoco_sim::server::ServerApplication server(config);
   const std::string usage = mujoco_sim::server::Usage();
   const bool headless_screenshot_rejected = !server.RequestScreenshot();
-  return usage.find("--model") == std::string::npos || !headless_screenshot_rejected ? 1 : 0;
+  return usage.find("--model") == std::string::npos ||
+                 usage.find("--viewer-sync-period-ms") == std::string::npos ||
+                 !headless_screenshot_rejected
+             ? 1
+             : 0;
 }

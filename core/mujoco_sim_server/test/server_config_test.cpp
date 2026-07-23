@@ -3,8 +3,10 @@
 #include <chrono>
 #include <filesystem>
 #include <fstream>
+#include <limits>
 #include <string>
 #include <string_view>
+#include <vector>
 
 #include <gtest/gtest.h>
 
@@ -76,6 +78,98 @@ controller_overrides:
   EXPECT_EQ(override.offline_ctrl_policy, "zero");
   EXPECT_EQ(override.error_ctrl_policy, "hold_last");
   EXPECT_EQ(override.release_ctrl_policy, "hold_last");
+}
+
+TEST(ServerConfigTest, LoadsViewerSyncPeriodAtInclusiveLimits) {
+  TemporaryConfig minimum_file(R"(
+model_path: model.xml
+headless: true
+viewer_sync_period_ms: 1
+)");
+  auto config = ValidConfig();
+  std::string error;
+  ASSERT_TRUE(LoadConfigFile(minimum_file.path().string(), &config, &error)) << error;
+  EXPECT_EQ(config.viewer_sync_period_ms, 1U);
+
+  TemporaryConfig maximum_file(R"(
+model_path: model.xml
+headless: true
+viewer_sync_period_ms: 4294967295
+)");
+  config = ValidConfig();
+  ASSERT_TRUE(LoadConfigFile(maximum_file.path().string(), &config, &error)) << error;
+  EXPECT_EQ(config.viewer_sync_period_ms, std::numeric_limits<std::uint32_t>::max());
+}
+
+TEST(ServerConfigTest, ViewerSyncPeriodDefaultsToSixteenMilliseconds) {
+  const ServerConfig config;
+  EXPECT_EQ(config.viewer_sync_period_ms, 16U);
+}
+
+TEST(ServerConfigTest, RejectsZeroAndUnknownViewerSyncFields) {
+  TemporaryConfig zero_file(R"(
+model_path: model.xml
+headless: true
+viewer_sync_period_ms: 0
+)");
+  auto config = ValidConfig();
+  std::string error;
+  EXPECT_FALSE(LoadConfigFile(zero_file.path().string(), &config, &error));
+  EXPECT_NE(error.find("viewer_sync_period_ms"), std::string::npos);
+
+  TemporaryConfig unknown_file(R"(
+model_path: model.xml
+headless: true
+viewer_sync_period: 16
+)");
+  config = ValidConfig();
+  EXPECT_FALSE(LoadConfigFile(unknown_file.path().string(), &config, &error));
+  EXPECT_NE(error.find("viewer_sync_period"), std::string::npos);
+
+  config = ValidConfig();
+  config.viewer_sync_period_ms = 0;
+  EXPECT_FALSE(ValidateServerConfig(config, &error));
+  EXPECT_NE(error.find("viewer_sync_period_ms"), std::string::npos);
+}
+
+TEST(ServerConfigTest, ViewerSyncCliOverridesYamlInHeadlessMode) {
+  TemporaryConfig file(R"(
+model_path: model.xml
+headless: false
+viewer_sync_period_ms: 25
+)");
+  std::vector<std::string> arguments = {"mujoco-sim-server",       "--config",
+                                        file.path().string(),      "--headless",
+                                        "--viewer-sync-period-ms", "7"};
+  std::vector<char*> argv;
+  argv.reserve(arguments.size());
+  for (auto& argument : arguments) {
+    argv.push_back(argument.data());
+  }
+  ServerConfig config;
+  std::string error;
+  ASSERT_TRUE(ParseCommandLine(static_cast<int>(argv.size()), argv.data(), &config, &error))
+      << error;
+  EXPECT_TRUE(config.headless);
+  EXPECT_EQ(config.viewer_sync_period_ms, 7U);
+}
+
+TEST(ServerConfigTest, RejectsZeroViewerSyncPeriodFromCommandLine) {
+  TemporaryConfig file(R"(
+model_path: model.xml
+headless: true
+)");
+  std::vector<std::string> arguments = {"mujoco-sim-server", "--config", file.path().string(),
+                                        "--viewer-sync-period-ms", "0"};
+  std::vector<char*> argv;
+  argv.reserve(arguments.size());
+  for (auto& argument : arguments) {
+    argv.push_back(argument.data());
+  }
+  ServerConfig config;
+  std::string error;
+  EXPECT_FALSE(ParseCommandLine(static_cast<int>(argv.size()), argv.data(), &config, &error));
+  EXPECT_NE(error.find("viewer_sync_period_ms"), std::string::npos);
 }
 
 TEST(ServerConfigTest, RejectsDuplicateControllerOverrides) {

@@ -175,6 +175,12 @@ fields:
     cli:
       flags: [--headless]
       inverse_flags: [--gui]
+  viewer_sync_period_ms:
+    type: uint32
+    description: Graphical viewer snapshot capture period in milliseconds
+    default: 16
+    min: 1
+    cli: [--viewer-sync-period-ms]
   log_level:
     type: enum
     description: Minimum server log level

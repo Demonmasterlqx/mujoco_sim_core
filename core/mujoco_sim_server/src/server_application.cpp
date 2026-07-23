@@ -6,6 +6,7 @@
 #include "ecal_server_transport.hpp"
 #include "server_logging.hpp"
 #include "server_runtime.hpp"
+#include "server_application_test_harness.hpp"
 #include "sim_viewer.hpp"
 #include "simulation_loop.hpp"
 
@@ -33,14 +34,14 @@ void LogBoundaryFailure(const std::shared_ptr<spdlog::logger>& logger, std::stri
 
 }  // namespace
 
-class ServerApplication::Impl {
+class detail::ServerApplicationImpl {
  public:
-  explicit Impl(ServerConfig server_config)
+  explicit ServerApplicationImpl(ServerConfig server_config)
       : config(std::move(server_config)),
         logger(std::make_unique<ServerLogger>()),
         warning_limiter(std::make_unique<WarningLimiter>(kWarningPeriod)) {}
 
-  ~Impl() { Shutdown(); }
+  ~ServerApplicationImpl() { Shutdown(); }
 
   bool Start(std::string* error_message) {
     if (error_message == nullptr || started) {
@@ -64,13 +65,15 @@ class ServerApplication::Impl {
                   "mode={} pacing_mode={} realtime_factor={} max_ticks={} "
                   "command_timeout_ms={} command_keepalive_ms={} "
                   "activation_timeout_ms={} status_period_ms={} "
-                  "log_level={} log_file={} log_summary_period_ms={}",
+                  "viewer_sync_period_ms={} log_level={} log_file={} "
+                  "log_summary_period_ms={}",
                   LogValue(config.server_name), LogValue(config.model_path),
                   LogValue(config.initial_keyframe), config.headless ? "headless" : "gui",
                   config.pacing_mode, config.realtime_factor, config.max_ticks,
                   config.command_timeout_ms, config.command_keepalive_ms,
-                  config.activation_timeout_ms, config.status_period_ms, config.log_level,
-                  LogValue(config.log_file), config.log_summary_period_ms);
+                  config.activation_timeout_ms, config.status_period_ms,
+                  config.viewer_sync_period_ms, config.log_level, LogValue(config.log_file),
+                  config.log_summary_period_ms);
             },
             &boundary_error)) {
       *error_message = "failed to write server startup log: " + boundary_error;
@@ -151,12 +154,23 @@ class ServerApplication::Impl {
 
     bool render_succeeded = true;
     if (viewer) {
-      std::string error;
-      render_succeeded = RunWithExceptionBoundary([this] { viewer->RenderLoop(); }, &error);
-      if (!render_succeeded) {
-        LogBoundaryFailure(logger->get(), "gui_render_thread", "RenderLoop", error);
+      std::string render_error;
+      std::string boundary_error;
+      const bool render_boundary_succeeded = RunWithExceptionBoundary(
+          [this, &render_succeeded, &render_error] {
+            render_succeeded = viewer->RenderLoop(&render_error);
+          },
+          &boundary_error);
+      if (!render_boundary_succeeded) {
+        render_succeeded = false;
+        render_error = std::move(boundary_error);
       }
-      RequestStop(render_succeeded ? "viewer_closed" : "viewer_render_exception");
+      if (!render_succeeded) {
+        LogBoundaryFailure(logger->get(), "gui_render_thread", "RenderLoop", render_error);
+        loop->RequestFailure("viewer_sync_failed");
+      } else {
+        RequestStop("viewer_closed");
+      }
     }
 
     int result = 2;
@@ -211,6 +225,17 @@ class ServerApplication::Impl {
     return true;
   }
 
+  bool RequestViewerSyncFailureForTesting() noexcept {
+    SimViewer* active_viewer = nullptr;
+    {
+      std::lock_guard lock(mutex);
+      if (!started || run_completed || !viewer) return false;
+      active_viewer = viewer.get();
+    }
+    active_viewer->RequestSyncFailureForTesting();
+    return true;
+  }
+
   void Shutdown() noexcept {
     std::string error;
     if (loop &&
@@ -261,7 +286,7 @@ class ServerApplication::Impl {
 };
 
 ServerApplication::ServerApplication(ServerConfig config)
-    : impl_(std::make_unique<Impl>(std::move(config))) {}
+    : impl_(std::make_unique<detail::ServerApplicationImpl>(std::move(config))) {}
 
 ServerApplication::~ServerApplication() = default;
 
@@ -283,6 +308,23 @@ bool ServerApplication::RequestScreenshot() {
 
 const ServerConfig& ServerApplication::config() const noexcept {
   return impl_->config;
+}
+
+ServerApplicationTestHarness::ServerApplicationTestHarness(ServerConfig config)
+    : impl_(std::make_unique<detail::ServerApplicationImpl>(std::move(config))) {}
+
+ServerApplicationTestHarness::~ServerApplicationTestHarness() = default;
+
+bool ServerApplicationTestHarness::Start(std::string* error_message) {
+  return impl_->Start(error_message);
+}
+
+int ServerApplicationTestHarness::Run() {
+  return impl_->Run();
+}
+
+bool ServerApplicationTestHarness::RequestViewerSyncFailure() noexcept {
+  return impl_->RequestViewerSyncFailureForTesting();
 }
 
 }  // namespace mujoco_sim::server

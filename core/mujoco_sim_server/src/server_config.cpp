@@ -190,6 +190,7 @@ generated::ServerConfig ToGenerated(const ServerConfig& config) {
   output.transport_subscriber_sample_period_ms = config.transport_subscriber_sample_period_ms;
   output.sensor_subscriber_sample_period_ms = config.sensor_subscriber_sample_period_ms;
   output.headless = config.headless;
+  output.viewer_sync_period_ms = config.viewer_sync_period_ms;
   output.log_level = ToGeneratedLogLevel(config.log_level);
   output.log_file = config.log_file;
   output.log_file_max_size_mb = config.log_file_max_size_mb;
@@ -263,6 +264,7 @@ ServerConfig ToPublic(generated::ServerConfig config) {
   output.transport_subscriber_sample_period_ms = config.transport_subscriber_sample_period_ms;
   output.sensor_subscriber_sample_period_ms = config.sensor_subscriber_sample_period_ms;
   output.headless = config.headless;
+  output.viewer_sync_period_ms = config.viewer_sync_period_ms;
   output.log_level = ToPublicLogLevel(config.log_level);
   output.log_file = std::move(config.log_file).string();
   output.log_file_max_size_mb = config.log_file_max_size_mb;
@@ -487,6 +489,10 @@ bool ValidateLogging(const ServerConfig& config, std::string* error_message) {
       config.transport_subscriber_sample_period_ms == 0 ||
       config.sensor_subscriber_sample_period_ms == 0) {
     *error_message = "message-rate configuration is invalid";
+    return false;
+  }
+  if (config.viewer_sync_period_ms == 0) {
+    *error_message = "viewer_sync_period_ms must be greater than zero";
     return false;
   }
   return ValidateSensorStreams(config, error_message);

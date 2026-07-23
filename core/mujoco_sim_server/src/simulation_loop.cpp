@@ -346,8 +346,18 @@ bool SimulationLoop::Initialize(std::string* error) {
     return false;
   }
   if (viewer_) {
-    viewer_snapshot_ = core_.CreateSnapshot(error);
-    if (!viewer_snapshot_ || !viewer_->QueueLoad(*viewer_snapshot_, config_.model_path, error)) {
+    auto display_snapshot = core_.CreateSnapshot(error);
+    if (!display_snapshot) {
+      return false;
+    }
+    auto first_production_snapshot = core_.CreateSnapshot(error);
+    if (!first_production_snapshot) {
+      return false;
+    }
+    auto second_production_snapshot = core_.CloneSnapshot(*first_production_snapshot, error);
+    if (!second_production_snapshot ||
+        !viewer_->QueueLoad(std::move(display_snapshot), std::move(first_production_snapshot),
+                            std::move(second_production_snapshot), config_.model_path, error)) {
       return false;
     }
   }
@@ -451,6 +461,11 @@ void SimulationLoop::RequestStop(std::string reason) {
   }
 }
 
+void SimulationLoop::RequestFailure(std::string reason) {
+  exit_code_.store(2, std::memory_order_release);
+  RequestStop(std::move(reason));
+}
+
 int SimulationLoop::Join() {
   if (thread_.joinable()) {
     thread_.join();
@@ -469,7 +484,7 @@ void SimulationLoop::Run(std::stop_token stop) noexcept {
     next_step_ = now;
     next_status_ = now;
     next_status_allowed_ = now;
-    next_viewer_sync_ = now;
+    next_viewer_capture_ = now;
     next_transport_sample_ = now;
     summary_wall_anchor_ = now;
     summary_simulation_anchor_ = state.simulation_time_s;
@@ -733,20 +748,30 @@ void SimulationLoop::PublishSummary(Clock::time_point now,
   const auto steps = state.current_tick_id - summary_tick_anchor_;
   const double rate = wall_s > 0.0 ? simulation_s / wall_s : 0.0;
   const double step_rate = wall_s > 0.0 ? static_cast<double>(steps) / wall_s : 0.0;
+  const auto viewer_metrics =
+      viewer_ != nullptr ? viewer_->GetAndResetIntervalMetrics() : SimViewer::IntervalMetrics{};
   logger_->info(
       "event=server_summary tick_id={} interval_steps={} step_rate_hz={} "
       "simulation_time_s={} interval_simulation_s={} interval_wall_s={} "
       "realtime_factor_rate={} target_realtime_factor={} pacing_mode={} "
       "active_controllers={} online_controllers={} offline_controllers={} "
       "error_controllers={} online_observers={} transport_endpoints={} "
-      "malformed_messages={}",
+      "malformed_messages={} viewer_capture_attempts={} "
+      "viewer_capture_submitted={} viewer_capture_skipped={} "
+      "viewer_pending_replaced={} viewer_sync_completed={} viewer_sync_failures={} "
+      "viewer_capture_avg_us={} viewer_capture_max_us={} viewer_sync_avg_us={} "
+      "viewer_sync_max_us={}",
       state.current_tick_id, steps, step_rate, state.simulation_time_s, simulation_s, wall_s, rate,
       config_.realtime_factor, config_.pacing_mode, state.active_controller_count,
       state.controller_count(mujoco_sim::core::ONLINE),
       state.controller_count(mujoco_sim::core::OFFLINE),
       state.controller_count(mujoco_sim::core::ERROR),
       state.observer_count(mujoco_sim::core::ONLINE), transport_endpoint_count_,
-      malformed_pending_.exchange(0));
+      malformed_pending_.exchange(0), viewer_metrics.capture_attempts,
+      viewer_metrics.capture_submitted, viewer_metrics.capture_skipped,
+      viewer_metrics.pending_replaced, viewer_metrics.sync_completed, viewer_metrics.sync_failures,
+      viewer_metrics.capture_avg_us, viewer_metrics.capture_max_us, viewer_metrics.sync_avg_us,
+      viewer_metrics.sync_max_us);
   summary_wall_anchor_ = now;
   summary_simulation_anchor_ = state.simulation_time_s;
   summary_tick_anchor_ = state.current_tick_id;
@@ -759,17 +784,19 @@ void SimulationLoop::ProcessTimers(Clock::time_point now) {
     RequestStop("max_ticks");
     return;
   }
-  if (viewer_ && now >= next_viewer_sync_) {
-    std::string error;
-    if (!viewer_->Synchronize(core_, *viewer_snapshot_, &error) && !viewer_->close_requested()) {
-      {
-        std::lock_guard lock(lifecycle_mutex_);
-        exit_code_.store(2, std::memory_order_relaxed);
+  if (viewer_ && now >= next_viewer_capture_) {
+    auto lease = viewer_->TryAcquireSnapshot();
+    if (lease) {
+      std::string error;
+      if (!core_.UpdateSnapshot(lease.snapshot(), &error)) {
+        logger_->error("event=viewer_capture_failed operation=UpdateSnapshot error={}",
+                       LogValue(error));
+        RequestFailure("viewer_capture_failed");
+        return;
       }
-      RequestStop("viewer_sync_failed");
-      return;
+      viewer_->TrySubmitSnapshot(std::move(lease));
     }
-    next_viewer_sync_ = now + std::chrono::milliseconds(16);
+    next_viewer_capture_ = now + std::chrono::milliseconds(config_.viewer_sync_period_ms);
   }
   if (now >= next_transport_sample_) {
     transport_endpoint_count_ = transport_->SampleSubscriberCounts();
@@ -806,23 +833,38 @@ void SimulationLoop::Finish(int code, std::string reason) noexcept {
   finish_stage("sensor_runtime_stop", [this] { sensor_runtime_->Stop(); });
   finish_stage("core_mark_stopped", [this, &reason] { ApplyEffects(core_.MarkStopped(reason)); });
   finish_stage("terminal_status_publish", [this] { PublishStatus(true, true); });
-  finish_stage("server_stopped_log", [this, &reason, &final_code] {
-    logger_->info("event=server_stopped reason={} exit_code={} tick_id={}", LogValue(reason),
-                  final_code, core_.state().current_tick_id);
-  });
-
   std::string state_error;
   if (!RunWithExceptionBoundary(
           [this, &reason] {
             std::lock_guard lock(lifecycle_mutex_);
-            stop_reason_ = std::move(reason);
+            stop_reason_ = reason;
           },
           &state_error)) {
     final_code = 2;
     LogLoopBoundaryFailure(logger_, "record_stop_reason",
                            state_error.empty() ? "non-standard exception" : state_error);
   }
-  exit_code_.store(final_code, std::memory_order_release);
+
+  auto commit_exit_code = [this, &final_code] {
+    if (final_code == 2) {
+      exit_code_.store(2, std::memory_order_release);
+      return;
+    }
+    int observed = exit_code_.load(std::memory_order_acquire);
+    while (observed != 2 &&
+           !exit_code_.compare_exchange_weak(observed, final_code, std::memory_order_release,
+                                             std::memory_order_acquire)) {
+    }
+    if (observed == 2) {
+      final_code = 2;
+    }
+  };
+  commit_exit_code();
+  finish_stage("server_stopped_log", [this, &reason] {
+    logger_->info("event=server_stopped reason={} exit_code={} tick_id={}", LogValue(reason),
+                  exit_code_.load(std::memory_order_acquire), core_.state().current_tick_id);
+  });
+  commit_exit_code();
 }
 
 }  // namespace mujoco_sim::server

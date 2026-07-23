@@ -7,20 +7,79 @@
 
 namespace mujoco_sim::server {
 
-/// Owns the server process runtime and its single-writer simulation loop.
-///
-/// Start() initializes all resources and starts the simulation thread. Run()
-/// blocks until that thread exits, or runs the GUI loop on the calling thread.
-/// RequestStop() is idempotent and may be called concurrently from any thread.
+namespace detail {
+/** Internal process-runtime implementation hidden behind ServerApplication.
+ * 隐藏在 ServerApplication 后的内部进程运行时实现。 */
+class ServerApplicationImpl;
+}  // namespace detail
+
+/**
+ * @brief Owns the Server process runtime and single-writer simulation loop.
+ *
+ * Start() initializes transport, Core, Sensors, and the optional GUI before it
+ * starts the simulation thread. Run() waits for headless completion or runs
+ * the GUI render loop on the calling thread. The application owns all runtime
+ * resources until destruction.
+ *
+ * 拥有 Server 进程运行时和单写者仿真循环。
+ *
+ * Start() 会先初始化传输、Core、Sensor 和可选 GUI，再启动仿真线程。Run() 在 headless
+ * 模式等待运行结束，或在调用线程上运行 GUI 渲染循环。应用持有全部运行时资源直至析构。
+ *
+ * @par Thread safety / 线程安全
+ * Start() and Run() are lifecycle operations called by the process main
+ * thread. RequestStop() and RequestScreenshot() may run concurrently as
+ * documented. Destruction must not overlap any member call.
+ * Start() 和 Run() 是由进程主线程调用的生命周期操作。RequestStop() 和
+ * RequestScreenshot() 可按各自文档并发调用。析构不得与任何成员调用重叠。
+ */
 class ServerApplication {
  public:
+  /**
+   * @brief Creates a stopped application with owned configuration.
+   * @param config Validated during Start(); moved into the application.
+   *               在 Start() 中校验并移动到应用内的配置。
+   *
+   * 使用自有配置创建尚未启动的应用。
+   */
   explicit ServerApplication(ServerConfig config);
+
+  /** Stops and joins owned runtime work before releasing resources.
+   * 停止并 join 所有自有运行任务，然后释放资源。 */
   ~ServerApplication();
 
+  /** Application ownership cannot be copied. 应用所有权不可复制。 */
   ServerApplication(const ServerApplication&) = delete;
+
+  /** Application ownership cannot be copy-assigned. 应用所有权不可复制赋值。 */
   ServerApplication& operator=(const ServerApplication&) = delete;
 
+  /**
+   * @brief Initializes resources and starts the simulation loop once.
+   *
+   * 初始化资源并且只启动一次仿真循环。
+   *
+   * @param error_message Receives a contextual initialization diagnostic.
+   *                      接收带上下文的初始化诊断。
+   * @return true on success; false before any usable Run() on failure.
+   *         成功返回 true；失败返回 false，此时不可正常调用 Run()。
+   */
   bool Start(std::string* error_message);
+
+  /**
+   * @brief Runs until shutdown and returns the process exit code.
+   *
+   * 运行至关闭并返回进程退出码。
+   *
+   * @return 0 for requested or bounded normal shutdown, 1 when not started,
+   *         or 2 for a runtime, viewer-worker, transport, or logging failure.
+   *         请求关闭或有界正常关闭返回 0；尚未启动返回 1；运行时、查看器 worker、
+   *         传输或日志失败返回 2。
+   * @par Blocking / 阻塞
+   * Blocks until all simulation work stops. In GUI mode it must run on the
+   * main thread required by GLFW.
+   * 阻塞至全部仿真工作停止。GUI 模式下必须在 GLFW 要求的主线程运行。
+   */
   int Run();
 
   /**
@@ -73,11 +132,19 @@ class ServerApplication {
    */
   bool RequestScreenshot();
 
+  /**
+   * @return Borrowed immutable configuration valid for this object's lifetime.
+   *         在本对象生命周期内有效的只读借用配置。
+   * @par Thread safety / 线程安全
+   * Safe to read while the application is alive because configuration is
+   * immutable after construction.
+   * 应用存活期间可安全读取，因为配置在构造后保持不变。
+   */
   const ServerConfig& config() const noexcept;
 
  private:
-  class Impl;
-  std::unique_ptr<Impl> impl_;
+  /** Lifetime-stable process-runtime implementation. 生命周期稳定的进程运行时实现。 */
+  std::unique_ptr<detail::ServerApplicationImpl> impl_;
 };
 
 }  // namespace mujoco_sim::server
