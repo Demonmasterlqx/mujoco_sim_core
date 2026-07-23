@@ -474,6 +474,17 @@ result as a current pass.
 - Do not rename public APIs, packages, executable names, protocol fields,
   resource names, or configuration keys without an explicit requirement.
 - Preserve user changes already present in the worktree.
+- After functional implementation and primary verification are complete, at
+  least one subagent that did not author the implementation must independently
+  review the final diff before the task may be declared complete. Give the
+  reviewer the original requirements and the final change scope. The review
+  must prioritize correctness, behavioral regressions, ownership and
+  concurrency risks, contract compatibility, and missing tests.
+- Resolve every material subagent finding and rerun the affected verification.
+  If review findings require a material code or behavior change, request a
+  follow-up subagent review of the resulting diff. If no subagent is available,
+  report the review as unverified and do not claim that the task is fully
+  complete.
 
 Before declaring work complete:
 
@@ -489,8 +500,9 @@ Before declaring work complete:
 7. Inspect all test output and resolve new failures.
 8. Review the final diff, including generated-file, third-party, and package
    metadata changes.
-9. Confirm that no debugging code, local paths, credentials, generated build
+9. Obtain the required independent subagent review and resolve its findings.
+10. Confirm that no debugging code, local paths, credentials, generated build
    output, logs, screenshots, core dumps, or temporary configuration files are
    included.
-10. Summarize behavioral changes, compatibility impact, tests run, and any
+11. Summarize behavioral changes, compatibility impact, tests run, and any
     remaining unverified risk.
