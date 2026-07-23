@@ -39,11 +39,23 @@ class CallbackGate {
    * 当前线程自身的租约。
    */
   struct State {
+    /// Protects every remaining State field and callback admission.
+    /// 保护其余全部 State 字段与回调准入。
     std::mutex mutex;
+    /// Wakes drain waiters after admission is disabled or a lease exits.
+    /// 准入禁用或租约退出后唤醒清空等待方。
     std::condition_variable condition;
+    /// Borrowed target valid only while enabled; protected by mutex.
+    /// 仅 enabled 时有效的借用目标；由 mutex 保护。
     Target* client = nullptr;
+    /// Admission flag protected by mutex; Disable() changes it only falseward.
+    /// 由 mutex 保护的准入标志；Disable() 只会将其改为 false。
     bool enabled = false;
+    /// Total admitted leases across all threads, protected by mutex.
+    /// 所有线程上的已准入租约总数；由 mutex 保护。
     std::size_t active_callbacks = 0;
+    /// Per-thread admitted lease counts used to exclude self during teardown.
+    /// 每线程已准入租约计数，用于拆除时排除自身。
     std::unordered_map<std::thread::id, std::size_t> callbacks_by_thread;
   };
 
@@ -114,7 +126,11 @@ class CallbackGate {
     Target* client() const noexcept { return client_; }
 
    private:
+    /// Shared accounting state that must outlive this lease.
+    /// 生命周期必须长于本租约的共享计数状态。
     std::shared_ptr<State> state_;
+    /// Borrowed admitted target, valid only while this non-empty lease exists.
+    /// 仅在本非空租约存在期间有效的借用准入目标。
     Target* client_ = nullptr;
   };
 

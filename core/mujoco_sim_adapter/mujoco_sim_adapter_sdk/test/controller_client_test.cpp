@@ -207,6 +207,45 @@ TEST(ControllerClientTest, StateLeaseIsMoveOnlyAndRetainsImmutableFrame) {
   EXPECT_EQ(latest.sequence(), moved.sequence());
 }
 
+TEST(ControllerClientTest, ClearsDiagnosticsAndPreservesOutputForNonErrorResults) {
+  ControllerClient client(Options());
+  auto transport = std::make_shared<FakeControllerTransport>();
+  ControllerClientTestPeer::Configure(&client, transport);
+  const std::array observations{1.5, -2.0};
+  ControllerClientTestPeer::HandleState(&client, 3, 17, observations);
+
+  StateLease state;
+  std::string error = "stale diagnostic";
+  ASSERT_EQ(client.ReadLatestState(&state, &error), StateReadResult::kReceived) << error;
+  EXPECT_TRUE(error.empty());
+  ASSERT_TRUE(state);
+  EXPECT_EQ(state.sequence(), 3U);
+
+  error = "stale diagnostic";
+  EXPECT_EQ(client.WaitForNewState(0ms, &state, &error), StateReadResult::kTimeout);
+  EXPECT_TRUE(error.empty());
+  EXPECT_EQ(state.sequence(), 3U);
+
+  const std::array command{1.0, -1.0};
+  error = "stale diagnostic";
+  EXPECT_TRUE(client.SetCommand(command, &error)) << error;
+  EXPECT_TRUE(error.empty());
+
+  error = "stale diagnostic";
+  EXPECT_TRUE(client.ReportFault(FaultCode::kControllerError, "fault", &error)) << error;
+  EXPECT_TRUE(error.empty());
+
+  error = "stale diagnostic";
+  EXPECT_TRUE(client.Unregister(&error)) << error;
+  EXPECT_TRUE(error.empty());
+
+  client.Stop();
+  error = "stale diagnostic";
+  EXPECT_EQ(client.ReadLatestState(&state, &error), StateReadResult::kStopped);
+  EXPECT_TRUE(error.empty());
+  EXPECT_EQ(state.sequence(), 3U);
+}
+
 TEST(ControllerClientTest, WaitRequiresNewStateAndRejectsSecondWaiter) {
   ControllerClient client(Options());
   auto transport = std::make_shared<FakeControllerTransport>();

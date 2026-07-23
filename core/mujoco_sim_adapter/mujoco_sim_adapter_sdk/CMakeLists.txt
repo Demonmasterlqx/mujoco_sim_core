@@ -11,10 +11,14 @@ option(MUJOCO_SIM_ENABLE_QUALITY_GATES
   "Enable Adapter SDK complexity checks in CTest" OFF)
 option(MUJOCO_SIM_BUILD_DOCS
   "Build warning-clean Adapter SDK API documentation with Doxygen" OFF)
+option(MUJOCO_SIM_RUN_SERVER_INTEGRATION_TESTS
+  "Build Adapter SDK end-to-end tests that require Core and Server" ON)
 
 add_library(${PROJECT_NAME}
   src/adapter_domain.cpp
   src/controller_client.cpp
+  src/controller_client_publish.cpp
+  src/controller_client_receive.cpp
   src/ecal_runtime.cpp
   src/internal/adapter_transport.cpp
   src/observer_client.cpp
@@ -68,6 +72,7 @@ include(CTest)
 if(BUILD_TESTING)
   find_package(GTest REQUIRED)
   add_executable(adapter_sdk_test
+    test/controller_client_test_peer.cpp
     test/controller_client_test.cpp
     test/internal_primitives_test.cpp
     test/observer_client_test.cpp
@@ -116,46 +121,48 @@ if(BUILD_TESTING)
   add_test(NAME sensor_stream_ecal_test COMMAND sensor_stream_ecal_test)
   set_tests_properties(sensor_stream_ecal_test PROPERTIES TIMEOUT 15)
 
-  find_package(mujoco_sim_core CONFIG REQUIRED)
-  find_package(mujoco_sim_server CONFIG REQUIRED)
-  if(NOT TARGET mujoco_sim::mujoco-sim-server)
-    message(FATAL_ERROR "mujoco_sim_server package did not export mujoco-sim-server")
-  endif()
-  add_executable(sensor_runtime_ecal_test
-    test/sensor_runtime_ecal_test.cpp
-  )
-  target_include_directories(sensor_runtime_ecal_test PRIVATE
-    "${CMAKE_CURRENT_SOURCE_DIR}/../../mujoco_sim_server/src"
-  )
-  target_compile_definitions(sensor_runtime_ecal_test PRIVATE
-    MUJOCO_SIM_SENSOR_RUNTIME_ECAL_MODEL="${CMAKE_CURRENT_SOURCE_DIR}/../../mujoco_sim_server/test/testdata/sensor_runtime_scene.xml"
-  )
-  target_link_libraries(sensor_runtime_ecal_test PRIVATE
-    ${PROJECT_NAME}
-    mujoco_sim::core
-    mujoco_sim::server
-    GTest::gtest_main
-  )
-  add_test(NAME sensor_runtime_ecal_test COMMAND sensor_runtime_ecal_test)
-  set_tests_properties(sensor_runtime_ecal_test PROPERTIES
-    ENVIRONMENT "DISPLAY=;WAYLAND_DISPLAY="
-    TIMEOUT 20
-  )
+  if(MUJOCO_SIM_RUN_SERVER_INTEGRATION_TESTS)
+    find_package(mujoco_sim_core CONFIG REQUIRED)
+    find_package(mujoco_sim_server CONFIG REQUIRED)
+    if(NOT TARGET mujoco_sim::mujoco-sim-server)
+      message(FATAL_ERROR "mujoco_sim_server package did not export mujoco-sim-server")
+    endif()
+    add_executable(sensor_runtime_ecal_test
+      test/sensor_runtime_ecal_test.cpp
+    )
+    target_include_directories(sensor_runtime_ecal_test PRIVATE
+      "${CMAKE_CURRENT_SOURCE_DIR}/../../mujoco_sim_server/src"
+    )
+    target_compile_definitions(sensor_runtime_ecal_test PRIVATE
+      MUJOCO_SIM_SENSOR_RUNTIME_ECAL_MODEL="${CMAKE_CURRENT_SOURCE_DIR}/../../mujoco_sim_server/test/testdata/sensor_runtime_scene.xml"
+    )
+    target_link_libraries(sensor_runtime_ecal_test PRIVATE
+      ${PROJECT_NAME}
+      mujoco_sim::core
+      mujoco_sim::server
+      GTest::gtest_main
+    )
+    add_test(NAME sensor_runtime_ecal_test COMMAND sensor_runtime_ecal_test)
+    set_tests_properties(sensor_runtime_ecal_test PROPERTIES
+      ENVIRONMENT "DISPLAY=;WAYLAND_DISPLAY="
+      TIMEOUT 20
+    )
 
-  add_executable(adapter_sdk_lifecycle_probe
-    test/adapter_sdk_lifecycle_probe.cpp
-  )
-  target_link_libraries(adapter_sdk_lifecycle_probe PRIVATE ${PROJECT_NAME})
-  add_test(
-    NAME adapter_sdk_lifecycle_e2e
-    COMMAND
-      bash
-      "${CMAKE_CURRENT_SOURCE_DIR}/test/adapter_sdk_lifecycle_e2e.sh"
-      "$<TARGET_FILE:mujoco_sim::mujoco-sim-server>"
-      "$<TARGET_FILE:adapter_sdk_lifecycle_probe>"
-      "${CMAKE_CURRENT_SOURCE_DIR}/../../mujoco_sim_core/test/testdata/simple_actuator.xml"
-  )
-  set_tests_properties(adapter_sdk_lifecycle_e2e PROPERTIES TIMEOUT 20)
+    add_executable(adapter_sdk_lifecycle_probe
+      test/adapter_sdk_lifecycle_probe.cpp
+    )
+    target_link_libraries(adapter_sdk_lifecycle_probe PRIVATE ${PROJECT_NAME})
+    add_test(
+      NAME adapter_sdk_lifecycle_e2e
+      COMMAND
+        bash
+        "${CMAKE_CURRENT_SOURCE_DIR}/test/adapter_sdk_lifecycle_e2e.sh"
+        "$<TARGET_FILE:mujoco_sim::mujoco-sim-server>"
+        "$<TARGET_FILE:adapter_sdk_lifecycle_probe>"
+        "${CMAKE_CURRENT_SOURCE_DIR}/../../mujoco_sim_core/test/testdata/simple_actuator.xml"
+    )
+    set_tests_properties(adapter_sdk_lifecycle_e2e PROPERTIES TIMEOUT 20)
+  endif()
 
   configure_file(
     test/package_consumer_test.cmake.in
@@ -189,13 +196,17 @@ endif()
 
 if(MUJOCO_SIM_BUILD_DOCS)
   find_package(Doxygen REQUIRED)
-  set(DOXYGEN_EXTRACT_ALL YES)
-  set(DOXYGEN_EXTRACT_PRIVATE NO)
+  set(DOXYGEN_EXTRACT_ALL NO)
+  set(DOXYGEN_EXTRACT_PRIVATE YES)
+  set(DOXYGEN_FILE_PATTERNS "*.hpp")
+  set(DOXYGEN_RECURSIVE YES)
   set(DOXYGEN_WARN_IF_UNDOCUMENTED YES)
   set(DOXYGEN_WARN_AS_ERROR FAIL_ON_WARNINGS)
   set(DOXYGEN_QUIET YES)
   doxygen_add_docs(mujoco_sim_adapter_sdk_docs
     "${CMAKE_CURRENT_SOURCE_DIR}/include/mujoco_sim/adapter_sdk"
+    "${CMAKE_CURRENT_SOURCE_DIR}/src"
+    "${CMAKE_CURRENT_SOURCE_DIR}/test"
     COMMENT "Generate warning-clean Adapter SDK API documentation"
   )
 endif()

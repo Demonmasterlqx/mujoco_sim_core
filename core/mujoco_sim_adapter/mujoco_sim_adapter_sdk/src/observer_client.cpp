@@ -31,6 +31,13 @@ ResourceInfo MapResource(const mujoco_sim::v4::ResourceSlot& slot) {
   return result;
 }
 
+bool HasValidRuntimeOptions(const ObserverOptions& options) {
+  return !options.observation_names.empty() && options.session_timeout_ms > 0 &&
+         options.service_timeout_ms > 0 && options.heartbeat_period_ms >= 100 &&
+         options.heartbeat_period_ms <= options.session_timeout_ms / 3 &&
+         options.queue_capacity > 0;
+}
+
 }  // namespace
 
 ObservationLease::ObservationLease() = default;
@@ -78,10 +85,7 @@ bool ObserverClient::Impl::ValidateOptions(std::string* error) const {
       !mujoco_sim::protocol::ValidateIdentifier(
           options_.observer_id, mujoco_sim::protocol::IdentifierKind::kAdapter, error))
     return false;
-  if (options_.observation_names.empty() || options_.session_timeout_ms == 0 ||
-      options_.heartbeat_period_ms < 100 ||
-      options_.heartbeat_period_ms > options_.session_timeout_ms / 3 ||
-      options_.queue_capacity == 0) {
+  if (!HasValidRuntimeOptions(options_)) {
     *error = "invalid observer resources, timeout, heartbeat, or queue capacity";
     return false;
   }
@@ -189,6 +193,7 @@ void ObserverClient::Impl::ResetSessionData() {
   last_sequence_ = 0;
   last_tick_id_ = 0;
   dropped_frames_ = 0;
+  seen_status_ = false;
   terminal_error_.clear();
   lifecycle_warning_.clear();
 }

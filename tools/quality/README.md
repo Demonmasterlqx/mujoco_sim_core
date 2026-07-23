@@ -13,10 +13,10 @@ python3 tools/quality/test_check_adapter_sdk_complexity.py
 Configuring the Adapter SDK with `MUJOCO_SIM_ENABLE_QUALITY_GATES=ON` adds both
 commands to CTest. `MUJOCO_SIM_BUILD_DOCS=ON` adds the
 `mujoco_sim_adapter_sdk_docs` target and fails on the Doxygen warnings it
-emits. The current configuration uses `EXTRACT_ALL=YES` while the repository
-migrates existing bilingual-header debt, so it does not yet diagnose every
-undocumented declaration. New and changed first-party headers must still meet
-the repository's bilingual documentation rule.
+emits. The configuration uses `EXTRACT_ALL=NO`, `EXTRACT_PRIVATE=YES`, and scans
+public, private, and test first-party `*.hpp` files. Undocumented declarations
+and all other Doxygen warnings are errors. Generated Protobuf and third-party
+headers are outside the input set.
 
 Install the pinned analyzer in an isolated environment:
 
@@ -57,9 +57,14 @@ python3 tools/quality/test_check_simulation_core_complexity.py
 `.github/workflows/simulation-core-quality.yml` installs the pinned analyzer,
 builds and tests Protocol, configures SimulationCore with
 `MUJOCO_SIM_ENABLE_QUALITY_GATES=ON` and `MUJOCO_SIM_BUILD_DOCS=ON`, runs Core
-CTest, and builds the warning-clean `mujoco_sim_core_docs` target. Adapter SDK
-gates are currently local CMake/CTest targets rather than steps in that
-workflow.
+CTest, and builds the warning-clean `mujoco_sim_core_docs` target. Its Adapter
+SDK job installs eCAL 6.1 from the supported eCAL PPA, stages Protocol, builds
+the SDK with strict compiler warnings and Server integration disabled, runs SDK
+unit/eCAL/quality/install-consumer tests, and builds strict Doxygen output.
+
+`MUJOCO_SIM_RUN_SERVER_INTEGRATION_TESTS=OFF` excludes only
+`sensor_runtime_ecal_test` and `adapter_sdk_lifecycle_e2e`. It is useful for the
+standalone quality job; all other SDK tests and gates remain enabled.
 
 On Linux kernels with high address-space randomization, run the Server's
 ThreadSanitizer concurrency tests under `setarch -R`. The checked-in

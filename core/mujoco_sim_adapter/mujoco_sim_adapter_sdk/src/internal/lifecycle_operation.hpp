@@ -70,7 +70,12 @@ class LifecycleOperation {
     ~Lease() { Reset(); }
 
    private:
+    /// Allows the gate to construct an admitted lease. 允许门控构造已准入租约。
     friend class LifecycleOperation;
+    /** @brief Creates an owning lease for an already-reserved operation.
+     *         为已预留操作创建持有租约。
+     * @param owner Borrowed gate that outlives this lease. 生命周期长于本租约的借用门控。
+     */
     explicit Lease(LifecycleOperation* owner) : owner_(owner) {}
 
     /** @brief Releases owned admission if present. 释放当前持有的准入权（如有）。 */
@@ -80,6 +85,8 @@ class LifecycleOperation {
       owner_ = nullptr;
     }
 
+    /// Borrowed gate owning admission state; null in empty/moved-from leases.
+    /// 持有准入状态的借用门控；空租约或被移走租约中为空。
     LifecycleOperation* owner_ = nullptr;
   };
 
@@ -120,8 +127,13 @@ class LifecycleOperation {
     condition_.notify_one();
   }
 
+  /// Protects active_ only; never held while lifecycle work executes.
+  /// 仅保护 active_；执行生命周期工作时绝不持有。
   std::mutex mutex_;
+  /// Waits for the predicate `!active_` under mutex_. 在 mutex_ 下等待谓词 `!active_`。
   std::condition_variable condition_;
+  /// Whether one lease owns lifecycle admission, protected by mutex_.
+  /// 是否已有租约持有生命周期准入权；由 mutex_ 保护。
   bool active_ = false;
 };
 

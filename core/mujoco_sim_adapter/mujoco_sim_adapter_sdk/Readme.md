@@ -1,8 +1,10 @@
 # mujoco_sim_adapter_sdk
 
 The Adapter SDK provides Protocol V4 clients for asynchronous Controllers,
-Observers, and Sensor streams. Public APIs expose domain DTOs, immutable leases,
-spans, and dense scalar arrays rather than generated Protobuf types.
+Observers, and Sensor streams. Controller and Observer APIs expose domain DTOs,
+immutable leases, spans, and dense scalar arrays. The Sensor API intentionally
+exposes Protocol V4 `StreamDescriptor`, `StreamFrameHeader`, and discovery
+Protobuf values together with owned or callback-scoped raw payload bytes.
 
 Lifecycle operations are serialized by a short-lock admission gate. The gate's
 mutex is released before RPC, transport publication, callback teardown, or
@@ -14,6 +16,12 @@ Sensor callbacks for one stream never overlap. If another frame arrives while
 that stream's user callback is still running, the new frame is dropped and
 included in `dropped_samples()` instead of blocking a transport thread or
 building an unbounded callback backlog.
+
+Every public call with a `std::string*` diagnostic requires a non-null pointer
+and clears it on valid entry. Success and `kReceived`, `kTimeout`, or `kStopped`
+results leave it empty; `false` and `kError` provide contextual diagnostics.
+State, Observation, and Sensor sample outputs are transactional and change only
+for `kReceived`. A client is single-use after `Stop()` or successful cleanup.
 
 ## Controller
 
@@ -88,13 +96,19 @@ heartbeat, `Activate()` transitions the provisional session to `ONLINE`, and
 sequence, completed-step tick, simulation time, and dense observations.
 An ordinary heartbeat rejection is recorded by `lifecycle_warning()` and
 retried at the next cadence; serialization, missing-endpoint, and eCAL errors
-are terminal and wake observation waiters with `kError`.
+are terminal and wake observation waiters with `kError`. A matching remote
+`ERROR`, `OFFLINE`, or `UNREGISTERED` state, replacement of the session, or
+disappearance after the session was first observed is also terminal. Wrong
+epochs and unrelated IDs/roles before the first match are ignored. A normally
+`STOPPED` Server wakes waiters with `kStopped` and no diagnostic.
 
 Sensor clients do not create an Adapter session. They discover V4 stream
 descriptors and receive raw payloads with the separate `MJSTREAM` 1.0 framing
 and V4 `StreamFrameHeader` into per-stream bounded mailboxes, or deliver a
 borrowed `StreamSampleView` synchronously to a callback. Sensor payloads do not
-enter Controller State or Observer frames.
+enter Controller State or Observer frames. The borrowed payload is valid only
+until the callback returns; only `StreamSampleView::Copy()` creates a sample
+that may be retained beyond that callback.
 
 ## Build and test
 
@@ -105,4 +119,23 @@ cmake -S core/mujoco_sim_adapter/mujoco_sim_adapter_sdk \
   -B build/mujoco_sim_adapter_sdk -DBUILD_TESTING=ON
 cmake --build build/mujoco_sim_adapter_sdk -j
 ctest --test-dir build/mujoco_sim_adapter_sdk --output-on-failure
+```
+
+`MUJOCO_SIM_RUN_SERVER_INTEGRATION_TESTS=ON` is the default and adds the Sensor
+runtime and lifecycle Server E2E tests. Set it to `OFF` only when Core/Server
+packages are unavailable; SDK unit tests, real eCAL tests, strict documentation,
+quality gates, and the installed-package consumer remain available. A strict
+standalone SDK gate can be configured with:
+
+```bash
+cmake -S core/mujoco_sim_adapter/mujoco_sim_adapter_sdk \
+  -B build/mujoco_sim_adapter_sdk-quality \
+  -DBUILD_TESTING=ON \
+  -DMUJOCO_SIM_RUN_SERVER_INTEGRATION_TESTS=OFF \
+  -DMUJOCO_SIM_BUILD_DOCS=ON \
+  -DMUJOCO_SIM_ENABLE_QUALITY_GATES=ON
+cmake --build build/mujoco_sim_adapter_sdk-quality -j
+cmake --build build/mujoco_sim_adapter_sdk-quality \
+  --target mujoco_sim_adapter_sdk_docs
+ctest --test-dir build/mujoco_sim_adapter_sdk-quality --output-on-failure
 ```

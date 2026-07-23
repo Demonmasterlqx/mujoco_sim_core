@@ -26,6 +26,36 @@ The remaining locks have narrow infrastructure responsibilities:
   thread renders and the simulation thread synchronizes its snapshot;
 - logger and eCAL internals retain their own synchronization.
 
+The Adapter SDK has separate client-side synchronization responsibilities:
+
+- each client lifecycle gate admits one `Start`, `Activate`, cleanup, or other
+  lifecycle operation through a short critical section. The admission lease
+  contains no locked mutex, so RPC, eCAL publication, callback removal, callback
+  drain, and thread join execute without the lifecycle mutex;
+- Controller and Observer state mutexes protect session identity, phase,
+  diagnostics, and their depth-one or bounded mailboxes. The Controller
+  publisher and Observer heartbeat release these mutexes before transport calls;
+- Sensor stream state is protected by one client mutex. A per-stream atomic
+  callback flag rejects overlapping same-stream callbacks without blocking an
+  eCAL receive thread; callbacks for different streams may run concurrently;
+- each callback gate mutex protects admission, the borrowed target pointer, and
+  active counts by thread. Teardown disables admission before removing eCAL
+  callbacks, then waits only for callbacks on other threads, which permits a
+  callback to destroy its own client without waiting for itself;
+- the Observer heartbeat-thread mutex and Controller publisher ownership logic
+  protect thread handles only. Handles are moved out before `join()`, and these
+  locks are not nested with client state mutexes;
+- the process-wide eCAL runtime mutex protects lease counts and
+  initializing/finalizing transition state. It is released before invoking
+  `eCAL::Initialize()` or `eCAL::Finalize()`; concurrent acquisition waits on a
+  condition variable until that transition commits.
+
+`Stop()` publishes atomic cancellation and wakes local conditions before it
+waits for lifecycle admission. No Adapter SDK project mutex is held while
+calling user callbacks, transport methods, eCAL callback removal, or thread
+join. A failed remote unregister preserves session identity independently from
+local terminal state so cleanup can be retried later.
+
 No Server lock serializes Core calls, and no callback, Sensor worker, or GUI
 render thread may call Core. The event queue mutex is released before an RPC
 waits on its promise and before the loop processes an event. The lifecycle mutex

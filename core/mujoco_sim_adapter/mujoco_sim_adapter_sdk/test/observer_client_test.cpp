@@ -141,6 +141,7 @@ class ObserverClientTestPeer {
     client->impl_->last_sequence_ = 0;
     client->impl_->last_tick_id_ = 0;
     client->impl_->dropped_frames_ = 0;
+    client->impl_->seen_status_ = false;
     client->impl_->terminal_error_.clear();
     client->impl_->transport_ = transport;
     return transport;
@@ -165,6 +166,16 @@ class ObserverClientTestPeer {
   static mujoco_sim::v4::SessionHeartbeat BuildHeartbeat(ObserverClient* client) {
     std::lock_guard lock(client->impl_->mutex_);
     return client->impl_->BuildHeartbeat();
+  }
+
+  static void HandleStatus(ObserverClient* client, const mujoco_sim::v4::ServerStatus& status) {
+    const auto bytes = status.SerializeAsString();
+    client->impl_->HandleStatusBytes(bytes.data(), bytes.size());
+  }
+
+  static bool IsWaiting(ObserverClient* client) {
+    std::lock_guard lock(client->impl_->mutex_);
+    return client->impl_->observations_.wait_in_progress();
   }
 
   static bool Unregister(ObserverClient* client, std::string* error) {
@@ -206,6 +217,31 @@ ObserverOptions Options() {
   return options;
 }
 
+mujoco_sim::v4::ServerStatus ObserverStatus(std::uint64_t session_id,
+                                            mujoco_sim::v4::AdapterState state,
+                                            std::string message = {}) {
+  mujoco_sim::v4::ServerStatus status;
+  status.set_epoch(7);
+  status.set_tick_id(10);
+  status.set_state(mujoco_sim::v4::RUNNING);
+  auto* adapter = status.add_adapters();
+  adapter->set_adapter_id("watcher");
+  adapter->set_role(mujoco_sim::v4::OBSERVER);
+  adapter->set_session_id(session_id);
+  adapter->set_state(state);
+  adapter->set_message(std::move(message));
+  return status;
+}
+
+bool WaitUntilObservationReadBlocks(ObserverClient* client) {
+  const auto deadline = std::chrono::steady_clock::now() + 1s;
+  while (std::chrono::steady_clock::now() < deadline) {
+    if (ObserverClientTestPeer::IsWaiting(client)) return true;
+    std::this_thread::yield();
+  }
+  return false;
+}
+
 TEST(ObserverClientTest, DefaultCadenceIsExplicitOneHundredHertz) {
   const auto options = Options();
   EXPECT_FALSE(options.every_n_steps.has_value());
@@ -227,6 +263,11 @@ TEST(ObserverClientTest, ValidatesCadenceAndHeartbeatRatio) {
   options.heartbeat_period_ms = 400;
   ObserverClient slow(options);
   EXPECT_FALSE(ObserverClientTestPeer::ValidateOptions(&slow, &error));
+
+  options = Options();
+  options.service_timeout_ms = 0;
+  ObserverClient no_service_timeout(options);
+  EXPECT_FALSE(ObserverClientTestPeer::ValidateOptions(&no_service_timeout, &error));
 }
 
 TEST(ObserverClientTest, DeliversDenseLeaseAndCountsDrops) {
@@ -257,6 +298,79 @@ TEST(ObserverClientTest, StopWakesBlockingWaiter) {
   std::this_thread::sleep_for(10ms);
   client.Stop();
   EXPECT_EQ(waiting.get(), ObservationWaitResult::kStopped);
+}
+
+TEST(ObserverClientTest, RemoteUnregisterWakesWaiterWithTerminalError) {
+  ObserverClient client(Options());
+  ObserverClientTestPeer::Configure(&client);
+  std::string wait_error;
+  auto waiting = std::async(std::launch::async, [&] {
+    ObservationLease frame;
+    return client.WaitForObservation(std::chrono::milliseconds::max(), &frame, &wait_error);
+  });
+  ASSERT_TRUE(WaitUntilObservationReadBlocks(&client));
+
+  ObserverClientTestPeer::HandleStatus(
+      &client, ObserverStatus(42, mujoco_sim::v4::UNREGISTERED, "observer heartbeat expired"));
+
+  EXPECT_EQ(waiting.get(), ObservationWaitResult::kError);
+  EXPECT_EQ(wait_error, "observer heartbeat expired");
+}
+
+TEST(ObserverClientTest, MissingPreviouslySeenSessionIsTerminal) {
+  ObserverClient client(Options());
+  ObserverClientTestPeer::Configure(&client);
+  ObserverClientTestPeer::HandleStatus(&client, ObserverStatus(42, mujoco_sim::v4::ONLINE));
+
+  mujoco_sim::v4::ServerStatus missing;
+  missing.set_epoch(7);
+  missing.set_tick_id(11);
+  missing.set_state(mujoco_sim::v4::RUNNING);
+  ObserverClientTestPeer::HandleStatus(&client, missing);
+
+  ObservationLease frame;
+  std::string error;
+  EXPECT_EQ(client.WaitForObservation(0ms, &frame, &error), ObservationWaitResult::kError);
+  EXPECT_EQ(error, "observer session disappeared from ServerStatus");
+}
+
+TEST(ObserverClientTest, ReplacementIsTerminalButUnrelatedStatusIsIgnored) {
+  ObserverClient client(Options());
+  ObserverClientTestPeer::Configure(&client);
+
+  auto unrelated = ObserverStatus(42, mujoco_sim::v4::ONLINE);
+  unrelated.set_epoch(8);
+  ObserverClientTestPeer::HandleStatus(&client, unrelated);
+  unrelated = ObserverStatus(42, mujoco_sim::v4::ONLINE);
+  unrelated.mutable_adapters(0)->set_adapter_id("other");
+  ObserverClientTestPeer::HandleStatus(&client, unrelated);
+  unrelated = ObserverStatus(42, mujoco_sim::v4::ONLINE);
+  unrelated.mutable_adapters(0)->set_role(mujoco_sim::v4::CONTROLLER);
+  ObserverClientTestPeer::HandleStatus(&client, unrelated);
+
+  ObservationLease frame;
+  std::string error = "stale diagnostic";
+  EXPECT_EQ(client.WaitForObservation(0ms, &frame, &error), ObservationWaitResult::kTimeout);
+  EXPECT_TRUE(error.empty());
+
+  ObserverClientTestPeer::HandleStatus(&client, ObserverStatus(99, mujoco_sim::v4::ONLINE));
+  EXPECT_EQ(client.WaitForObservation(0ms, &frame, &error), ObservationWaitResult::kError);
+  EXPECT_EQ(error, "server replaced observer session");
+}
+
+TEST(ObserverClientTest, ServerStopEndsWaitWithoutDiagnostic) {
+  ObserverClient client(Options());
+  ObserverClientTestPeer::Configure(&client);
+  mujoco_sim::v4::ServerStatus stopped;
+  stopped.set_epoch(7);
+  stopped.set_tick_id(10);
+  stopped.set_state(mujoco_sim::v4::STOPPED);
+  ObserverClientTestPeer::HandleStatus(&client, stopped);
+
+  ObservationLease frame;
+  std::string error = "stale diagnostic";
+  EXPECT_EQ(client.WaitForObservation(0ms, &frame, &error), ObservationWaitResult::kStopped);
+  EXPECT_TRUE(error.empty());
 }
 
 TEST(ObserverClientTest, HeartbeatTracksLatestConsumedSequence) {

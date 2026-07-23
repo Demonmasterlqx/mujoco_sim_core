@@ -29,15 +29,51 @@ struct PublishResult {
   std::string error;
 };
 
+/**
+ * @brief Abstracts bounded Adapter RPC and non-blocking publication for clients/tests.
+ *        为客户端与测试抽象有界 Adapter RPC 与非阻塞发布。
+ *
+ * Implementations own their eCAL endpoints. RPC methods write their response
+ * only when transport invocation succeeds and provide contextual diagnostics
+ * on failure. Publication methods distinguish retryable rejection from
+ * terminal serialization/endpoint/eCAL failure through PublishResult.
+ * 实现持有其 eCAL 端点。RPC 方法仅在传输调用成功时写入响应，失败时提供上下文诊断。
+ * 发布方法通过 PublishResult 区分可重试拒绝与终止性的序列化/端点/eCAL 故障。
+ */
 class AdapterTransport {
  public:
+  /** @brief Releases owned transport endpoints. 释放持有的传输端点。 */
   virtual ~AdapterTransport() = default;
+  /** @brief Performs bounded Adapter registration RPC.
+   *         执行有界 Adapter 注册 RPC。
+   * @param request Borrowed registration request. 借用的注册请求。
+   * @param response Required output written on transport success. 必需输出，传输成功时写入。
+   * @param error_message Required contextual transport diagnostic. 必需的上下文传输诊断。
+   * @return true when an RPC response was received; otherwise false.
+   *         收到 RPC 响应时返回 true，否则返回 false。
+   */
   virtual bool Register(const mujoco_sim::v4::RegisterAdapterRequest& request,
                         mujoco_sim::v4::RegisterAdapterResponse* response,
                         std::string* error_message) = 0;
+  /** @brief Performs bounded Adapter activation RPC.
+   *         执行有界 Adapter 激活 RPC。
+   * @param request Borrowed activation request. 借用的激活请求。
+   * @param response Required output written on transport success. 必需输出，传输成功时写入。
+   * @param error_message Required contextual transport diagnostic. 必需的上下文传输诊断。
+   * @return true when an RPC response was received; otherwise false.
+   *         收到 RPC 响应时返回 true，否则返回 false。
+   */
   virtual bool Activate(const mujoco_sim::v4::ActivateAdapterRequest& request,
                         mujoco_sim::v4::ActivateAdapterResponse* response,
                         std::string* error_message) = 0;
+  /** @brief Performs bounded Adapter cleanup RPC.
+   *         执行有界 Adapter 清理 RPC。
+   * @param request Borrowed unregister request. 借用的注销请求。
+   * @param response Required output written on transport success. 必需输出，传输成功时写入。
+   * @param error_message Required contextual transport diagnostic. 必需的上下文传输诊断。
+   * @return true when an RPC response was received; otherwise false.
+   *         收到 RPC 响应时返回 true，否则返回 false。
+   */
   virtual bool Unregister(const mujoco_sim::v4::UnregisterAdapterRequest& request,
                           mujoco_sim::v4::UnregisterAdapterResponse* response,
                           std::string* error_message) = 0;
@@ -76,18 +112,50 @@ class AdapterTransport {
   virtual PublishResult PublishHeartbeat(const mujoco_sim::v4::SessionHeartbeat& heartbeat) = 0;
 };
 
+/** @brief Abstracts bounded Sensor stream discovery for clients and tests.
+ *         为客户端与测试抽象有界 Sensor 数据流发现。
+ */
 class SensorStreamTransport {
  public:
+  /** @brief Releases owned discovery endpoint. 释放持有的发现端点。 */
   virtual ~SensorStreamTransport() = default;
+  /** @brief Performs bounded Sensor stream discovery RPC.
+   *         执行有界 Sensor 数据流发现 RPC。
+   * @param request Borrowed discovery request. 借用的发现请求。
+   * @param response Required output written on transport success. 必需输出，传输成功时写入。
+   * @param error_message Required contextual transport diagnostic. 必需的上下文传输诊断。
+   * @return true when an RPC response was received; otherwise false.
+   *         收到 RPC 响应时返回 true，否则返回 false。
+   */
   virtual bool Discover(const mujoco_sim::v4::GetSensorStreamsRequest& request,
                         mujoco_sim::v4::GetSensorStreamsResponse* response,
                         std::string* error_message) = 0;
 };
 
+/** @brief Creates the production eCAL Adapter transport.
+ *         创建生产用 eCAL Adapter 传输。
+ * @param server_name Valid Server identifier used for endpoints. 用于端点的有效服务器标识符。
+ * @param service_timeout_ms Positive discovery/RPC timeout in milliseconds.
+ *                           正数的发现/RPC 超时，单位为毫秒。
+ * @param stop_requested Borrowed atomic cancellation flag that outlives the transport.
+ *                       生命周期长于传输的借用原子取消标志。
+ * @param publish_commands Whether Command/Fault publishers are required.
+ *                         是否需要 Command/Fault 发布端点。
+ * @return Owning transport; endpoint construction may throw. 自有传输；端点构造可能抛出异常。
+ */
 std::shared_ptr<AdapterTransport> MakeEcalAdapterTransport(const std::string& server_name,
                                                            std::uint32_t service_timeout_ms,
                                                            const std::atomic<bool>* stop_requested,
                                                            bool publish_commands);
+/** @brief Creates the production eCAL Sensor discovery transport.
+ *         创建生产用 eCAL Sensor 发现传输。
+ * @param server_name Valid Server identifier used for endpoints. 用于端点的有效服务器标识符。
+ * @param service_timeout_ms Positive discovery/RPC timeout in milliseconds.
+ *                           正数的发现/RPC 超时，单位为毫秒。
+ * @param stop_requested Borrowed atomic cancellation flag that outlives the transport.
+ *                       生命周期长于传输的借用原子取消标志。
+ * @return Owning transport; endpoint construction may throw. 自有传输；端点构造可能抛出异常。
+ */
 std::shared_ptr<SensorStreamTransport> MakeEcalSensorStreamTransport(
     const std::string& server_name, std::uint32_t service_timeout_ms,
     const std::atomic<bool>* stop_requested);

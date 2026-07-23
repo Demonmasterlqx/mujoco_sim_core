@@ -5,12 +5,14 @@ on:
     paths:
       - ".github/workflows/simulation-core-quality.yml"
       - "core/mujoco_sim_core/**"
+      - "core/mujoco_sim_adapter/mujoco_sim_adapter_sdk/**"
       - "core/mujoco_sim_protocol/**"
       - "tools/quality/**"
   push:
     paths:
       - ".github/workflows/simulation-core-quality.yml"
       - "core/mujoco_sim_core/**"
+      - "core/mujoco_sim_adapter/mujoco_sim_adapter_sdk/**"
       - "core/mujoco_sim_protocol/**"
       - "tools/quality/**"
 
@@ -71,3 +73,69 @@ jobs:
 
       - name: Build warning-clean API documentation
         run: cmake --build build/ci-core --target mujoco_sim_core_docs
+
+  adapter-sdk-quality:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install eCAL apt source
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes software-properties-common
+          sudo add-apt-repository --yes ppa:ecal/ecal-6.1
+
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes \
+            cmake \
+            doxygen \
+            ecal \
+            graphviz \
+            libgtest-dev \
+            libprotobuf-dev \
+            lsb-release \
+            ninja-build \
+            protobuf-compiler \
+            python3-venv
+
+      - name: Install pinned quality tools
+        run: |
+          python3 -m venv build/quality-venv
+          build/quality-venv/bin/pip install \
+            --requirement tools/quality/requirements.txt
+
+      - name: Build and install protocol
+        run: |
+          cmake -S core/mujoco_sim_protocol -B build/ci-sdk-protocol -G Ninja \
+            -DBUILD_TESTING=ON \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_INSTALL_PREFIX="$PWD/build/ci-sdk-install"
+          cmake --build build/ci-sdk-protocol
+          ctest --test-dir build/ci-sdk-protocol --output-on-failure
+          cmake --install build/ci-sdk-protocol
+
+      - name: Configure Adapter SDK gates
+        run: |
+          export PATH="$PWD/build/quality-venv/bin:$PATH"
+          cmake -S core/mujoco_sim_adapter/mujoco_sim_adapter_sdk \
+            -B build/ci-adapter-sdk -G Ninja \
+            -DBUILD_TESTING=ON \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_CXX_FLAGS="-Wall -Wextra -Wpedantic -Werror" \
+            -DCMAKE_INSTALL_PREFIX="$PWD/build/ci-sdk-install" \
+            -DCMAKE_PREFIX_PATH="$PWD/build/ci-sdk-install" \
+            -DMUJOCO_SIM_BUILD_DOCS=ON \
+            -DMUJOCO_SIM_ENABLE_QUALITY_GATES=ON \
+            -DMUJOCO_SIM_RUN_SERVER_INTEGRATION_TESTS=OFF
+
+      - name: Build and test Adapter SDK
+        run: |
+          cmake --build build/ci-adapter-sdk
+          ctest --test-dir build/ci-adapter-sdk --output-on-failure
+
+      - name: Build strict Adapter SDK documentation
+        run: cmake --build build/ci-adapter-sdk --target mujoco_sim_adapter_sdk_docs

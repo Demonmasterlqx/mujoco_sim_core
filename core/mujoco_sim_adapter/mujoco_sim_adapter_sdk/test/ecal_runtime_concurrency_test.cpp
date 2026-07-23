@@ -12,7 +12,7 @@
 namespace mujoco_sim::adapter_sdk::internal {
 namespace {
 
-TEST(EcalRuntimeConcurrencyTest, SharesConcurrentLeasesAndReinitializesAfterRelease) {
+void RunConcurrentLeaseRound(std::size_t round) {
   constexpr std::size_t kThreadCount = 8;
   std::latch acquired(kThreadCount);
   std::latch release(1);
@@ -23,7 +23,8 @@ TEST(EcalRuntimeConcurrencyTest, SharesConcurrentLeasesAndReinitializesAfterRele
   for (std::size_t index = 0; index < kThreadCount; ++index) {
     threads.emplace_back([&, index] {
       std::string error;
-      auto lease = AcquireEcalRuntime("mujoco-sim-ecal-runtime-" + std::to_string(index), &error);
+      auto lease = AcquireEcalRuntime(
+          "mujoco-sim-ecal-runtime-" + std::to_string(round) + "-" + std::to_string(index), &error);
       if (!lease) ++failures;
       acquired.count_down();
       release.wait();
@@ -34,10 +35,18 @@ TEST(EcalRuntimeConcurrencyTest, SharesConcurrentLeasesAndReinitializesAfterRele
   release.count_down();
   for (auto& thread : threads)
     thread.join();
+}
 
-  std::string error;
-  auto lease = AcquireEcalRuntime("mujoco-sim-ecal-runtime-restart", &error);
-  EXPECT_TRUE(lease) << error;
+TEST(EcalRuntimeConcurrencyTest, SharesConcurrentLeasesAcrossRepeatedReinitialization) {
+  constexpr std::size_t kRoundCount = 4;
+  for (std::size_t round = 0; round < kRoundCount; ++round) {
+    RunConcurrentLeaseRound(round);
+
+    std::string error;
+    auto lease =
+        AcquireEcalRuntime("mujoco-sim-ecal-runtime-restart-" + std::to_string(round), &error);
+    EXPECT_TRUE(lease) << error;
+  }
 }
 
 }  // namespace

@@ -117,20 +117,32 @@ void ObserverClient::Impl::HandleStatusBytes(const void* data, std::size_t size)
   mujoco_sim::v4::ServerStatus status;
   if (!status.ParseFromArray(data, static_cast<int>(size))) return;
   internal::SessionIdentity identity;
+  bool session_was_seen = false;
   {
     std::lock_guard lock(mutex_);
     if (!session_.has_session()) return;
     identity = session_.identity();
+    session_was_seen = seen_status_;
   }
-  auto decision = internal::EvaluateAdapterStatus(status, options_.server_name, identity.epoch,
-                                                  options_.observer_id, identity.session_id,
-                                                  mujoco_sim::v4::OBSERVER, true);
-  if (decision.message == "server replaced adapter session")
+  auto decision = internal::EvaluateAdapterStatus(status, identity.epoch, options_.observer_id,
+                                                  identity.session_id, mujoco_sim::v4::OBSERVER,
+                                                  true, session_was_seen);
+  if (decision.matched_session) {
+    std::lock_guard lock(mutex_);
+    seen_status_ = true;
+  }
+  if (decision.message == "server replaced adapter session") {
     decision.message = "server replaced observer session";
-  if (decision.action == internal::StatusAction::kStopped)
+  } else if (decision.message == "adapter session disappeared from ServerStatus") {
+    decision.message = "observer session disappeared from ServerStatus";
+  } else if (decision.message.starts_with("server marked adapter as ")) {
+    decision.message.replace(14, 7, "observer");
+  }
+  if (decision.action == internal::StatusAction::kStopped) {
     TransitionToStopped();
-  else if (decision.action == internal::StatusAction::kError)
+  } else if (decision.action == internal::StatusAction::kError) {
     SetTerminalError(decision.message);
+  }
 }
 
 void ObserverClient::Impl::SetTerminalError(const std::string& error) {
