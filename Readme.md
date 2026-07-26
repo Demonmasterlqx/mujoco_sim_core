@@ -4,7 +4,7 @@
 
 | 包 | 作用 | 文档 |
 |---|---|---|
-| `mujoco_sim_config` | 从 schema 在构建期生成 C++ 配置类型、严格 YAML/CLI 解析器 | [查看](core/mujoco_sim_config/README.md) |
+| `mujoco_sim_config` | 从 schema 在构建期生成 C++ 配置类型、严格 YAML/CLI 解析器 | [查看](core/mujoco_sim_config/README.zh-CN.md) |
 | `mujoco_sim_protocol` | 定义唯一 Protocol V4 控制面、稠密数据面、Sensor framing 和 eCAL 命名规则 | [查看](core/mujoco_sim_protocol/Readme.md) |
 | `mujoco_sim_core` | 管理 MuJoCo 状态、资源所有权和异步控制仿真 | [查看](core/mujoco_sim_core/Readme.md) |
 | `mujoco_sim_sensor` | 从隔离 Snapshot 捕获 headless camera 与 360 度 ray LiDAR | [查看](core/mujoco_sim_sensor/README.md) |

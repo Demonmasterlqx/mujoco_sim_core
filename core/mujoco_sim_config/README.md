@@ -1,5 +1,7 @@
 # mujoco_sim_config
 
+[English](README.md) | [简体中文](README.zh-CN.md)
+
 Pure CMake/colcon package for generating C++20 configuration structs and
 strict YAML/CLI parsers. The runtime links `CLI11::CLI11` and
 `yaml-cpp::yaml-cpp`; generation uses Python 3 and PyYAML.
@@ -117,10 +119,10 @@ overrides are applied, validated, and committed, giving
 `CLI > YAML > struct defaults` regardless of `--config` argument order.
 YAML accepts one document with a mapping root and rejects unknown or duplicate
 keys, coercive scalar types, unsigned overflow, and constraint violations.
-YAML diagnostics include one-based file, line, and column information.
-Relative `path` values loaded from YAML are resolved against the configuration
-file directory. Relative paths supplied by CLI remain relative to the process
-working directory.
+When a YAML node location is available, diagnostics include the file and
+one-based line and column information. Relative `path` values loaded from YAML
+are resolved against the configuration file directory. Relative paths supplied
+by CLI remain relative to the process working directory.
 
 ## Build And Test
 
