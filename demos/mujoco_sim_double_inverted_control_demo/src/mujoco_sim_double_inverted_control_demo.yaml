@@ -1,0 +1,41 @@
+version: 1
+namespace: mujoco_sim_double_inverted_control_demo
+name: ServerConfig
+program: mujoco-sim-double-inverted-control-demo
+description: mujoco-sim-double-inverted-control-demo
+
+fields:
+  server_name:
+    type: string
+    description: Server namespace
+    default: default
+    cli: [--server-name]
+  adapter_id:
+    type: string
+    description: Adapter id
+    default: mujoco_sim_double_inverted_control_demo_adapter
+    cli: [--adapter-id]
+  actuators_name:
+    type: vector<string>
+    description: actuator name, only two joints are supported
+    default: ["first_joint_actuator", "second_joint_actuator"]
+  joints_pos_name:
+    type: vector<string>
+    description: joints pos sensor name, only two joints are supported
+    default: ["first_joint_pos", "second_joint_pos"]
+  joints_vel_name:
+    type: vector<string>
+    description: joints vel sensor name, only two joints are supported
+    default: ["first_joint_vel", "second_joint_vel"]
+  joints_torque_name:
+    type: vector<string>
+    description: joints torque sensor name, only two joints are supported
+    default: ["first_joint_torque", "second_joint_torque"]
+  # joints_torque_max:
+  #   type: vector<float>
+  #   description: joints torque max, only two joints are supported
+  #   default: [14.0, 7.9]
+  control_hz:
+    type: double
+    description: control frequency
+    default: 1000.0

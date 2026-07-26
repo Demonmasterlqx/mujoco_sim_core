@@ -1,0 +1,114 @@
+<mujoco model="double inverted pendulum">
+  <compiler angle="radian" autolimits="true" inertiafromgeom="auto"/>
+
+  <option timestep="0.002" gravity="0 0 -9.81" integrator="implicitfast"
+          solver="Newton" iterations="50" tolerance="1e-10">
+    <flag filterparent="disable"/>
+  </option>
+
+  <statistic center="0 0 1.6" extent="2.2"/>
+
+  <visual>
+    <global azimuth="135" elevation="-20"/>
+    <headlight ambient="0.35 0.35 0.35" diffuse="0.65 0.65 0.65"
+               specular="0.1 0.1 0.1"/>
+    <rgba haze="0.82 0.86 0.90 1"/>
+  </visual>
+
+  <asset>
+    <texture name="floor_grid" type="2d" builtin="checker" width="512" height="512"
+             rgb1="0.72 0.74 0.75" rgb2="0.56 0.59 0.61" mark="edge"
+             markrgb="0.30 0.32 0.34"/>
+    <material name="floor_material" texture="floor_grid" texuniform="true"
+              texrepeat="8 8" reflectance="0.08"/>
+    <material name="support_material" rgba="0.18 0.22 0.26 1"/>
+    <material name="first_link_material" rgba="0.10 0.42 0.62 1"/>
+    <material name="second_link_material" rgba="0.82 0.31 0.16 1"/>
+    <material name="joint_material" rgba="0.90 0.72 0.12 1"/>
+  </asset>
+
+  <default>
+    <geom solref="0.01 1" solimp="0.90 0.95 0.001"
+          friction="0.8 0.005 0.0001" condim="3"/>
+    <joint type="hinge" axis="0 1 0" limited="false" damping="0.02"
+           armature="0.01"/>
+  </default>
+
+  <worldbody>
+    <light name="key_light" pos="-2 -2 4" dir="0.35 0.35 -1"
+           diffuse="0.75 0.73 0.68" specular="0.08 0.08 0.08"/>
+    <light name="fill_light" pos="2 1 3" dir="-0.3 -0.15 -1"
+           diffuse="0.42 0.47 0.52" specular="0.04 0.04 0.04"/>
+
+    <geom name="floor" type="plane" size="4 4 0.05" material="floor_material"/>
+
+    <!-- The two fixed columns leave the pendulum's X-Z motion plane unobstructed. -->
+    <body name="support">
+      <geom name="support_base" type="box" pos="0 0 0.05" size="0.42 0.48 0.05"
+            material="support_material"/>
+      <geom name="support_left" type="box" pos="0 0.34 0.84" size="0.10 0.08 0.76"
+            material="support_material"/>
+      <geom name="support_right" type="box" pos="0 -0.34 0.84" size="0.10 0.08 0.76"
+            material="support_material"/>
+      <geom name="support_axle" type="cylinder" pos="0 0 1.6" size="0.07 0.42"
+            quat="0.70710678 0.70710678 0 0" contype="0" conaffinity="0"
+            material="joint_material"/>
+    </body>
+
+    <!-- qpos = 0 points both links vertically upward, the inverted equilibrium. -->
+    <body name="first_link" pos="0 0 1.6">
+      <joint name="first_joint"/>
+      <geom name="first_joint_hub" type="cylinder" size="0.10 0.10"
+            quat="0.70710678 0.70710678 0 0" mass="0.20"
+            contype="0" conaffinity="0" material="joint_material"/>
+      <geom name="first_link_rod" type="capsule" size="0.055"
+            fromto="0 0 0 0 0 0.75" mass="1.50" contype="0" conaffinity="0"
+            material="first_link_material"/>
+      <!-- Collision geometry stops short of both hubs to avoid permanent joint contact. -->
+      <geom name="first_link_collision" type="capsule" size="0.055"
+            fromto="0 0 0.11 0 0 0.64" mass="0" rgba="0 0 0 0"
+            solref="0.004 1" solimp="0.95 0.99 0.001"/>
+
+      <body name="second_link" pos="0 0 0.75">
+        <joint name="second_joint"/>
+        <geom name="second_joint_hub" type="cylinder" size="0.085 0.09"
+              quat="0.70710678 0.70710678 0 0" mass="0.16"
+              contype="0" conaffinity="0" material="joint_material"/>
+        <geom name="second_link_rod" type="capsule" size="0.045"
+              fromto="0 0 0 0 0 0.65" mass="1.00" contype="0" conaffinity="0"
+              material="second_link_material"/>
+        <geom name="second_link_collision" type="capsule" size="0.045"
+              fromto="0 0 0.10 0 0 0.57" mass="0" rgba="0 0 0 0"
+              solref="0.004 1" solimp="0.95 0.99 0.001"/>
+        <geom name="pendulum_tip" type="sphere" pos="0 0 0.65" size="0.07"
+              mass="0.12" material="joint_material"/>
+      </body>
+    </body>
+  </worldbody>
+
+  <!-- Direct-drive torque actuators; control values and force limits are N m. -->
+  <actuator>
+    <motor name="first_joint_actuator" joint="first_joint" gear="1"
+           ctrllimited="true" ctrlrange="-100 100"
+           forcelimited="true" forcerange="-100 100"/>
+    <motor name="second_joint_actuator" joint="second_joint" gear="1"
+           ctrllimited="true" ctrlrange="-100 100"
+           forcelimited="true" forcerange="-100 100"/>
+  </actuator>
+
+  <sensor>
+    <jointpos name="first_joint_pos" joint="first_joint"/>
+    <jointvel name="first_joint_vel" joint="first_joint"/>
+    <actuatorfrc name="first_joint_torque" actuator="first_joint_actuator"/>
+    <jointpos name="second_joint_pos" joint="second_joint"/>
+    <jointvel name="second_joint_vel" joint="second_joint"/>
+    <actuatorfrc name="second_joint_torque" actuator="second_joint_actuator"/>
+  </sensor>
+
+  <keyframe>
+    <key name="upright" qpos="0 0" ctrl="0 0"/>
+    <key name="hanging_down" qpos="3.14159265 0" ctrl="0 0"/>
+    <!-- 35 degrees at the first joint and -50 degrees at the second joint. -->
+    <key name="random_unstable" qpos="0.61086524 -0.87266463" ctrl="0 0"/>
+  </keyframe>
+</mujoco>

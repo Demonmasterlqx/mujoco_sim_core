@@ -1,0 +1,13 @@
+server_name: default
+model_path: ../mjcf/scene.xml
+initial_keyframe: random_unstable
+max_ticks: 0
+pacing_mode: realtime
+realtime_factor: 1.0
+command_timeout_ms: 5000
+command_keepalive_ms: 250
+activation_timeout_ms: 10000
+status_period_ms: 100
+headless: false
+render_backend: auto
+log_level: info
