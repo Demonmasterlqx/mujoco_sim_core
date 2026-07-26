@@ -39,3 +39,21 @@ fields:
     type: double
     description: control frequency
     default: 1000.0
+  kp:
+    type: double
+    description: proportional gain shared by both joints
+    default: 20.0
+    finite: true
+    min: 0.0
+  kd:
+    type: double
+    description: derivative gain shared by both joints
+    default: 3.0
+    finite: true
+    min: 0.0
+  torque_limit:
+    type: double
+    description: symmetric torque limit shared by both joints
+    default: 100.0
+    finite: true
+    min: 0.0
