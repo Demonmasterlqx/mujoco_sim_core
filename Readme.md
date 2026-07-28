@@ -10,14 +10,17 @@
 | `mujoco_sim_sensor` | 从隔离 Snapshot 捕获 headless camera 与 360 度 ray LiDAR | [查看](core/mujoco_sim_sensor/README.md) |
 | `mujoco_sim_server` | 提供 eCAL server、配置解析和图形界面 | [查看](core/mujoco_sim_server/Readme.md) |
 | `mujoco_sim_adapter_sdk` | 提供异步 Controller、Observer 与 Sensor Stream C++ Client | [查看](core/mujoco_sim_adapter/mujoco_sim_adapter_sdk/Readme.md) |
+| `mujoco_sim_hardware_interface` | 将 Protocol V4 Controller 映射为 ROS 2 Jazzy ros2_control system plugin | [查看](core/mujoco_sim_adapter/mujoco_sim_hardware_interface/Readme.md) |
 | `mujoco_sim_double_inverted_control_demo` | 使用独立 Controller adapter 控制双倒立摆 | [查看](demos/mujoco_sim_double_inverted_control_demo/README.md) |
 | `mujoco_sim_wbr_lqr_demo` | 迁移 WBR LQR 抡腿机器人控制器，提供可配置接口和完整闭环示例 | [查看](demos/mujoco_sim_wbr_lqr_demo/README.md) |
 | `mujoco_sim_dual_adapter_demo` | 在同一个 Server 中同时运行 WBR LQR 与双倒立摆 Controller | [查看](demos/mujoco_sim_dual_adapter_demo/README.md) |
 | `mujoco_sim_sensor_demo` | 四进程房间巡航、相机消费和 IMU/LiDAR ICP 建图示例 | [查看](demos/mujoco_sim_sensor_demo/README.md) |
+| `mujoco_sim_hardware_interface_demo` | 使用标准 diff_drive/IMU broadcaster 的 ROS 2 差速车闭环示例 | [查看](demos/mujoco_sim_hardware_interface_demo/README.md) |
 
 ## 构建方式
 
-使用 colcon 作为构建工具。所有包均为纯 CMake 包：
+使用 colcon 作为构建工具。仿真运行时包为纯 CMake 包；可选的 ROS 2 Control 集成包和
+对应 demo 使用 ROS 2 Jazzy ament_cmake：
 
 系统依赖统一通过 apt 安装，禁止使用 rosdep。安装前需要为 Ubuntu 24.04 配置可提供
 `ecal` 和 `python3-colcon-common-extensions` 的 apt 软件源。配置生成依赖
@@ -34,13 +37,28 @@ sudo apt install --yes \
   python3-colcon-common-extensions python3-venv python3-yaml xvfb
 ```
 
+构建 ROS 2 Control 集成还需先配置 ROS 2 Jazzy apt 软件源，然后安装：
+
 ```bash
-colcon list --topological-order
-colcon build --symlink-install --cmake-args -DBUILD_TESTING=ON
-colcon test --packages-select \
+sudo apt install --yes \
+  ros-jazzy-ament-cmake ros-jazzy-controller-manager \
+  ros-jazzy-diff-drive-controller ros-jazzy-hardware-interface \
+  ros-jazzy-geometry-msgs \
+  ros-jazzy-imu-sensor-broadcaster ros-jazzy-joint-state-broadcaster \
+  ros-jazzy-nav-msgs ros-jazzy-pluginlib ros-jazzy-rclpy \
+  ros-jazzy-realtime-tools ros-jazzy-robot-state-publisher ros-jazzy-sensor-msgs \
+  ros-jazzy-rosgraph-msgs ros-jazzy-std-msgs ros-jazzy-tf2-msgs ros-jazzy-tf2-ros
+source /opt/ros/jazzy/setup.bash
+```
+
+```bash
+colcon list --base-paths core demos --topological-order
+colcon build --base-paths core demos --symlink-install --cmake-args -DBUILD_TESTING=ON
+colcon test --base-paths core demos --packages-select \
   mujoco_sim_config mujoco_sim_protocol mujoco_sim_core mujoco_sim_sensor \
   mujoco_sim_server mujoco_sim_adapter_sdk mujoco_sim_wbr_lqr_demo \
-  mujoco_sim_sensor_demo --event-handlers console_cohesion+
+  mujoco_sim_sensor_demo mujoco_sim_hardware_interface \
+  mujoco_sim_hardware_interface_demo --event-handlers console_cohesion+
 colcon test-result --all --verbose
 ```
 
