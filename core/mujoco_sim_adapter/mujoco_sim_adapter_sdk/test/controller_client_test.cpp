@@ -163,7 +163,7 @@ ControllerOptions Options() {
   return options;
 }
 
-bool WaitUntilReading(ControllerClient* client) {
+bool WaitUntilReading(ControllerClient& client) {
   const auto deadline = std::chrono::steady_clock::now() + 1s;
   while (std::chrono::steady_clock::now() < deadline) {
     if (ControllerClientTestPeer::IsWaiting(client)) return true;
@@ -186,9 +186,9 @@ std::pair<mujoco_sim::protocol::DataFrameHeader, std::vector<double>> Decode(
 TEST(ControllerClientTest, StateLeaseIsMoveOnlyAndRetainsImmutableFrame) {
   ControllerClient client(Options());
   auto transport = std::make_shared<FakeControllerTransport>();
-  ControllerClientTestPeer::Configure(&client, transport);
+  ControllerClientTestPeer::Configure(client, transport);
   const std::array observations{1.5, -2.0};
-  ControllerClientTestPeer::HandleState(&client, 3, 17, observations);
+  ControllerClientTestPeer::HandleState(client, 3, 17, observations);
 
   StateLease lease;
   std::string error;
@@ -210,9 +210,9 @@ TEST(ControllerClientTest, StateLeaseIsMoveOnlyAndRetainsImmutableFrame) {
 TEST(ControllerClientTest, ClearsDiagnosticsAndPreservesOutputForNonErrorResults) {
   ControllerClient client(Options());
   auto transport = std::make_shared<FakeControllerTransport>();
-  ControllerClientTestPeer::Configure(&client, transport);
+  ControllerClientTestPeer::Configure(client, transport);
   const std::array observations{1.5, -2.0};
-  ControllerClientTestPeer::HandleState(&client, 3, 17, observations);
+  ControllerClientTestPeer::HandleState(client, 3, 17, observations);
 
   StateLease state;
   std::string error = "stale diagnostic";
@@ -249,9 +249,9 @@ TEST(ControllerClientTest, ClearsDiagnosticsAndPreservesOutputForNonErrorResults
 TEST(ControllerClientTest, WaitRequiresNewStateAndRejectsSecondWaiter) {
   ControllerClient client(Options());
   auto transport = std::make_shared<FakeControllerTransport>();
-  ControllerClientTestPeer::Configure(&client, transport);
+  ControllerClientTestPeer::Configure(client, transport);
   const std::array first_observations{1.0, 2.0};
-  ControllerClientTestPeer::HandleState(&client, 1, 10, first_observations);
+  ControllerClientTestPeer::HandleState(client, 1, 10, first_observations);
   StateLease first;
   std::string error;
   ASSERT_EQ(client.ReadLatestState(&first, &error), StateReadResult::kReceived);
@@ -261,14 +261,14 @@ TEST(ControllerClientTest, WaitRequiresNewStateAndRejectsSecondWaiter) {
     std::string wait_error;
     return std::pair{client.WaitForNewState(1s, &frame, &wait_error), frame.sequence()};
   });
-  ASSERT_TRUE(WaitUntilReading(&client));
+  ASSERT_TRUE(WaitUntilReading(client));
 
   StateLease competing;
   EXPECT_EQ(client.WaitForNewState(0ms, &competing, &error), StateReadResult::kError);
   EXPECT_EQ(error, "another state read is already in progress");
 
   const std::array next_observations{3.0, 4.0};
-  ControllerClientTestPeer::HandleState(&client, 2, 11, next_observations);
+  ControllerClientTestPeer::HandleState(client, 2, 11, next_observations);
   const auto result = waiting.get();
   EXPECT_EQ(result.first, StateReadResult::kReceived);
   EXPECT_EQ(result.second, 2U);
@@ -277,13 +277,13 @@ TEST(ControllerClientTest, WaitRequiresNewStateAndRejectsSecondWaiter) {
 TEST(ControllerClientTest, StopWakesBlockingStateWait) {
   ControllerClient client(Options());
   auto transport = std::make_shared<FakeControllerTransport>();
-  ControllerClientTestPeer::Configure(&client, transport);
+  ControllerClientTestPeer::Configure(client, transport);
   auto waiting = std::async(std::launch::async, [&] {
     StateLease frame;
     std::string error;
     return client.WaitForNewState(std::chrono::milliseconds::max(), &frame, &error);
   });
-  ASSERT_TRUE(WaitUntilReading(&client));
+  ASSERT_TRUE(WaitUntilReading(client));
   client.Stop();
   EXPECT_EQ(waiting.get(), StateReadResult::kStopped);
 }
@@ -291,9 +291,9 @@ TEST(ControllerClientTest, StopWakesBlockingStateWait) {
 TEST(ControllerClientTest, StopCancelsActivationAtRpcCommitBoundary) {
   ControllerClient client(Options());
   auto transport = std::make_shared<FakeControllerTransport>();
-  ControllerClientTestPeer::Configure(&client, transport);
-  ControllerClientTestPeer::PrepareActivation(&client);
-  ControllerClientTestPeer::EnableRemoteRegistration(&client);
+  ControllerClientTestPeer::Configure(client, transport);
+  ControllerClientTestPeer::PrepareActivation(client);
+  ControllerClientTestPeer::EnableRemoteRegistration(client);
   transport->BlockActivate();
 
   std::string activation_error;
@@ -303,11 +303,11 @@ TEST(ControllerClientTest, StopCancelsActivationAtRpcCommitBoundary) {
 
   auto stopping = std::async(std::launch::async, [&] { client.Stop(); });
   const auto stop_deadline = std::chrono::steady_clock::now() + 1s;
-  while (!ControllerClientTestPeer::StopRequested(&client) &&
+  while (!ControllerClientTestPeer::StopRequested(client) &&
          std::chrono::steady_clock::now() < stop_deadline) {
     std::this_thread::yield();
   }
-  ASSERT_TRUE(ControllerClientTestPeer::StopRequested(&client));
+  ASSERT_TRUE(ControllerClientTestPeer::StopRequested(client));
   transport->ReleaseActivate();
 
   EXPECT_FALSE(activating.get());
@@ -320,10 +320,10 @@ TEST(ControllerClientTest, StopCancelsActivationAtRpcCommitBoundary) {
 TEST(ControllerClientTest, PublisherStartFailureCompensatesRemoteActivation) {
   ControllerClient client(Options());
   auto transport = std::make_shared<FakeControllerTransport>();
-  ControllerClientTestPeer::Configure(&client, transport);
-  ControllerClientTestPeer::PrepareActivation(&client);
-  ControllerClientTestPeer::EnableRemoteRegistration(&client);
-  ControllerClientTestPeer::FailPublisherStart(&client);
+  ControllerClientTestPeer::Configure(client, transport);
+  ControllerClientTestPeer::PrepareActivation(client);
+  ControllerClientTestPeer::EnableRemoteRegistration(client);
+  ControllerClientTestPeer::FailPublisherStart(client);
 
   std::string error;
   EXPECT_FALSE(client.Activate(&error));
@@ -341,13 +341,13 @@ TEST(ControllerClientTest, PublisherStartFailureCompensatesRemoteActivation) {
 TEST(ControllerClientTest, LatestCommandWinsBeforePublish) {
   ControllerClient client(Options());
   auto transport = std::make_shared<FakeControllerTransport>();
-  ControllerClientTestPeer::Configure(&client, transport, 1s);
+  ControllerClientTestPeer::Configure(client, transport, 1s);
   std::string error;
   const std::array first{1.0, 2.0};
   const std::array latest{3.0, 4.0};
   ASSERT_TRUE(client.SetCommand(first, &error)) << error;
   ASSERT_TRUE(client.SetCommand(latest, &error)) << error;
-  ControllerClientTestPeer::StartPublisher(&client);
+  ControllerClientTestPeer::StartPublisher(client);
   ASSERT_TRUE(transport->WaitForCommands(1, 1s));
   client.Stop();
 
@@ -363,11 +363,11 @@ TEST(ControllerClientTest, FailedSendRetriesIdenticalBytesThenKeepaliveAdvances)
   ControllerClient client(Options());
   auto transport = std::make_shared<FakeControllerTransport>();
   transport->SetOutcomes({false, false, true, true});
-  ControllerClientTestPeer::Configure(&client, transport, 20ms);
+  ControllerClientTestPeer::Configure(client, transport, 20ms);
   std::string error;
   const std::array command{5.0, -6.0};
   ASSERT_TRUE(client.SetCommand(command, &error)) << error;
-  ControllerClientTestPeer::StartPublisher(&client);
+  ControllerClientTestPeer::StartPublisher(client);
   ASSERT_TRUE(transport->WaitForCommands(4, 2s));
   client.Stop();
 
@@ -387,11 +387,11 @@ TEST(ControllerClientTest, PublisherExceptionBecomesTerminalReadError) {
   ControllerClient client(Options());
   auto transport = std::make_shared<FakeControllerTransport>();
   transport->ThrowOnPublish();
-  ControllerClientTestPeer::Configure(&client, transport);
+  ControllerClientTestPeer::Configure(client, transport);
   std::string error;
   const std::array command{5.0, -6.0};
   ASSERT_TRUE(client.SetCommand(command, &error)) << error;
-  ControllerClientTestPeer::StartPublisher(&client);
+  ControllerClientTestPeer::StartPublisher(client);
   ASSERT_TRUE(transport->WaitForCommands(1, 1s));
 
   StateLease state;
@@ -404,11 +404,11 @@ TEST(ControllerClientTest, PublisherTransportErrorBecomesTerminalReadError) {
   ControllerClient client(Options());
   auto transport = std::make_shared<FakeControllerTransport>();
   transport->FailPublish("eCAL send failed: injected diagnostic");
-  ControllerClientTestPeer::Configure(&client, transport);
+  ControllerClientTestPeer::Configure(client, transport);
   std::string error;
   const std::array command{5.0, -6.0};
   ASSERT_TRUE(client.SetCommand(command, &error)) << error;
-  ControllerClientTestPeer::StartPublisher(&client);
+  ControllerClientTestPeer::StartPublisher(client);
   ASSERT_TRUE(transport->WaitForCommands(1, 1s));
 
   StateLease state;
@@ -421,8 +421,8 @@ TEST(ControllerClientTest, FaultPublicationPreservesTransportDiagnostic) {
   ControllerClient client(Options());
   auto transport = std::make_shared<FakeControllerTransport>();
   transport->SetFaultResult({false, "injected fault serialization failure"});
-  ControllerClientTestPeer::Configure(&client, transport);
-  ControllerClientTestPeer::PrepareActivation(&client);
+  ControllerClientTestPeer::Configure(client, transport);
+  ControllerClientTestPeer::PrepareActivation(client);
   std::string error;
   ASSERT_TRUE(client.Activate(&error)) << error;
 
@@ -435,8 +435,8 @@ TEST(ControllerClientTest, FailedUnregisterPreservesSessionForRetry) {
   ControllerClient client(Options());
   auto transport = std::make_shared<FakeControllerTransport>();
   transport->FailUnregisterCalls(1);
-  ControllerClientTestPeer::Configure(&client, transport);
-  ControllerClientTestPeer::EnableRemoteRegistration(&client);
+  ControllerClientTestPeer::Configure(client, transport);
+  ControllerClientTestPeer::EnableRemoteRegistration(client);
 
   std::string error;
   EXPECT_FALSE(client.Unregister(&error));
@@ -453,8 +453,8 @@ TEST(ControllerClientTest, MissingRemoteSessionCompletesIdempotentUnregister) {
   ControllerClient client(Options());
   auto transport = std::make_shared<FakeControllerTransport>();
   transport->SetUnregisterCode(mujoco_sim::v4::INVALID_SESSION);
-  ControllerClientTestPeer::Configure(&client, transport);
-  ControllerClientTestPeer::EnableRemoteRegistration(&client);
+  ControllerClientTestPeer::Configure(client, transport);
+  ControllerClientTestPeer::EnableRemoteRegistration(client);
 
   std::string error;
   EXPECT_TRUE(client.Unregister(&error)) << error;

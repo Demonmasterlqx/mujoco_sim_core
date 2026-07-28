@@ -1,0 +1,11 @@
+<?xml version="1.0"?>
+<library path="mujoco_sim_hardware_interface">
+  <class
+    name="mujoco_sim_hardware_interface/MujocoSimSystem"
+    type="mujoco_sim::hardware::MujocoSimSystem"
+    base_class_type="hardware_interface::SystemInterface">
+    <description>
+      Protocol V4 ControllerClient bridge for ros2_control joints, IMUs, and grouped sensors.
+    </description>
+  </class>
+</library>
