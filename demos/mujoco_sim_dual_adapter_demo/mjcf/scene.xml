@@ -1,0 +1,46 @@
+<mujoco model="WBR and double inverted pendulum dual adapter scene">
+  <compiler angle="radian" autolimits="true"/>
+  <option timestep="0.001" gravity="0 0 -9.81"/>
+
+  <statistic center="1 0 1" extent="3.5"/>
+
+  <visual>
+    <global azimuth="145" elevation="-22"/>
+    <headlight ambient="0.3 0.3 0.3" diffuse="0.65 0.65 0.65"
+               specular="0.08 0.08 0.08"/>
+    <rgba haze="0.72 0.78 0.84 1"/>
+  </visual>
+
+  <asset>
+    <model name="wbr" file="wbr/mjmodel.xml"/>
+    <model name="double_inverted" file="double_inverted/scene.xml"/>
+    <texture name="dual_floor_grid" type="2d" builtin="checker" width="512" height="512"
+             rgb1="0.25 0.31 0.37" rgb2="0.13 0.18 0.23" mark="edge"
+             markrgb="0.62 0.68 0.72"/>
+    <material name="dual_floor_material" texture="dual_floor_grid" texuniform="true"
+              texrepeat="10 10" reflectance="0.12"/>
+  </asset>
+
+  <worldbody>
+    <light name="dual_key_light" pos="0 -2 5" dir="0.1 0.2 -1"
+           diffuse="0.8 0.78 0.72" specular="0.08 0.08 0.08"/>
+    <geom name="dual_floor" type="plane" size="6 6 0.05"
+          material="dual_floor_material"/>
+
+    <attach model="wbr" body="base_link" prefix=""/>
+
+    <frame pos="2.25 0 0">
+      <attach model="double_inverted" body="support" prefix="dual_support_"/>
+      <attach model="double_inverted" body="first_link" prefix=""/>
+    </frame>
+  </worldbody>
+
+  <keyframe>
+    <key name="dual_home"
+         qpos="0 0 0 1 0 0 0
+               -0.750000 -1.090000 0.000000 -2.250000 1.090000 -0.617000 1.090000
+                0.750000  1.090000 0.000000  2.250000 -1.090000  0.617000 -1.090000
+                0.61086524 -0.87266463"
+         ctrl="0 0 0 0 0 0 0 0"/>
+  </keyframe>
+</mujoco>

@@ -1,0 +1,19 @@
+<?xml version="1.0"?>
+<package format="3">
+  <name>mujoco_sim_dual_adapter_demo</name>
+  <version>0.1.0</version>
+  <description>One-server WBR LQR and double inverted pendulum dual Controller demo.</description>
+  <maintainer email="pnx@example.com">pnx</maintainer>
+  <license>NOASSERTION</license>
+
+  <buildtool_depend>cmake</buildtool_depend>
+  <depend>mujoco_sim_double_inverted_control_demo</depend>
+  <depend>mujoco_sim_wbr_lqr_demo</depend>
+  <exec_depend>mujoco_sim_server</exec_depend>
+  <test_depend>mujoco_sim_server</test_depend>
+  <test_depend>xvfb</test_depend>
+
+  <export>
+    <build_type>cmake</build_type>
+  </export>
+</package>

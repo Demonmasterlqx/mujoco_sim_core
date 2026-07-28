@@ -10,7 +10,9 @@
 | `mujoco_sim_sensor` | 从隔离 Snapshot 捕获 headless camera 与 360 度 ray LiDAR | [查看](core/mujoco_sim_sensor/README.md) |
 | `mujoco_sim_server` | 提供 eCAL server、配置解析和图形界面 | [查看](core/mujoco_sim_server/Readme.md) |
 | `mujoco_sim_adapter_sdk` | 提供异步 Controller、Observer 与 Sensor Stream C++ Client | [查看](core/mujoco_sim_adapter/mujoco_sim_adapter_sdk/Readme.md) |
+| `mujoco_sim_double_inverted_control_demo` | 使用独立 Controller adapter 控制双倒立摆 | [查看](demos/mujoco_sim_double_inverted_control_demo/README.md) |
 | `mujoco_sim_wbr_lqr_demo` | 迁移 WBR LQR 抡腿机器人控制器，提供可配置接口和完整闭环示例 | [查看](demos/mujoco_sim_wbr_lqr_demo/README.md) |
+| `mujoco_sim_dual_adapter_demo` | 在同一个 Server 中同时运行 WBR LQR 与双倒立摆 Controller | [查看](demos/mujoco_sim_dual_adapter_demo/README.md) |
 | `mujoco_sim_sensor_demo` | 四进程房间巡航、相机消费和 IMU/LiDAR ICP 建图示例 | [查看](demos/mujoco_sim_sensor_demo/README.md) |
 
 ## 构建方式
@@ -210,6 +212,25 @@ mujoco-sim-wbr-lqr-adapter \
 持续站立。控制方程固定到 `wbr_mujoco@1d895574`，输入快照语义对齐
 `mujoco_interface@a2501454`；包内 6000-Step MuJoCo 闭环测试验证最终持续处于
 `NORMAL`、机身抬升、俯仰受控且水平漂移有界。
+
+## Dual Adapter Demo
+
+组合 Demo 在一个 Server 中加载 WBR 和双倒立摆，并启动两个资源互不重叠的
+Controller adapter。该包不包含新的 C++ 实现：
+
+```bash
+source install/setup.bash
+mujoco-sim-dual-adapter-demo-launch \
+  --mode headless \
+  --wbr-ticks 6000 \
+  --timeout-s 45 \
+  --output-dir /tmp/mujoco_sim_dual_adapter
+```
+
+省略 `--wbr-ticks` 和 `--timeout-s` 时持续运行，直到操作者中断；使用 `--mode gui`
+可显示两个模型共享的场景。启动器负责建立隔离 Server namespace、启动两个 adapter、
+监控提前退出，并按有界顺序停止剩余进程。详细配置和测试方式见
+[`mujoco_sim_dual_adapter_demo`](demos/mujoco_sim_dual_adapter_demo/README.md)。
 
 ## Sensor / Mapping Demo
 

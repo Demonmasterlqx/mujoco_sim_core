@@ -1,0 +1,19 @@
+<?xml version="1.0"?>
+<package format="3">
+  <name>mujoco_sim_double_inverted_control_demo</name>
+  <version>0.2.0</version>
+  <description>Protocol V4 double inverted pendulum Controller demo for mujoco_sim.</description>
+  <maintainer email="pnx@example.com">pnx</maintainer>
+  <license>NOASSERTION</license>
+
+  <buildtool_depend>cmake</buildtool_depend>
+  <build_depend>mujoco_sim_config</build_depend>
+  <depend>mujoco_sim_adapter_sdk</depend>
+  <exec_depend>mujoco_sim_server</exec_depend>
+  <test_depend>libgtest-dev</test_depend>
+  <test_depend>mujoco_sim_core</test_depend>
+
+  <export>
+    <build_type>cmake</build_type>
+  </export>
+</package>
