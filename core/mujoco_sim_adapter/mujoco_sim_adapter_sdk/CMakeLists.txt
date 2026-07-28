@@ -26,6 +26,7 @@ add_library(${PROJECT_NAME}
   src/sensor_stream_client.cpp
   src/sensor_stream_client_receive.cpp
 )
+set_target_properties(${PROJECT_NAME} PROPERTIES POSITION_INDEPENDENT_CODE ON)
 add_library(mujoco_sim::adapter_sdk ALIAS ${PROJECT_NAME})
 target_compile_features(${PROJECT_NAME} PUBLIC cxx_std_20)
 target_include_directories(${PROJECT_NAME}
