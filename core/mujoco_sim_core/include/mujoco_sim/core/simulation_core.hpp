@@ -9,6 +9,7 @@
 #include <vector>
 
 #include <mujoco_sim/core/domain.hpp>
+#include <mujoco_sim/core/interactive_input.hpp>
 
 struct mjData_;
 struct mjModel_;
@@ -165,7 +166,38 @@ class SimulationCore {
                                              std::chrono::steady_clock::time_point now);
   EngineResult<CommandReceipt> SubmitFault(const ControllerFault&);
   EngineEffects AcceptHeartbeat(const AdapterHeartbeat&, std::chrono::steady_clock::time_point now);
+  /**
+   * @brief Advances one physics step without new interactive input.
+   * @return Effects and immutable outputs for the completed Step, or no
+   *         completed event when the Core is not running.
+   *         已完成 Step 的效果与不可变输出；Core 未运行时不包含完成事件。
+   *
+   * 在没有新交互输入的情况下推进一个物理步。
+   */
   EngineEffects Step();
+
+  /**
+   * @brief Applies borrowed interactive input and advances one physics step.
+   *
+   * Pending Controller and policy writes are applied first, followed by the
+   * one-shot actuator writes and optional complete wrench replacement. Invalid
+   * interactive entries are ignored. This function neither waits for nor
+   * changes any Adapter session.
+   *
+   * 应用借用的交互输入并推进一个物理步。
+   *
+   * 首先应用待处理的 Controller 与策略写入，然后应用一次性 actuator 写入以及可选的
+   * 完整扰动力替换。非法交互条目会被忽略。本函数不会等待或改变任何 Adapter 会话。
+   *
+   * @param input Values borrowed only for this call. 仅在本次调用期间借用的输入值。
+   * @return Effects and immutable outputs for the completed Step, or no
+   *         completed event when the Core is not running.
+   *         已完成 Step 的效果与不可变输出；Core 未运行时不包含完成事件。
+   * @par Thread safety / 线程安全
+   * Call only from the SimulationCore owner thread.
+   * 仅可由 SimulationCore 所有者线程调用。
+   */
+  EngineEffects Step(const InteractiveStepInput& input);
   EngineEffects CheckDeadlines(std::chrono::steady_clock::time_point now);
   EngineEffects MarkFailed(const std::string&);
   EngineEffects MarkStopped(const std::string&);

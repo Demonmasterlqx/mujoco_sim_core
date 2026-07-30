@@ -35,7 +35,20 @@ replaced buffer immediately. After taking a pending buffer, the GUI sync worker
 releases the mailbox lock, waits for the MuJoCo viewer mutex if necessary,
 copies into the stable display snapshot, and calls `Simulate::Sync()`. The
 render thread consumes only MuJoCo's passive copy. GUI edits can affect the
-stable display copy until the next sync but never reach live Core state.
+stable display copy until the next sync. When enabled (the default), the worker
+extracts only changed `ctrl` values and complete dynamic-body `xfrc_applied`
+state after Sync, releases the MuJoCo mutex, and merges them into a separate
+input mailbox. It never copies display state back into live Core. The
+SimulationLoop try-consumes this mailbox after Controller input and passes the
+whitelist to `Step()`; same-boundary GUI controls are therefore last, but
+remain one-shot writes.
+
+Control mailbox slots retain the last unconsumed value per actuator. Wrench
+mailbox state is depth-one latest, and an empty frame explicitly clears prior
+GUI forces. Nonempty frames carry a steady-clock generation time. If no fresh
+frame arrives before `viewer_mouse_force_timeout_ms`, the simulation thread
+clears the active GUI wrench before its next Step and emits one expiry warning
+for that stale episode. Input locks never block the simulation thread.
 Synchronization counts and durations are reset as one mutex-protected record.
 If summary collection loses the non-blocking `try_lock`, the complete sync
 record is retained for the next interval instead of being split across two

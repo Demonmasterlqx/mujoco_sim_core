@@ -17,6 +17,7 @@
 #include "controller_command_inbox.hpp"
 #include "ecal_server_transport.hpp"
 #include "server_event_queue.hpp"
+#include "viewer_input_state.hpp"
 
 namespace spdlog {
 class logger;
@@ -152,6 +153,10 @@ class SimulationLoop {
    * Controller 输入槽。 */
   void DrainControllerInputs(std::chrono::steady_clock::time_point);
 
+  /** Drains non-blocking local GUI input into simulation-thread state.
+   * 将非阻塞本地 GUI 输入清空到仿真线程状态。 */
+  void DrainViewerInputs();
+
   /** Applies Core-owned effects in documented order. 按文档顺序应用 Core 自有效果。 */
   void ApplyEffects(mujoco_sim::core::EngineEffects);
 
@@ -225,6 +230,12 @@ class SimulationLoop {
   SimViewer* viewer_ = nullptr;
   /** Simulation-thread-owned live Core. 仿真线程独占的实时 Core。 */
   mujoco_sim::core::SimulationCore core_;
+  /** Simulation-thread GUI input merge and timeout state.
+   * 仿真线程的 GUI 输入合并与超时状态。 */
+  ViewerInputState viewer_input_state_;
+  /** Reusable output for non-blocking viewer consumption.
+   * 用于非阻塞 viewer 消费的可复用输出。 */
+  SimViewer::ViewerInputBatch viewer_input_batch_;
   /** Sensor runtime stopped during Finish(). 在 Finish() 中停止的 Sensor runtime。 */
   std::unique_ptr<SensorRuntime> sensor_runtime_;
   /** Bounded callback-to-loop event queue. 有界的回调到循环事件队列。 */

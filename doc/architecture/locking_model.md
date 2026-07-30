@@ -26,6 +26,10 @@ The remaining locks have narrow infrastructure responsibilities:
   closure. Simulation-side acquire and submit use only `try_lock`; lease return
   and free-buffer ownership use an atomic two-bit mask. The GUI sync worker
   removes a pending index before any potentially blocking operation;
+- the viewer input mutex protects per-actuator pending Control values and one
+  latest complete wrench frame. The GUI sync worker acquires it only after
+  releasing the MuJoCo viewer mutex; the simulation thread uses `try_lock` and
+  retains unconsumed values on contention;
 - the MuJoCo viewer mutex protects the lifetime-stable display snapshot and
   its independent model copy while the GUI sync worker calls `Simulate::Sync()`
   and the main thread renders or cleans up. The two production buffers share a

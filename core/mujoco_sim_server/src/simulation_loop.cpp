@@ -317,6 +317,7 @@ SimulationLoop::SimulationLoop(ServerConfig config, std::shared_ptr<spdlog::logg
       transport_(transport),
       viewer_(viewer),
       core_(CoreOptionsFor(config_)),
+      viewer_input_state_(std::chrono::milliseconds(config_.viewer_mouse_force_timeout_ms)),
       sensor_runtime_(std::make_unique<SensorRuntime>()) {}
 
 SimulationLoop::~SimulationLoop() {
@@ -502,9 +503,19 @@ void SimulationLoop::Run(std::stop_token stop) noexcept {
       }
       now = Clock::now();
       DrainControllerInputs(now);
+      DrainViewerInputs();
       ApplyEffects(core_.CheckDeadlines(now));
       if (unthrottled || now >= next_step_) {
-        ApplyEffects(core_.Step());
+        auto prepared = viewer_input_state_.PrepareStep(now);
+        if (prepared.wrench_expired) {
+          logger_->warn("event=viewer_mouse_force_expired active_bodies={} age_ms={} timeout_ms={}",
+                        prepared.expired_body_count, prepared.wrench_age.count(),
+                        config_.viewer_mouse_force_timeout_ms);
+        }
+        auto step_effects = core_.Step(prepared.input);
+        const bool step_completed = step_effects.step_completed.has_value();
+        ApplyEffects(std::move(step_effects));
+        if (step_completed) viewer_input_state_.CommitCompletedStep();
         if (unthrottled) {
           next_step_ = now;
         } else if (now - next_step_ > step_period_) {
@@ -626,6 +637,12 @@ void SimulationLoop::DrainControllerInputs(Clock::time_point now) {
   }
   for (auto& fault : command_inbox_.DrainFaults()) {
     ApplyEffects(core_.SubmitFault(fault).effects);
+  }
+}
+
+void SimulationLoop::DrainViewerInputs() {
+  if (viewer_ != nullptr && viewer_->TryConsumeInput(&viewer_input_batch_)) {
+    viewer_input_state_.Merge(viewer_input_batch_);
   }
 }
 

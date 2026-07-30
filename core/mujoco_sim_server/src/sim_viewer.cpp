@@ -4,6 +4,7 @@
 #include <array>
 #include <atomic>
 #include <condition_variable>
+#include <cmath>
 #include <cstdio>
 #include <exception>
 #include <limits>
@@ -74,6 +75,35 @@ struct DurationMetrics {
 
 }  // namespace
 
+bool detail::ExtractViewerBodyWrenches(
+    const mjModel_* model, const mjData_* data,
+    std::vector<mujoco_sim::core::InteractiveBodyWrench>* output) {
+  if (model == nullptr || data == nullptr || output == nullptr) return false;
+  for (int body_id = 1; body_id < model->nbody; ++body_id) {
+    const mjtNum* source = data->xfrc_applied + 6 * body_id;
+    const bool finite = std::all_of(
+        source, source + 6, [](mjtNum value) { return std::isfinite(static_cast<double>(value)); });
+    if (!finite) return false;
+  }
+
+  output->reserve(model->nbody > 0 ? static_cast<std::size_t>(model->nbody - 1) : 0U);
+  output->clear();
+  for (int body_id = 1; body_id < model->nbody; ++body_id) {
+    const mjtNum* source = data->xfrc_applied + 6 * body_id;
+    const bool nonzero = std::any_of(source, source + 6,
+                                     [](mjtNum value) { return value != static_cast<mjtNum>(0); });
+    if (!nonzero || model->body_dofnum[body_id] <= 0) continue;
+    output->push_back({
+        .body_id = body_id,
+        .force = {static_cast<double>(source[0]), static_cast<double>(source[1]),
+                  static_cast<double>(source[2])},
+        .torque = {static_cast<double>(source[3]), static_cast<double>(source[4]),
+                   static_cast<double>(source[5])},
+    });
+  }
+  return true;
+}
+
 namespace {
 
 detail::ViewerSnapshotMetadata DescribeSnapshot(
@@ -97,6 +127,8 @@ struct SimViewer::Impl {
   static constexpr std::uint32_t kFirstBuffer = 0;
   static constexpr std::uint32_t kSecondBuffer = 1;
   static constexpr std::uint32_t kAllBuffersFree = 0b11;
+
+  explicit Impl(InputOptions options) : input_options(options) {}
 
   struct BufferRelease {
     ~BufferRelease() {
@@ -160,6 +192,58 @@ struct SimViewer::Impl {
 
   bool SnapshotStorageValid() const noexcept { return snapshot_storage_valid; }
 
+  void PublishInput(std::span<const mujoco_sim::core::InteractiveActuatorWrite> control_writes,
+                    const ViewerWrenchFrame* wrench_frame) {
+    if (control_writes.empty() && wrench_frame == nullptr) return;
+    std::lock_guard lock(input_mutex);
+    if (!accepting_input) return;
+    if (input_options.control_enabled) {
+      for (const auto& write : control_writes) {
+        if (write.actuator_id >= 0 &&
+            static_cast<std::size_t>(write.actuator_id) < pending_control_values.size()) {
+          pending_control_values[write.actuator_id] = write.value;
+        }
+      }
+    }
+    if (input_options.mouse_force_enabled && wrench_frame != nullptr) {
+      latest_wrench_sequence = wrench_frame->sequence;
+      latest_wrench_generated_at = wrench_frame->generated_at;
+      latest_wrench_values.assign(wrench_frame->body_wrenches.begin(),
+                                  wrench_frame->body_wrenches.end());
+      wrench_pending = true;
+    }
+  }
+
+  void ExtractInputLocked() {
+    extracted_control_writes.clear();
+    extracted_wrench_frame_valid = false;
+    if (input_options.control_enabled) {
+      for (int actuator_id = 0; actuator_id < display_snapshot->model()->nu; ++actuator_id) {
+        const mjtNum before = control_before_sync[actuator_id];
+        const mjtNum after = display_snapshot->data()->ctrl[actuator_id];
+        if (before != after) {
+          extracted_control_writes.push_back(
+              {.actuator_id = actuator_id, .value = static_cast<double>(after)});
+        }
+      }
+    }
+    if (!input_options.mouse_force_enabled) return;
+
+    if (!detail::ExtractViewerBodyWrenches(display_snapshot->model(), display_snapshot->data(),
+                                           &extracted_wrenches)) {
+      throw std::runtime_error("viewer produced a non-finite mouse wrench");
+    }
+    const bool nonempty = !extracted_wrenches.empty();
+    if (nonempty || previous_wrench_nonempty) {
+      extracted_wrench_frame.sequence = ++wrench_sequence;
+      extracted_wrench_frame.generated_at = Clock::now();
+      extracted_wrench_frame.body_wrenches.assign(extracted_wrenches.begin(),
+                                                  extracted_wrenches.end());
+      extracted_wrench_frame_valid = true;
+    }
+    previous_wrench_nonempty = nonempty;
+  }
+
   void SynchronizeBuffer(std::uint32_t index) {
     if (fail_next_sync.exchange(false, std::memory_order_acq_rel)) {
       throw std::runtime_error("injected viewer sync worker failure");
@@ -181,11 +265,18 @@ struct SimViewer::Impl {
           simulate->loadrequest == 0 && simulate->m_ != nullptr) {
         mj_copyData(display_snapshot->data(), display_snapshot->model(),
                     production_snapshots[index]->data());
+        if (input_options.control_enabled && !control_before_sync.empty()) {
+          mju_copy(control_before_sync.data(), display_snapshot->data()->ctrl,
+                   display_snapshot->model()->nu);
+        }
         simulate->Sync();
+        ExtractInputLocked();
         completed = true;
       }
     }
     if (completed) {
+      PublishInput(extracted_control_writes,
+                   extracted_wrench_frame_valid ? &extracted_wrench_frame : nullptr);
       std::lock_guard metrics_lock(sync_metrics_mutex);
       sync_duration.Record(Clock::now() - started);
       ++sync_completed;
@@ -227,9 +318,26 @@ struct SimViewer::Impl {
   mjvOption option{};
   mjvPerturb perturb{};
   std::unique_ptr<mujoco::Simulate> simulate;
+  InputOptions input_options;
   std::unique_ptr<mujoco_sim::core::SimulationSnapshot> display_snapshot;
   std::array<std::unique_ptr<mujoco_sim::core::SimulationSnapshot>, 2> production_snapshots;
   bool snapshot_storage_valid = false;
+
+  std::vector<mjtNum> control_before_sync;
+  std::vector<mujoco_sim::core::InteractiveActuatorWrite> extracted_control_writes;
+  std::vector<mujoco_sim::core::InteractiveBodyWrench> extracted_wrenches;
+  ViewerWrenchFrame extracted_wrench_frame;
+  bool extracted_wrench_frame_valid = false;
+  bool previous_wrench_nonempty = false;
+  std::uint64_t wrench_sequence = 0;
+
+  std::mutex input_mutex;
+  std::vector<std::optional<double>> pending_control_values;
+  std::uint64_t latest_wrench_sequence = 0;
+  Clock::time_point latest_wrench_generated_at{};
+  std::vector<mujoco_sim::core::InteractiveBodyWrench> latest_wrench_values;
+  bool wrench_pending = false;
+  bool accepting_input = false;
 
   std::mutex mailbox_mutex;
   std::condition_variable mailbox_condition;
@@ -301,7 +409,9 @@ void SimViewer::SnapshotLease::Reset(bool skipped) noexcept {
   owner_ = nullptr;
 }
 
-SimViewer::SimViewer() : impl_(std::make_unique<Impl>()) {}
+SimViewer::SimViewer() : SimViewer(InputOptions{}) {}
+
+SimViewer::SimViewer(InputOptions options) : impl_(std::make_unique<Impl>(options)) {}
 
 SimViewer::~SimViewer() {
   RequestClose();
@@ -378,6 +488,23 @@ bool SimViewer::QueueLoad(
     impl_->accepting_submissions.store(true, std::memory_order_release);
   }
 
+  {
+    std::lock_guard input_lock(impl_->input_mutex);
+    const auto* model = impl_->display_snapshot->model();
+    if (impl_->input_options.control_enabled) {
+      impl_->control_before_sync.resize(static_cast<std::size_t>(model->nu));
+      impl_->extracted_control_writes.reserve(static_cast<std::size_t>(model->nu));
+      impl_->pending_control_values.resize(static_cast<std::size_t>(model->nu));
+    }
+    if (impl_->input_options.mouse_force_enabled) {
+      const auto body_capacity = model->nbody > 0 ? static_cast<std::size_t>(model->nbody - 1) : 0U;
+      impl_->extracted_wrenches.reserve(body_capacity);
+      impl_->extracted_wrench_frame.body_wrenches.reserve(body_capacity);
+      impl_->latest_wrench_values.reserve(body_capacity);
+    }
+    impl_->accepting_input = true;
+  }
+
   const mujoco::MutexLock viewer_lock(impl_->simulate->mtx);
   impl_->simulate->mnew_ = const_cast<mjModel_*>(impl_->display_snapshot->model());
   impl_->simulate->dnew_ = impl_->display_snapshot->data();
@@ -430,6 +557,46 @@ bool SimViewer::TrySubmitSnapshot(SnapshotLease&& lease) noexcept {
   return true;
 }
 
+bool SimViewer::TryConsumeInput(ViewerInputBatch* output) noexcept {
+  if (output == nullptr) return false;
+  std::unique_lock lock(impl_->input_mutex, std::try_to_lock);
+  if (!lock.owns_lock() || !impl_->accepting_input) return false;
+
+  const auto control_count = static_cast<std::size_t>(
+      std::count_if(impl_->pending_control_values.begin(), impl_->pending_control_values.end(),
+                    [](const auto& value) { return value.has_value(); }));
+  if (control_count == 0 && !impl_->wrench_pending) return false;
+  try {
+    output->actuator_writes.reserve(control_count);
+    if (impl_->wrench_pending) {
+      if (!output->wrench_frame) output->wrench_frame.emplace();
+      output->wrench_frame->body_wrenches.reserve(impl_->latest_wrench_values.size());
+    }
+  } catch (...) {
+    return false;
+  }
+
+  output->actuator_writes.clear();
+  for (std::size_t actuator_id = 0; actuator_id < impl_->pending_control_values.size();
+       ++actuator_id) {
+    auto& value = impl_->pending_control_values[actuator_id];
+    if (!value) continue;
+    output->actuator_writes.push_back(
+        {.actuator_id = static_cast<int>(actuator_id), .value = *value});
+    value.reset();
+  }
+  if (impl_->wrench_pending) {
+    output->wrench_frame->sequence = impl_->latest_wrench_sequence;
+    output->wrench_frame->generated_at = impl_->latest_wrench_generated_at;
+    output->wrench_frame->body_wrenches.assign(impl_->latest_wrench_values.begin(),
+                                               impl_->latest_wrench_values.end());
+    impl_->wrench_pending = false;
+  } else {
+    output->wrench_frame.reset();
+  }
+  return true;
+}
+
 bool SimViewer::RenderLoop(std::string* error_message) noexcept {
   if (error_message == nullptr) {
     return false;
@@ -469,6 +636,14 @@ void SimViewer::RequestScreenshot() noexcept {
 void SimViewer::RequestClose() noexcept {
   impl_->stop_requested.store(true, std::memory_order_release);
   impl_->accepting_submissions.store(false, std::memory_order_release);
+  try {
+    std::lock_guard input_lock(impl_->input_mutex);
+    impl_->accepting_input = false;
+    for (auto& value : impl_->pending_control_values)
+      value.reset();
+    impl_->wrench_pending = false;
+  } catch (...) {
+  }
   impl_->mailbox_condition.notify_all();
   if (impl_->simulate != nullptr) {
     impl_->simulate->exitrequest.store(1);
@@ -547,6 +722,48 @@ void SimViewer::HoldSyncMetricsForTesting(std::chrono::milliseconds duration,
 
 void SimViewer::SetSyncDelayForTesting(std::chrono::milliseconds duration) noexcept {
   impl_->sync_delay_ns.store(ToNanoseconds(duration), std::memory_order_release);
+}
+
+bool SimViewer::SetControlForTesting(int actuator_id, double value) noexcept {
+  if (impl_->simulate == nullptr) return false;
+  try {
+    const mujoco::MutexLock viewer_lock(impl_->simulate->mtx);
+    if (actuator_id < 0 || static_cast<std::size_t>(actuator_id) >= impl_->simulate->ctrl_.size()) {
+      return false;
+    }
+    impl_->simulate->ctrl_[actuator_id] = static_cast<mjtNum>(value);
+    return true;
+  } catch (...) {
+    return false;
+  }
+}
+
+bool SimViewer::RequestClearControlsForTesting() noexcept {
+  if (impl_->simulate == nullptr) return false;
+  try {
+    const mujoco::MutexLock viewer_lock(impl_->simulate->mtx);
+    impl_->simulate->pending_.zero_ctrl = true;
+    return true;
+  } catch (...) {
+    return false;
+  }
+}
+
+void SimViewer::PublishInputForTesting(const ViewerInputBatch& input) noexcept {
+  try {
+    impl_->PublishInput(input.actuator_writes, input.wrench_frame ? &*input.wrench_frame : nullptr);
+  } catch (...) {
+  }
+}
+
+void SimViewer::HoldInputMailboxForTesting(std::chrono::milliseconds duration,
+                                           std::atomic<bool>* lock_acquired) noexcept {
+  try {
+    std::lock_guard lock(impl_->input_mutex);
+    if (lock_acquired != nullptr) lock_acquired->store(true, std::memory_order_release);
+    std::this_thread::sleep_for(duration);
+  } catch (...) {
+  }
 }
 
 bool SimViewer::sync_active_for_testing() const noexcept {

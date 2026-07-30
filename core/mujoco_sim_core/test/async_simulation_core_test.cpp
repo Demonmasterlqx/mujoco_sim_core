@@ -83,6 +83,115 @@ TEST(AsyncSimulationCoreTest, AppliesLatestCommandAtNextStepAndKeepsLast) {
   EXPECT_DOUBLE_EQ(core.CreateSnapshot(nullptr)->data()->ctrl[0], 0.75);
 }
 
+TEST(AsyncSimulationCoreTest, AppliesInteractiveControlAfterControllerAsOneShotWrite) {
+  SimulationCore core;
+  ASSERT_TRUE(core.LoadModel(MUJOCO_SIM_CORE_TEST_MODEL).response.loaded);
+  auto registration = RegisterController(&core);
+  ASSERT_EQ(registration.response.code(), mujoco_sim::core::OK);
+  Activate(&core, registration.response);
+
+  ControllerCommand command{{registration.response.session_id(), registration.response.epoch()},
+                            registration.response.layout().fingerprint,
+                            1,
+                            {0.75}};
+  ASSERT_EQ(core.SubmitCommand(command, T(1ms)).response.code, mujoco_sim::core::OK);
+  const std::vector<mujoco_sim::core::InteractiveActuatorWrite> gui_writes = {
+      {.actuator_id = 0, .value = 0.2},
+      {.actuator_id = 0, .value = 0.4},
+  };
+  ASSERT_TRUE(core.Step({.actuator_writes = gui_writes}).step_completed);
+  EXPECT_DOUBLE_EQ(core.CreateSnapshot(nullptr)->data()->ctrl[0], 0.4);
+
+  ASSERT_TRUE(core.Step().step_completed);
+  EXPECT_DOUBLE_EQ(core.CreateSnapshot(nullptr)->data()->ctrl[0], 0.4);
+
+  command.sequence = 2;
+  command.commands = {0.6};
+  ASSERT_EQ(core.SubmitCommand(command, T(2ms)).response.code, mujoco_sim::core::OK);
+  ASSERT_TRUE(core.Step().step_completed);
+  EXPECT_DOUBLE_EQ(core.CreateSnapshot(nullptr)->data()->ctrl[0], 0.6);
+}
+
+TEST(AsyncSimulationCoreTest, IgnoresInvalidInteractiveControlsWithoutClampingValidValues) {
+  SimulationCore core;
+  ASSERT_TRUE(core.LoadModel(MUJOCO_SIM_CORE_TEST_MODEL).response.loaded);
+  const std::vector<mujoco_sim::core::InteractiveActuatorWrite> writes = {
+      {.actuator_id = -1, .value = 0.1},
+      {.actuator_id = 4, .value = 0.2},
+      {.actuator_id = 0, .value = std::numeric_limits<double>::quiet_NaN()},
+      {.actuator_id = 0, .value = 2.5},
+  };
+  ASSERT_TRUE(core.Step({.actuator_writes = writes}).step_completed);
+  EXPECT_DOUBLE_EQ(core.CreateSnapshot(nullptr)->data()->ctrl[0], 2.5);
+}
+
+TEST(AsyncSimulationCoreTest, ReplacesInteractiveWrenchesAndClearsPreviousBodies) {
+  SimulationCore core;
+  ASSERT_TRUE(core.LoadModel(MUJOCO_SIM_CORE_DUAL_TEST_MODEL).response.loaded);
+  auto snapshot = core.CreateSnapshot(nullptr);
+  ASSERT_NE(snapshot, nullptr);
+  const int first = mj_name2id(snapshot->model(), mjOBJ_BODY, "first_link");
+  const int second = mj_name2id(snapshot->model(), mjOBJ_BODY, "second_link");
+  const int static_body = mj_name2id(snapshot->model(), mjOBJ_BODY, "static_link");
+  ASSERT_GT(first, 0);
+  ASSERT_GT(second, 0);
+  ASSERT_GT(static_body, 0);
+
+  const std::vector<mujoco_sim::core::InteractiveBodyWrench> first_frame = {
+      {.body_id = first, .force = {1.0, 2.0, 3.0}, .torque = {4.0, 5.0, 6.0}},
+  };
+  ASSERT_TRUE(
+      core.Step({.body_wrenches = first_frame, .replace_body_wrenches = true}).step_completed);
+  snapshot = core.CreateSnapshot(nullptr);
+  for (int index = 0; index < 6; ++index) {
+    EXPECT_DOUBLE_EQ(snapshot->data()->xfrc_applied[6 * first + index], index + 1.0);
+  }
+
+  const std::vector<mujoco_sim::core::InteractiveBodyWrench> second_frame = {
+      {.body_id = second, .force = {-1.0, 0.0, 0.0}, .torque = {0.0, 0.0, 2.0}},
+      {.body_id = second, .force = {-2.0, 0.0, 0.0}, .torque = {0.0, 0.0, 3.0}},
+  };
+  ASSERT_TRUE(
+      core.Step({.body_wrenches = second_frame, .replace_body_wrenches = true}).step_completed);
+  snapshot = core.CreateSnapshot(nullptr);
+  for (int index = 0; index < 6; ++index) {
+    EXPECT_DOUBLE_EQ(snapshot->data()->xfrc_applied[6 * first + index], 0.0);
+  }
+  EXPECT_DOUBLE_EQ(snapshot->data()->xfrc_applied[6 * second], -2.0);
+  EXPECT_DOUBLE_EQ(snapshot->data()->xfrc_applied[6 * second + 5], 3.0);
+
+  ASSERT_TRUE(core.Step({.body_wrenches = {}, .replace_body_wrenches = true}).step_completed);
+  snapshot = core.CreateSnapshot(nullptr);
+  for (int index = 0; index < 6; ++index) {
+    EXPECT_DOUBLE_EQ(snapshot->data()->xfrc_applied[6 * second + index], 0.0);
+  }
+
+  ASSERT_TRUE(
+      core.Step({.body_wrenches = second_frame, .replace_body_wrenches = true}).step_completed);
+
+  const std::vector<mujoco_sim::core::InteractiveBodyWrench> invalid_frame = {
+      {.body_id = 0, .force = {9.0, 0.0, 0.0}},
+      {.body_id = static_body, .force = {9.0, 0.0, 0.0}},
+      {.body_id = second, .force = {std::numeric_limits<double>::infinity(), 0.0, 0.0}},
+  };
+  ASSERT_TRUE(
+      core.Step({.body_wrenches = invalid_frame, .replace_body_wrenches = true}).step_completed);
+  snapshot = core.CreateSnapshot(nullptr);
+  for (int index = 0; index < 6; ++index) {
+    EXPECT_DOUBLE_EQ(snapshot->data()->xfrc_applied[6 * second + index], 0.0);
+  }
+
+  ASSERT_TRUE(
+      core.Step({.body_wrenches = first_frame, .replace_body_wrenches = true}).step_completed);
+  ASSERT_TRUE(core.LoadModel(MUJOCO_SIM_CORE_DUAL_TEST_MODEL).response.loaded);
+  snapshot = core.CreateSnapshot(nullptr);
+  for (int body = 0; body < snapshot->model()->nbody; ++body) {
+    for (int index = 0; index < 6; ++index) {
+      EXPECT_DOUBLE_EQ(snapshot->data()->xfrc_applied[6 * body + index], 0.0);
+    }
+  }
+}
+
 TEST(AsyncSimulationCoreTest, RejectsStaleInvalidAndTimesOutWithoutError) {
   mujoco_sim::core::CoreOptions options;
   options.command_timeout_ms = 10;

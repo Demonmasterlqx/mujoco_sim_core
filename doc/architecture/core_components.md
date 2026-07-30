@@ -15,9 +15,11 @@ pacing, or a generic event queue. Every liveness operation receives an explicit
 
 `SubmitCommand()` validates and replaces the session's latest Command.
 `CheckDeadlines()` schedules offline/error/release policies and returns
-lifecycle changes. `Step()` applies the final pending write immediately before
-`mj_step()`, advances tick, and returns due immutable frames. These operations
-never wait for a Controller.
+lifecycle changes. `Step()` applies final Controller and policy writes, then
+one-shot interactive actuator writes and an optional complete interactive body
+wrench replacement, immediately before `mj_step()`. Interactive input neither
+owns resources nor changes Adapter liveness. The Step advances tick and returns
+due immutable frames. These operations never wait for a Controller or viewer.
 
 Resource ownership is exclusive per actuator. Registration freezes dense
 observation and command spans plus their 128-bit layout fingerprints. An

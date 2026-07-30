@@ -113,6 +113,9 @@ allow_every_step_observer: false
 transport_subscriber_sample_period_ms: 1000
 sensor_subscriber_sample_period_ms: 200
 viewer_sync_period_ms: 16
+viewer_control_input_enabled: true
+viewer_mouse_force_enabled: true
+viewer_mouse_force_timeout_ms: 100
 log_summary_period_ms: 1000
 log_level: info
 log_file: ""
@@ -138,8 +141,17 @@ OpenGL context。若 YAML 设置了 `headless: true`，可用 `--gui` 在命令�
 图形界面读取 Core 生成的隔离快照，支持官方相机旋转、平移、缩放、左右侧栏、
 渲染选项、传感器和性能面板。仿真线程以非阻塞方式使用两个固定生产缓冲和 depth-1
 latest 邮箱；锁竞争、缓冲耗尽或 GUI 变慢时允许跳过或替换显示帧。独立 GUI sync worker
-可以等待 MuJoCo viewer mutex，但仿真步进不会等待它。UI 不持有也不会修改真实
-`mjModel/mjData`，控制器所有权和异步 State/Command 行为在 GUI 与 headless 模式下完全一致。
+可以等待 MuJoCo viewer mutex，但仿真步进不会等待它。UI 不持有也不直接修改真实
+`mjModel/mjData`；白名单 GUI 输入经独立邮箱交给仿真线程应用，且不改变控制器所有权和
+异步 State/Command 语义。
+
+GUI 输入默认开启。Control Slider 与 `Clear all` 会在下一个 Step 边界产生一次性
+actuator 写入；同一边界中 GUI 后于 Adapter 写入生效，但下一条 Adapter Command 可以
+重新覆盖它。可先双击选择动态刚体，再用 `Ctrl + 右键拖动`施加
+平移扰动力或用 `Ctrl + 左键拖动`施加旋转扰动力。松开鼠标会发布清除状态；若 Viewer
+停止同步，Server 会按 `viewer_mouse_force_timeout_ms`（默认 `100` ms，最小 `1` ms）在下一
+Step 前清除残留力。GUI 输入不取得 Controller 资源所有权，也不改变 Adapter liveness；
+将对应输入字段显式设置为 `false` 可恢复纯观察行为。
 
 ## Protocol V4 运行示例
 

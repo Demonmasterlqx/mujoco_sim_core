@@ -65,15 +65,18 @@ class detail::ServerApplicationImpl {
                   "mode={} pacing_mode={} realtime_factor={} max_ticks={} "
                   "command_timeout_ms={} command_keepalive_ms={} "
                   "activation_timeout_ms={} status_period_ms={} "
-                  "viewer_sync_period_ms={} log_level={} log_file={} "
+                  "viewer_sync_period_ms={} viewer_control_input_enabled={} "
+                  "viewer_mouse_force_enabled={} viewer_mouse_force_timeout_ms={} "
+                  "log_level={} log_file={} "
                   "log_summary_period_ms={}",
                   LogValue(config.server_name), LogValue(config.model_path),
                   LogValue(config.initial_keyframe), config.headless ? "headless" : "gui",
                   config.pacing_mode, config.realtime_factor, config.max_ticks,
                   config.command_timeout_ms, config.command_keepalive_ms,
                   config.activation_timeout_ms, config.status_period_ms,
-                  config.viewer_sync_period_ms, config.log_level, LogValue(config.log_file),
-                  config.log_summary_period_ms);
+                  config.viewer_sync_period_ms, config.viewer_control_input_enabled,
+                  config.viewer_mouse_force_enabled, config.viewer_mouse_force_timeout_ms,
+                  config.log_level, LogValue(config.log_file), config.log_summary_period_ms);
             },
             &boundary_error)) {
       *error_message = "failed to write server startup log: " + boundary_error;
@@ -103,7 +106,10 @@ class detail::ServerApplicationImpl {
     }
 
     if (!config.headless) {
-      viewer = std::make_unique<SimViewer>();
+      viewer = std::make_unique<SimViewer>(SimViewer::InputOptions{
+          .control_enabled = config.viewer_control_input_enabled,
+          .mouse_force_enabled = config.viewer_mouse_force_enabled,
+      });
       if (!viewer->Initialize(error_message)) return false;
       if (!RunWithExceptionBoundary([&] { log->info("event=viewer_initialized mode=gui"); },
                                     &boundary_error) ||

@@ -1,5 +1,8 @@
 #include "model_runtime.hpp"
 
+#include <algorithm>
+#include <cmath>
+
 #include <mujoco/mujoco.h>
 #include <mujoco_sim/core/simulation_core.hpp>
 
@@ -68,6 +71,46 @@ void ModelRuntime::ApplyActuatorWrites(const std::vector<ValidatedActuatorWrite>
   if (data_ == nullptr) return;
   for (const auto& write : writes) {
     data_->ctrl[write.actuator_id] = write.value;
+  }
+}
+
+void ModelRuntime::ApplyInteractiveActuatorWrites(
+    std::span<const InteractiveActuatorWrite> writes) {
+  if (!loaded()) return;
+  for (const auto& write : writes) {
+    if (write.actuator_id < 0 || write.actuator_id >= model_->nu || !std::isfinite(write.value)) {
+      continue;
+    }
+    data_->ctrl[write.actuator_id] = static_cast<mjtNum>(write.value);
+  }
+}
+
+void ModelRuntime::ReplaceInteractiveBodyWrenches(std::span<const InteractiveBodyWrench> wrenches) {
+  if (!loaded()) return;
+
+  if (interactive_wrench_generation_ == generation_) {
+    for (const int body_id : interactive_wrench_body_ids_) {
+      mju_zero(data_->xfrc_applied + 6 * body_id, 6);
+    }
+  }
+  interactive_wrench_body_ids_.clear();
+  interactive_wrench_generation_ = generation_;
+
+  for (const auto& write : wrenches) {
+    const bool valid_body = write.body_id > 0 && write.body_id < model_->nbody &&
+                            model_->body_dofnum[write.body_id] > 0;
+    const bool finite =
+        std::ranges::all_of(write.force, [](double value) { return std::isfinite(value); }) &&
+        std::ranges::all_of(write.torque, [](double value) { return std::isfinite(value); });
+    if (!valid_body || !finite) continue;
+
+    mjtNum* target = data_->xfrc_applied + 6 * write.body_id;
+    std::copy(write.force.begin(), write.force.end(), target);
+    std::copy(write.torque.begin(), write.torque.end(), target + 3);
+    if (std::ranges::find(interactive_wrench_body_ids_, write.body_id) ==
+        interactive_wrench_body_ids_.end()) {
+      interactive_wrench_body_ids_.push_back(write.body_id);
+    }
   }
 }
 

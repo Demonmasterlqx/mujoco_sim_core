@@ -692,9 +692,17 @@ EngineEffects SimulationCore::AcceptHeartbeat(const AdapterHeartbeat& heartbeat,
   return out;
 }
 EngineEffects SimulationCore::Step() {
+  return Step(InteractiveStepInput{});
+}
+
+EngineEffects SimulationCore::Step(const InteractiveStepInput& input) {
   EngineEffects out;
   if (!IsModelLoaded() || impl_->server_state != RUNNING) return out;
   impl_->ApplyControllerWrites();
+  impl_->model->ApplyInteractiveActuatorWrites(input.actuator_writes);
+  if (input.replace_body_wrenches) {
+    impl_->model->ReplaceInteractiveBodyWrenches(input.body_wrenches);
+  }
   impl_->model->Step();
   ++impl_->current_tick;
   StepCompletedEvent event;

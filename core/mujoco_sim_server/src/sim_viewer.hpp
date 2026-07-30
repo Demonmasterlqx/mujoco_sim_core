@@ -4,7 +4,14 @@
 #include <chrono>
 #include <cstdint>
 #include <memory>
+#include <optional>
 #include <string>
+#include <vector>
+
+#include <mujoco_sim/core/interactive_input.hpp>
+
+struct mjData_;
+struct mjModel_;
 
 namespace mujoco_sim::core {
 class SimulationSnapshot;
@@ -79,6 +86,25 @@ inline bool ViewerSnapshotsCompatible(const ViewerSnapshotMetadata& display,
          first.data_buffer_bytes == second.data_buffer_bytes;
 }
 
+/**
+ * @brief Extracts finite nonzero wrenches for dynamic bodies from one snapshot.
+ *
+ * The output is replaced transactionally. World and static bodies are skipped.
+ * A non-finite wrench makes the function fail without changing output.
+ *
+ * 从一个快照中提取动态刚体的有限非零扰动力。
+ *
+ * 输出以事务方式替换。world body 与静态刚体会被跳过；存在非有限扰动力时函数失败且
+ * 不改变输出。
+ *
+ * @param model Borrowed MuJoCo model. 借用的 MuJoCo model。
+ * @param data Borrowed compatible MuJoCo data. 借用的兼容 MuJoCo data。
+ * @param output Transactional owned output. 事务性的自有输出。
+ * @return true on valid input; otherwise false. 输入有效时返回 true，否则返回 false。
+ */
+bool ExtractViewerBodyWrenches(const mjModel_* model, const mjData_* data,
+                               std::vector<mujoco_sim::core::InteractiveBodyWrench>* output);
+
 }  // namespace detail
 
 /**
@@ -110,6 +136,37 @@ class SimViewer {
   struct Impl;
 
  public:
+  /** Selects which local GUI values may be forwarded to SimulationCore.
+   * 选择允许转发给 SimulationCore 的本地 GUI 输入。 */
+  struct InputOptions {
+    /** Accept Control-panel actuator edits. 接受 Control 面板的 actuator 编辑。 */
+    bool control_enabled = false;
+    /** Accept mouse perturbation wrenches. 接受鼠标扰动力。 */
+    bool mouse_force_enabled = false;
+  };
+
+  /** Complete mouse-wrench state produced by one successful viewer sync.
+   * 一次成功 viewer sync 产生的完整鼠标扰动力状态。 */
+  struct ViewerWrenchFrame {
+    /** Monotonic viewer-worker sequence. viewer worker 单调递增序列。 */
+    std::uint64_t sequence = 0;
+    /** Steady-clock generation time. steady clock 生成时间。 */
+    std::chrono::steady_clock::time_point generated_at{};
+    /** Complete dynamic-body wrench state; empty explicitly clears.
+     * 完整动态刚体扰动力状态；为空时表示显式清除。 */
+    std::vector<mujoco_sim::core::InteractiveBodyWrench> body_wrenches;
+  };
+
+  /** Independently merged Control events and latest complete wrench state.
+   * 独立合并的 Control 事件与最新完整扰动力状态。 */
+  struct ViewerInputBatch {
+    /** Last pending value for each changed actuator. 每个已修改 actuator 的最后待处理值。 */
+    std::vector<mujoco_sim::core::InteractiveActuatorWrite> actuator_writes;
+    /** No value means no new frame; an empty frame means clear.
+     * 无值表示没有新帧；空帧表示清除。 */
+    std::optional<ViewerWrenchFrame> wrench_frame;
+  };
+
   /**
    * @brief Interval-local viewer capture and synchronization metrics.
    *
@@ -208,8 +265,13 @@ class SimViewer {
     std::chrono::steady_clock::time_point capture_started_{};
   };
 
-  /** Constructs an uninitialized viewer. 构造未初始化的查看器。 */
+  /** Constructs an uninitialized viewer with input forwarding disabled.
+   * 构造禁用输入转发的未初始化查看器。 */
   SimViewer();
+
+  /** Constructs an uninitialized viewer with immutable input options.
+   * 使用不可变输入选项构造未初始化的查看器。 */
+  explicit SimViewer(InputOptions options);
 
   /** Requests closure and joins an active sync worker. 请求关闭并 join 活跃同步 worker。 */
   ~SimViewer();
@@ -292,6 +354,24 @@ class SimViewer {
    * 仅由仿真生产线程调用。本函数绝不阻塞。
    */
   bool TrySubmitSnapshot(SnapshotLease&& lease) noexcept;
+
+  /**
+   * @brief Tries to consume merged GUI input without waiting.
+   *
+   * On success output is replaced and the consumed values are removed. Lock
+   * contention, closure, no input, or allocation failure returns false and
+   * retains all pending input.
+   *
+   * 尝试以非阻塞方式消费合并后的 GUI 输入。
+   *
+   * 成功时替换输出并移除已消费值。锁竞争、关闭、无输入或分配失败会返回 false，并保留
+   * 全部待处理输入。
+   *
+   * @param output Reusable simulation-thread-owned output. 仿真线程所有的可复用输出。
+   * @return true when at least one value was consumed; otherwise false.
+   *         消费至少一个值时返回 true，否则返回 false。
+   */
+  bool TryConsumeInput(ViewerInputBatch* output) noexcept;
 
   /**
    * @brief Runs the GUI, joins the sync worker, and reports sticky failure.
@@ -389,6 +469,23 @@ class SimViewer {
    *                 不持有邮箱互斥锁时施加的非负延迟。
    */
   void SetSyncDelayForTesting(std::chrono::milliseconds duration) noexcept;
+
+  /** Sets the passive viewer's Control value under its mutex for tests.
+   * 在测试中持有 passive viewer mutex 设置 Control 值。 */
+  bool SetControlForTesting(int actuator_id, double value) noexcept;
+
+  /** Requests the passive viewer's Clear all action for tests.
+   * 在测试中请求 passive viewer 的 Clear all 操作。 */
+  bool RequestClearControlsForTesting() noexcept;
+
+  /** Publishes a synthetic extracted batch through production merge rules.
+   * 通过生产合并规则发布一个合成的已提取批次。 */
+  void PublishInputForTesting(const ViewerInputBatch& input) noexcept;
+
+  /** Holds the input mailbox mutex for deterministic non-blocking tests.
+   * 为确定性非阻塞测试持有输入邮箱互斥锁。 */
+  void HoldInputMailboxForTesting(std::chrono::milliseconds duration,
+                                  std::atomic<bool>* lock_acquired) noexcept;
 
   /**
    * @return true while the worker owns a production buffer for test sync.
