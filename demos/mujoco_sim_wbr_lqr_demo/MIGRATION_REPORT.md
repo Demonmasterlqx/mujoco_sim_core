@@ -171,3 +171,14 @@ The package tests cover:
 
 All imported provenance and byte-identity details are recorded in
 [UPSTREAM.md](UPSTREAM.md).
+
+## Post-Migration Interactive Input Extension
+
+After the migration recorded above, the demo added an optional first-party
+standard-input terminal source. Script input remains the default and Protocol
+V4 is unchanged. Cin mode maps terminal characters to the existing
+`input_snapshot_t` fields. W/A/S/D use bounded configurable Controller-frame
+lifetimes (default 200 updates), while Q/E/F/Space retain bounded one-shot
+behavior. A subsequent intentional WBR command-mapping patch assigns fixed
+signed velocity and yaw-rate references; the original migration evidence and
+CTest count reported above remain historical.

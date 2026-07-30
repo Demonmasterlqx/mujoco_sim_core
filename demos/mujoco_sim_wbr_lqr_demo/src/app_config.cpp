@@ -195,6 +195,10 @@ bool BuildAppConfig(const generated::WbrConfig& generated_config, AppConfig* con
   output.adapter.service_timeout_ms = generated_config.adapter.service_timeout_ms;
   output.adapter.max_ticks = generated_config.adapter.max_ticks;
   output.log_every_ticks = generated_config.log_every_ticks;
+  output.input.mode = generated_config.input.mode == generated::WbrConfig::Input::Mode::kCin
+                          ? InputMode::kCin
+                          : InputMode::kScript;
+  output.input.cin_hold_ticks = generated_config.input.cin.hold_ticks;
   if (!BuildInterfaces(generated_config.interfaces, &output.adapter.interfaces, error_message) ||
       !BuildPipeline(generated_config.pipeline, &output.pipeline, error_message) ||
       !BuildScript(generated_config.input_script, &output.input_script, error_message)) {

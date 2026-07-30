@@ -6,6 +6,7 @@ include(CMakePackageConfigHelpers)
 
 find_package(mujoco_sim_adapter_sdk CONFIG REQUIRED)
 find_package(mujoco_sim_config CONFIG REQUIRED)
+find_package(Threads REQUIRED)
 
 add_library(${PROJECT_NAME}
   src/config.cpp
@@ -44,8 +45,35 @@ target_link_libraries(wbr_lqr_app_config PUBLIC
   wbr_lqr_generated_config
 )
 
+add_library(wbr_lqr_keyboard_input STATIC
+  src/terminal_keyboard_input.cpp
+  src/process_signal.cpp
+)
+target_compile_features(wbr_lqr_keyboard_input PUBLIC cxx_std_20)
+target_include_directories(wbr_lqr_keyboard_input PUBLIC
+  "${CMAKE_CURRENT_SOURCE_DIR}/src"
+)
+target_include_directories(wbr_lqr_keyboard_input SYSTEM PUBLIC
+  "${CMAKE_CURRENT_SOURCE_DIR}/third_party/wbr_mujoco/controller/include"
+)
+target_link_libraries(wbr_lqr_keyboard_input PUBLIC
+  Threads::Threads
+)
+
+add_library(wbr_lqr_adapter_app STATIC src/adapter_app.cpp)
+target_compile_features(wbr_lqr_adapter_app PUBLIC cxx_std_20)
+target_include_directories(wbr_lqr_adapter_app PUBLIC
+  "${CMAKE_CURRENT_SOURCE_DIR}/src"
+)
+target_link_libraries(wbr_lqr_adapter_app PUBLIC
+  wbr_lqr_app_config
+  wbr_lqr_keyboard_input
+)
+
 add_executable(mujoco-sim-wbr-lqr-adapter src/main.cpp)
-target_link_libraries(mujoco-sim-wbr-lqr-adapter PRIVATE wbr_lqr_app_config)
+target_link_libraries(mujoco-sim-wbr-lqr-adapter PRIVATE
+  wbr_lqr_adapter_app
+)
 set_target_properties(mujoco-sim-wbr-lqr-adapter PROPERTIES
   INSTALL_RPATH "$ORIGIN/../lib"
 )
@@ -119,6 +147,16 @@ if(BUILD_TESTING)
   )
   add_test(NAME wbr_input_script_test COMMAND wbr_input_script_test)
 
+  add_executable(wbr_keyboard_input_test test/terminal_keyboard_input_test.cpp)
+  target_link_libraries(wbr_keyboard_input_test PRIVATE
+    wbr_lqr_keyboard_input
+    GTest::gtest_main
+  )
+  add_test(NAME wbr_keyboard_input_test COMMAND wbr_keyboard_input_test)
+
+  add_executable(wbr_fake_terminal_adapter test/fake_terminal_adapter_main.cpp)
+  target_link_libraries(wbr_fake_terminal_adapter PRIVATE wbr_lqr_adapter_app)
+
   add_executable(wbr_app_config_test test/app_config_test.cpp)
   target_link_libraries(wbr_app_config_test PRIVATE
     wbr_lqr_app_config
@@ -177,6 +215,29 @@ if(BUILD_TESTING)
             headless 6000
   )
   set_tests_properties(wbr_lqr_e2e PROPERTIES TIMEOUT 60)
+
+  add_test(
+    NAME wbr_fake_terminal_e2e
+    COMMAND bash "${CMAKE_CURRENT_SOURCE_DIR}/test/e2e_wbr_lqr.sh"
+            "$<TARGET_FILE:mujoco_sim::mujoco-sim-server>"
+            "$<TARGET_FILE:wbr_fake_terminal_adapter>"
+            "${CMAKE_CURRENT_SOURCE_DIR}/config/wbr_server.yaml"
+            "${CMAKE_CURRENT_SOURCE_DIR}/config/wbr_lqr.yaml"
+            headless 200 cin success
+  )
+  set_tests_properties(wbr_fake_terminal_e2e PROPERTIES TIMEOUT 60)
+
+  add_test(
+    NAME wbr_fake_terminal_disconnect_e2e
+    COMMAND "${CMAKE_COMMAND}" -E env WBR_FAKE_TERMINAL_CASE=disconnect
+            bash "${CMAKE_CURRENT_SOURCE_DIR}/test/e2e_wbr_lqr.sh"
+            "$<TARGET_FILE:mujoco_sim::mujoco-sim-server>"
+            "$<TARGET_FILE:wbr_fake_terminal_adapter>"
+            "${CMAKE_CURRENT_SOURCE_DIR}/config/wbr_server.yaml"
+            "${CMAKE_CURRENT_SOURCE_DIR}/config/wbr_lqr.yaml"
+            headless 200 cin failure
+  )
+  set_tests_properties(wbr_fake_terminal_disconnect_e2e PROPERTIES TIMEOUT 60)
 
   get_target_property(MUJOCO_SIM_SERVER_DEFINITIONS
     mujoco_sim::server INTERFACE_COMPILE_DEFINITIONS)

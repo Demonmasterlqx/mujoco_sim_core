@@ -153,6 +153,24 @@ fields:
               exit_relax_alpha: {type: double, default: 1.05, finite: true, min: 0.0}
               exit_relax_ticks: {type: uint32, default: 250, min: 1}
               offground_min_air_ticks: {type: uint32, default: 800}
+  input:
+    type: object
+    fields:
+      mode:
+        type: enum
+        description: Select deterministic script input or immediate standard-input terminal actions
+        values: [script, cin]
+        default: script
+        cli: [--input-mode]
+      cin:
+        type: object
+        fields:
+          hold_ticks:
+            type: uint32
+            description: Controller updates that each W/A/S/D character remains active
+            default: 200
+            min: 1
+            cli: [--cin-hold-ticks]
   input_script:
     type: object_sequence
     default:

@@ -33,7 +33,6 @@ The following controller headers are byte-identical to the fixed commit:
 
 | Upstream path | SHA-256 |
 | --- | --- |
-| `controller/include/control/balance.hpp` | `cb32fea1f8da52011d68d5bcd93809727d69196e60cb3aaa90f1100f6e4dbc29` |
 | `controller/include/control/chassis_fsm.hpp` | `12cdf51e682b7015c75773510b85041e2ef2066c593c878d933adf2fa8b595b9` |
 | `controller/include/control/config.hpp` | `c1fc2406f2d1dab6ab34048a236ad901edca0510a0d30c8e8f99e92a9bd8ec35` |
 | `controller/include/control/imu_fusion.hpp` | `6a32572535eae8a7e2e06c2f244861da606569e0e0cc0051af887de23fc7c4b7` |
@@ -41,6 +40,16 @@ The following controller headers are byte-identical to the fixed commit:
 | `controller/include/control/lqr_coeffs.hpp` | `86b1078956b6caa02625170205d9d96ab10dc9f51f38a9553f1dc9ab4019c323` |
 | `controller/include/control/math.hpp` | `4ed0fc015e585a2f75cbf863c424b79a2fd53cff9d857f189a66fafe639fa663a6` |
 | `controller/include/control/msgs.hpp` | `113974ea09117dbd501e27ddc15a092b194103accb46f4a057c4fa002e0ae147` |
+
+`controller/include/control/balance.hpp` has one intentional local command
+mapping patch. Its upstream SHA-256 is
+`cb32fea1f8da52011d68d5bcd93809727d69196e60cb3aaa90f1100f6e4dbc29` and its
+local SHA-256 is
+`4922cae9526b9f46d95bfb8bc2005877f181c118ebacaa46dbee3175f28fff7e`.
+The patch changes W/S from incremental, 0.8 m/s-limited references to immediate
+`+2/-2 m/s` references and A/D to immediate `+1/-1 rad/ms`
+(`+1000/-1000 rad/s`) yaw-rate references. W/S and A/D retain the upstream sign
+conventions, opposing directions remain neutral, and released input is zero.
 
 The two MJCF files and all 15 files under `mjcf/meshes/` were imported. Every
 mesh and `scene.xml` is byte-identical to upstream. `mjmodel.xml` has one
@@ -79,9 +88,10 @@ Only the runtime control equations/data and the model assets are vendored.
 
 No source file is copied from `mujoco_interface`. Its
 `protocol::input_message` snapshot fields and GUI publication behavior define
-the input semantics used by this demo's deterministic `InputScript`. The local
-Core, Protocol V4, Server, and Adapter SDK remain the simulation and transport
-implementation because repository architecture forbids replacing those
-production boundaries with a demo dependency. The interface-only `r` reset key
-is deliberately excluded because model reset is a Server lifecycle operation,
-not a Controller command.
+the input semantics used by this demo's deterministic `InputScript` and local
+standard-input terminal source. The terminal reader is new first-party integration
+code; it is not an imported upstream transport. The local Core, Protocol V4, Server,
+and Adapter SDK remain the simulation and transport implementation because
+repository architecture forbids replacing those production boundaries with a
+demo dependency. The interface-only `r` reset key is deliberately excluded
+because model reset is a Server lifecycle operation, not a Controller command.

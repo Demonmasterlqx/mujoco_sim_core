@@ -226,10 +226,26 @@ mujoco-sim-wbr-lqr-adapter \
 使用 adapter 的 `--ticks` 设置本地 State 上限，不要把 server 的启动总 step 上限
 当作 adapter 预算。21 个 state resource 和 6 个 command resource 均可在 adapter YAML
 中改名；控制器仍按六个固定语义槽位执行上游 LQR/FSM 逻辑。
-默认脚本会在第 1 个 Controller tick 使能底盘，并在第 2000 个 tick 切换到中腿长后
-持续站立。控制方程固定到 `wbr_mujoco@1d895574`，输入快照语义对齐
+默认脚本会在第 1 个 Controller tick 使能底盘；可继续配置 Q/E/F 的确定性区间来选择
+腿长目标。控制主体固定到 `wbr_mujoco@1d895574`，另有下述固定速度/偏航率的显式
+本地映射补丁；输入快照语义对齐
 `mujoco_interface@a2501454`；包内 6000-Step MuJoCo 闭环测试验证最终持续处于
 `NORMAL`、机身抬升、俯仰受控且水平漂移有界。
+
+需要实时键盘控制时，选择标准输入终端模式：
+
+```bash
+mujoco-sim-wbr-lqr-adapter \
+  --config install/mujoco_sim_wbr_lqr_demo/share/mujoco_sim_wbr_lqr_demo/config/wbr_lqr.yaml \
+  --input-mode cin \
+  --cin-hold-ticks 200
+```
+
+每个 W/A/S/D 字符会作用于可配置的 `input.cin.hold_ticks` 次 Controller update
+（默认 200 次，1 kHz 控制周期下约 200 ms），按住时终端自动重复会刷新对应方向。
+W/S 分别给出 `+2/-2 m/s`，A/D 分别给出 `+1/-1 rad/ms`（即 `+1000/-1000 rad/s`）；
+相反方向同时有效时输入为中性。Q/E/F 调整腿长，Space 切换底盘，X 清除运动计时，
+Esc 安全退出。cin 模式要求前台交互式 TTY，输入跟随终端焦点，不读取系统全局键盘事件。
 
 ## Dual Adapter Demo
 

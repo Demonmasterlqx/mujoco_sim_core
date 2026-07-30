@@ -35,7 +35,7 @@ TEST(ControllerPipelineTest, FirstTickUsesEmptyPreviousPendulum) {
   EXPECT_GT(second.command.x, first.pendulum.x);
 }
 
-TEST(ControllerPipelineTest, IdleInputRampsVelocityCommandBackToZero) {
+TEST(ControllerPipelineTest, DirectionInputSelectsFixedSignedVelocityAndYawRate) {
   demo::PipelineConfig config;
   config.imu_mode = control::imu_mode::bypass;
   demo::ControllerPipeline pipeline(config);
@@ -43,14 +43,43 @@ TEST(ControllerPipelineTest, IdleInputRampsVelocityCommandBackToZero) {
 
   control::input_snapshot_t forward{};
   forward.w = true;
-  for (int tick = 0; tick < 20; ++tick)
-    pipeline.Step(raw, forward);
-  const float commanded_velocity = pipeline.Step(raw, forward).command.v;
-  ASSERT_GT(commanded_velocity, 0.0F);
+  const auto forward_output = pipeline.Step(raw, forward);
+  EXPECT_FLOAT_EQ(forward_output.command.v, 2.0F);
+
+  control::input_snapshot_t backward{};
+  backward.s = true;
+  const auto backward_output = pipeline.Step(raw, backward);
+  EXPECT_FLOAT_EQ(backward_output.command.v, -2.0F);
+
+  control::input_snapshot_t left{};
+  left.a = true;
+  const auto left_output = pipeline.Step(raw, left);
+  EXPECT_FLOAT_EQ(left_output.command.dyaw, 1000.0F);
+
+  control::input_snapshot_t right{};
+  right.d = true;
+  const auto right_output = pipeline.Step(raw, right);
+  EXPECT_FLOAT_EQ(right_output.command.dyaw, -1000.0F);
 
   const auto released = pipeline.Step(raw, {});
-  EXPECT_LT(released.command.v, commanded_velocity);
-  EXPECT_GT(released.command.v, 0.0F);
+  EXPECT_FLOAT_EQ(released.command.v, 0.0F);
+  EXPECT_FLOAT_EQ(released.command.dyaw, 0.0F);
+}
+
+TEST(ControllerPipelineTest, OpposingDirectionInputsAreNeutral) {
+  demo::PipelineConfig config;
+  config.imu_mode = control::imu_mode::bypass;
+  demo::ControllerPipeline pipeline(config);
+  const auto raw = test::MakeHomeObservation();
+
+  control::input_snapshot_t opposing{};
+  opposing.w = true;
+  opposing.s = true;
+  opposing.a = true;
+  opposing.d = true;
+  const auto output = pipeline.Step(raw, opposing);
+  EXPECT_FLOAT_EQ(output.command.v, 0.0F);
+  EXPECT_FLOAT_EQ(output.command.dyaw, 0.0F);
 }
 
 TEST(ControllerPipelineTest, ResetRestoresFirstTickState) {

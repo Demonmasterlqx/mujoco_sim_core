@@ -40,9 +40,14 @@ pipeline:
       exit_relax_ticks: 250
       offground_min_air_ticks: 800
 
+input:
+  mode: script
+  cin:
+    hold_ticks: 200
+
 input_script:
   - {begin_tick: 0, end_tick: 1}
   - {begin_tick: 1, end_tick: 2, space: true}
-  - {begin_tick: 2000, end_tick: 2001, e: true}
+  # - {begin_tick: 2000, end_tick: 2001, e: true}
 
 log_every_ticks: 1000
