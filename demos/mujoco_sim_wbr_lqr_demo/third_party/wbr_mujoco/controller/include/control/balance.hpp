@@ -8,6 +8,7 @@
 
 #include <cmath>
 #include <cstring>
+#include <iostream>
 
 namespace control
 {
@@ -235,11 +236,11 @@ public:
     {
         if (input.w && !input.s)
         {
-            vel_slope_.set_default(k_cmd_velocity);
+            vel_slope_.update_val(k_cmd_velocity);
         }
         else if (input.s && !input.w)
         {
-            vel_slope_.set_default(-k_cmd_velocity);
+            vel_slope_.update_val(-k_cmd_velocity);
         }
         else
         {
@@ -255,11 +256,11 @@ public:
 
         if (input.a && !input.d)
         {
-            yaw_slope_.set_default(k_cmd_yaw_rate);
+            yaw_slope_.update_val(k_cmd_yaw_rate);
         }
         else if (input.d && !input.a)
         {
-            yaw_slope_.set_default(-k_cmd_yaw_rate);
+            yaw_slope_.update_val(-k_cmd_yaw_rate);
         }
         else
         {
@@ -320,8 +321,8 @@ public:
     const msg_cmd_t& msg() const { return msg_; }
 
 private:
-    static constexpr float k_cmd_velocity = 2.0f;
-    static constexpr float k_cmd_yaw_rate = 1000.0f;
+    static constexpr float k_cmd_velocity = 1.0f;
+    static constexpr float k_cmd_yaw_rate = 5.0f;
     static constexpr float k_cmd_position_hold_step = 0.00025f;
 
     msg_cmd_t msg_{};
