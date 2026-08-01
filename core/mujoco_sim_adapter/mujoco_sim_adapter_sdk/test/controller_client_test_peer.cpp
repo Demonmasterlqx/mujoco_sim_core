@@ -66,6 +66,12 @@ void ControllerClientTestPeer::HandleState(ControllerClient& client, std::uint64
   }
 }
 
+void ControllerClientTestPeer::HandleStatus(ControllerClient& client,
+                                            const mujoco_sim::v4::ServerStatus& status) {
+  const auto bytes = status.SerializeAsString();
+  client.impl_->OnStatus(bytes.data(), bytes.size());
+}
+
 void ControllerClientTestPeer::StartPublisher(ControllerClient& client) {
   auto& impl = *client.impl_;
   auto lifecycle_operation = impl.lifecycle.Acquire();

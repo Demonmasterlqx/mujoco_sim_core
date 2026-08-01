@@ -55,6 +55,227 @@ TEST(AsyncSimulationCoreTest, StepsContinuouslyWithoutControllers) {
   EXPECT_DOUBLE_EQ(core.state().simulation_time_s, 0.01);
 }
 
+TEST(AsyncSimulationCoreTest, ManualPauseIsNormalIdempotentAndDoesNotStep) {
+  SimulationCore core;
+  EXPECT_FALSE(core.SetPaused(true).response.applied);
+  ASSERT_TRUE(core.LoadModel(MUJOCO_SIM_CORE_TEST_MODEL).response.loaded);
+
+  const auto before = core.state();
+  auto pause = core.SetPaused(true);
+  EXPECT_TRUE(pause.response.applied);
+  EXPECT_TRUE(pause.response.state_changed);
+  EXPECT_EQ(pause.effects.status_urgency,
+            mujoco_sim::core::EngineEffects::StatusUrgency::kLifecycle);
+  EXPECT_EQ(core.state().server_state, mujoco_sim::core::PAUSED);
+  EXPECT_EQ(core.MakeStatus().message, "paused by local GUI");
+  EXPECT_FALSE(core.Step().step_completed);
+  EXPECT_EQ(core.state().current_tick_id, before.current_tick_id);
+  EXPECT_DOUBLE_EQ(core.state().simulation_time_s, before.simulation_time_s);
+
+  pause = core.SetPaused(true);
+  EXPECT_TRUE(pause.response.applied);
+  EXPECT_FALSE(pause.response.state_changed);
+  EXPECT_EQ(pause.effects.status_urgency, mujoco_sim::core::EngineEffects::StatusUrgency::kNone);
+
+  const auto run = core.SetPaused(false);
+  EXPECT_TRUE(run.response.applied);
+  EXPECT_TRUE(run.response.state_changed);
+  EXPECT_EQ(core.state().server_state, mujoco_sim::core::RUNNING);
+  EXPECT_TRUE(core.MakeStatus().message.empty());
+  EXPECT_TRUE(core.Step().step_completed);
+
+  core.MarkFailed("failed");
+  EXPECT_FALSE(core.SetPaused(false).response.applied);
+  EXPECT_FALSE(core.Reset(T(1ms)).response.applied);
+}
+
+TEST(AsyncSimulationCoreTest, ResetRestoresDefaultAndConfiguredKeyframeWithoutTickRollback) {
+  for (const std::string keyframe : {std::string{}, std::string{"ready"}}) {
+    SimulationCore core;
+    mujoco_sim::core::ModelLoadOptions options;
+    options.initial_keyframe = keyframe;
+    ASSERT_TRUE(core.LoadModel(MUJOCO_SIM_CORE_TEST_MODEL, options).response.loaded);
+    const auto epoch = core.state().epoch;
+
+    const std::vector<mujoco_sim::core::InteractiveActuatorWrite> controls = {
+        {.actuator_id = 0, .value = 0.6}};
+    const std::vector<mujoco_sim::core::InteractiveBodyWrench> wrenches = {
+        {.body_id = 1, .force = {1.0, 2.0, 3.0}, .torque = {4.0, 5.0, 6.0}}};
+    ASSERT_TRUE(core.Step({.actuator_writes = controls,
+                           .body_wrenches = wrenches,
+                           .replace_body_wrenches = true})
+                    .step_completed);
+    const auto tick_before_reset = core.state().current_tick_id;
+
+    const auto reset = core.Reset(T(20ms));
+    ASSERT_TRUE(reset.response.applied) << reset.response.message;
+    EXPECT_FALSE(reset.response.state_changed);
+    EXPECT_EQ(core.state().epoch, epoch);
+    EXPECT_EQ(core.state().current_tick_id, tick_before_reset);
+    EXPECT_EQ(core.state().server_state, mujoco_sim::core::RUNNING);
+
+    const auto snapshot = core.CreateSnapshot(nullptr);
+    ASSERT_NE(snapshot, nullptr);
+    EXPECT_DOUBLE_EQ(snapshot->data()->time, keyframe.empty() ? 0.0 : 1.25);
+    EXPECT_DOUBLE_EQ(snapshot->data()->qpos[0], keyframe.empty() ? 0.0 : 0.5);
+    EXPECT_DOUBLE_EQ(snapshot->data()->qvel[0], keyframe.empty() ? 0.0 : -0.25);
+    EXPECT_DOUBLE_EQ(snapshot->data()->ctrl[0], 0.0);
+    for (int index = 0; index < 6; ++index) {
+      EXPECT_DOUBLE_EQ(snapshot->data()->xfrc_applied[6 + index], 0.0);
+    }
+
+    ASSERT_TRUE(core.Step().step_completed);
+    EXPECT_EQ(core.state().current_tick_id, tick_before_reset + 1);
+  }
+}
+
+TEST(AsyncSimulationCoreTest, ResetPreservesPausedModeAndClearsOnlineControllerCommand) {
+  SimulationCore core;
+  ASSERT_TRUE(core.LoadModel(MUJOCO_SIM_CORE_TEST_MODEL).response.loaded);
+  const auto registration = RegisterController(&core);
+  ASSERT_EQ(registration.response.code(), mujoco_sim::core::OK);
+  Activate(&core, registration.response);
+
+  ControllerCommand command{{registration.response.session_id(), registration.response.epoch()},
+                            registration.response.layout().fingerprint,
+                            1,
+                            {0.75}};
+  ASSERT_EQ(core.SubmitCommand(command, T(1ms)).response.code, mujoco_sim::core::OK);
+  const auto initial_step = core.Step();
+  ASSERT_TRUE(initial_step.step_completed);
+  ASSERT_EQ(initial_step.step_completed->controller_states.size(), 1U);
+  EXPECT_EQ(initial_step.step_completed->controller_states.front().sequence, 1U);
+  ASSERT_TRUE(core.SetPaused(true).response.applied);
+  const auto tick = core.state().current_tick_id;
+
+  const auto reset = core.Reset(T(10ms));
+  ASSERT_TRUE(reset.response.applied);
+  ASSERT_EQ(reset.effects.adapter_changes.size(), 1U);
+  EXPECT_EQ(reset.effects.adapter_changes.front().kind,
+            mujoco_sim::core::AdapterChangeKind::kSimulationReset);
+  EXPECT_EQ(reset.effects.adapter_changes.front().old_state, mujoco_sim::core::ONLINE);
+  EXPECT_EQ(reset.effects.adapter_changes.front().new_state, mujoco_sim::core::ACTIVE_NO_COMMAND);
+  EXPECT_EQ(core.state().server_state, mujoco_sim::core::PAUSED);
+  EXPECT_EQ(core.state().current_tick_id, tick);
+  const auto status = core.MakeStatus();
+  EXPECT_EQ(status.message, "paused by local GUI");
+  ASSERT_EQ(status.adapters.size(), 1U);
+  EXPECT_EQ(status.adapters.front().state, mujoco_sim::core::ACTIVE_NO_COMMAND);
+  EXPECT_EQ(status.adapters.front().last_command_sequence, 1U);
+  EXPECT_DOUBLE_EQ(core.CreateSnapshot(nullptr)->data()->ctrl[0], 0.0);
+
+  EXPECT_EQ(core.SubmitCommand(command, T(11ms)).response.code, mujoco_sim::core::INVALID_COMMAND);
+  command.sequence = 2;
+  command.commands = {0.25};
+  EXPECT_EQ(core.SubmitCommand(command, T(12ms)).response.code, mujoco_sim::core::OK);
+  EXPECT_EQ(core.MakeStatus().adapters.front().state, mujoco_sim::core::ONLINE);
+  EXPECT_EQ(RegisterController(&core, "competitor").response.code(),
+            mujoco_sim::core::RESOURCE_CONFLICT);
+  EXPECT_FALSE(core.Step().step_completed);
+  ASSERT_TRUE(core.SetPaused(false).response.applied);
+  const auto resumed = core.Step();
+  ASSERT_TRUE(resumed.step_completed);
+  ASSERT_EQ(resumed.step_completed->controller_states.size(), 1U);
+  EXPECT_EQ(resumed.step_completed->controller_states.front().sequence, 2U);
+  EXPECT_EQ(resumed.step_completed->controller_states.front().identity.session.session_id,
+            registration.response.session_id());
+  EXPECT_EQ(resumed.step_completed->controller_states.front().identity.layout,
+            registration.response.layout().fingerprint);
+  EXPECT_DOUBLE_EQ(core.CreateSnapshot(nullptr)->data()->ctrl[0], 0.25);
+}
+
+TEST(AsyncSimulationCoreTest, ResetPreservesProvisionalAndRestartsActiveNoCommandLiveness) {
+  mujoco_sim::core::CoreOptions options;
+  options.command_timeout_ms = 10;
+  SimulationCore core(options);
+  ASSERT_TRUE(core.LoadModel(MUJOCO_SIM_CORE_TEST_MODEL).response.loaded);
+  const auto registration = RegisterController(&core);
+  ASSERT_EQ(registration.response.code(), mujoco_sim::core::OK);
+
+  ASSERT_TRUE(core.Reset(T(5ms)).response.applied);
+  EXPECT_EQ(core.MakeStatus().adapters.front().state, mujoco_sim::core::PROVISIONAL);
+  Activate(&core, registration.response, T(6ms));
+  ASSERT_TRUE(core.Reset(T(10ms)).response.applied);
+  EXPECT_EQ(core.MakeStatus().adapters.front().state, mujoco_sim::core::ACTIVE_NO_COMMAND);
+  core.CheckDeadlines(T(19ms));
+  EXPECT_EQ(core.MakeStatus().adapters.front().state, mujoco_sim::core::ACTIVE_NO_COMMAND);
+  core.CheckDeadlines(T(21ms));
+  EXPECT_EQ(core.MakeStatus().adapters.front().state, mujoco_sim::core::OFFLINE);
+}
+
+TEST(AsyncSimulationCoreTest, ResetPreservesOfflineControllerDiagnosticsAndSequence) {
+  mujoco_sim::core::CoreOptions options;
+  options.command_timeout_ms = 10;
+  SimulationCore core(options);
+  ASSERT_TRUE(core.LoadModel(MUJOCO_SIM_CORE_TEST_MODEL).response.loaded);
+  const auto registration = RegisterController(&core);
+  ASSERT_EQ(registration.response.code(), mujoco_sim::core::OK);
+  Activate(&core, registration.response);
+  ControllerCommand command{{registration.response.session_id(), registration.response.epoch()},
+                            registration.response.layout().fingerprint,
+                            1,
+                            {0.75}};
+  ASSERT_EQ(core.SubmitCommand(command, T(1ms)).response.code, mujoco_sim::core::OK);
+  ASSERT_TRUE(core.Step().step_completed);
+  core.CheckDeadlines(T(12ms));
+  const auto before = core.MakeStatus().adapters.front();
+  ASSERT_EQ(before.state, mujoco_sim::core::OFFLINE);
+
+  ASSERT_TRUE(core.Reset(T(20ms)).response.applied);
+  const auto after = core.MakeStatus().adapters.front();
+  EXPECT_EQ(after.state, mujoco_sim::core::OFFLINE);
+  EXPECT_EQ(after.message, before.message);
+  EXPECT_EQ(after.timeout_count, before.timeout_count);
+  EXPECT_EQ(after.state_since_tick_id, before.state_since_tick_id);
+  EXPECT_EQ(after.last_command_sequence, 1U);
+  EXPECT_DOUBLE_EQ(core.CreateSnapshot(nullptr)->data()->ctrl[0], 0.0);
+  EXPECT_EQ(core.SubmitCommand(command, T(21ms)).response.code, mujoco_sim::core::INVALID_COMMAND);
+}
+
+TEST(AsyncSimulationCoreTest, ResetPreservesControllerErrorAndClearsCommandCache) {
+  SimulationCore core;
+  ASSERT_TRUE(core.LoadModel(MUJOCO_SIM_CORE_TEST_MODEL).response.loaded);
+  const auto registration = RegisterController(&core);
+  ASSERT_EQ(registration.response.code(), mujoco_sim::core::OK);
+  Activate(&core, registration.response);
+  ControllerCommand command{{registration.response.session_id(), registration.response.epoch()},
+                            registration.response.layout().fingerprint,
+                            1,
+                            {0.75}};
+  ASSERT_EQ(core.SubmitCommand(command, T(1ms)).response.code, mujoco_sim::core::OK);
+  ASSERT_TRUE(core.Step().step_completed);
+  mujoco_sim::core::ControllerFault fault;
+  fault.session = command.session;
+  fault.code = mujoco_sim::core::FaultCode::kControllerError;
+  fault.message = "controller failed";
+  ASSERT_EQ(core.SubmitFault(fault).response.code, mujoco_sim::core::OK);
+  const auto before = core.MakeStatus().adapters.front();
+  ASSERT_EQ(before.state, mujoco_sim::core::ERROR);
+
+  ASSERT_TRUE(core.Reset(T(20ms)).response.applied);
+  const auto after = core.MakeStatus().adapters.front();
+  EXPECT_EQ(after.state, mujoco_sim::core::ERROR);
+  EXPECT_EQ(after.message, before.message);
+  EXPECT_EQ(after.last_command_sequence, before.last_command_sequence);
+  EXPECT_DOUBLE_EQ(core.CreateSnapshot(nullptr)->data()->ctrl[0], 0.0);
+}
+
+TEST(AsyncSimulationCoreTest, ResetRestartsObserverDeliveryWithoutSequenceRollback) {
+  SimulationCore core;
+  ASSERT_TRUE(core.LoadModel(MUJOCO_SIM_CORE_TEST_MODEL).response.loaded);
+  const auto registration = RegisterObserver(&core, "observer", 3);
+  ASSERT_EQ(registration.response.code(), mujoco_sim::core::OK);
+  Activate(&core, registration.response);
+
+  auto step = core.Step();
+  ASSERT_EQ(step.step_completed->observer_frames.size(), 1U);
+  EXPECT_EQ(step.step_completed->observer_frames.front().sequence, 1U);
+  ASSERT_TRUE(core.Reset(T(5ms)).response.applied);
+  step = core.Step();
+  ASSERT_EQ(step.step_completed->observer_frames.size(), 1U);
+  EXPECT_EQ(step.step_completed->observer_frames.front().sequence, 2U);
+}
+
 TEST(AsyncSimulationCoreTest, AppliesLatestCommandAtNextStepAndKeepsLast) {
   SimulationCore core;
   ASSERT_TRUE(core.LoadModel(MUJOCO_SIM_CORE_TEST_MODEL).response.loaded);

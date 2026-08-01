@@ -54,6 +54,12 @@ class ControllerClientTestPeer {
    */
   static void HandleState(ControllerClient& client, std::uint64_t sequence, std::uint64_t tick_id,
                           std::span<const double> observations);
+  /** @brief Injects one ServerStatus through the production status path.
+   *         通过生产状态路径注入一条 ServerStatus。
+   * @param client Borrowed configured test client. 借用的已配置测试客户端。
+   * @param status Status copied and serialized during this call. 本次调用中复制并序列化的状态。
+   */
+  static void HandleStatus(ControllerClient& client, const mujoco_sim::v4::ServerStatus& status);
   /** @brief Starts the production publisher loop for a configured active client.
    *         为已配置的活动客户端启动生产发布循环。
    * @param client Borrowed client not already owning a publisher thread.

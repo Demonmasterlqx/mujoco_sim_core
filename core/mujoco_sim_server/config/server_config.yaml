@@ -189,6 +189,14 @@ fields:
     type: bool
     description: Accept dynamic-body mouse perturbation forces from the graphical viewer
     default: true
+  viewer_pause_run_enabled:
+    type: bool
+    description: Allow the graphical viewer to pause and resume physics stepping
+    default: true
+  viewer_reset_enabled:
+    type: bool
+    description: Allow the graphical viewer to reset authoritative simulation data
+    default: true
   viewer_mouse_force_timeout_ms:
     type: uint32
     description: Clear stale graphical-viewer mouse forces after this timeout

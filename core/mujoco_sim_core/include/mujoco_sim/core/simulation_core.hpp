@@ -53,6 +53,20 @@ struct CoreOptions {
 struct ModelLoadOptions {
   std::string initial_keyframe;
 };
+/**
+ * @brief Identifies one owned lifecycle effect emitted by SimulationCore.
+ *
+ * SimulationLoop consumes these values on the Core owner thread to update
+ * transport resources, structured logs, and lifecycle status. Values do not
+ * borrow Core storage. `kSimulationReset` is emitted only for an ONLINE
+ * Controller that Reset returns to ACTIVE_NO_COMMAND.
+ *
+ * 标识 SimulationCore 产生的一项自有生命周期效果。
+ *
+ * SimulationLoop 在 Core 所有者线程上消费这些值，用于更新传输资源、结构化日志与
+ * 生命周期状态。值不借用 Core 存储。`kSimulationReset` 仅在 Reset 将 ONLINE
+ * Controller 退回 ACTIVE_NO_COMMAND 时产生。
+ */
 enum class AdapterChangeKind {
   kRegistered,
   kActivated,
@@ -62,7 +76,10 @@ enum class AdapterChangeKind {
   kRecovered,
   kLocalError,
   kServerFailed,
-  kReplaced
+  kReplaced,
+  /** An ONLINE Controller was returned to command-waiting by simulation Reset.
+   * 仿真 Reset 使 ONLINE Controller 返回等待 command 的状态。 */
+  kSimulationReset
 };
 struct AdapterChange {
   AdapterChangeKind kind = AdapterChangeKind::kRegistered;
@@ -102,6 +119,26 @@ struct ModelLoadReceipt {
 };
 struct CommandReceipt {
   ErrorCode code = OK;
+  std::string message;
+};
+/**
+ * @brief Reports whether a local simulation lifecycle action was applied.
+ *
+ * `applied` is true for accepted idempotent requests. `state_changed` only
+ * reports a ServerState transition; Reset can therefore be applied without a
+ * state change. The message owns a diagnostic suitable for structured logs.
+ *
+ * 报告本地仿真生命周期动作是否已应用。
+ *
+ * 对已接受的幂等请求，`applied` 也为 true。`state_changed` 只表示 ServerState
+ * 转换，因此 Reset 可以成功但不改变状态。message 自有可用于结构化日志的诊断文本。
+ */
+struct SimulationActionReceipt {
+  /** Whether the request was accepted and applied. 请求是否被接受并应用。 */
+  bool applied = false;
+  /** Whether the action changed ServerState. 动作是否改变了 ServerState。 */
+  bool state_changed = false;
+  /** Owned action result diagnostic. 自有的动作结果诊断。 */
   std::string message;
 };
 struct CoreResources {
@@ -198,6 +235,52 @@ class SimulationCore {
    * 仅可由 SimulationCore 所有者线程调用。
    */
   EngineEffects Step(const InteractiveStepInput& input);
+  /**
+   * @brief Enters or leaves the normal manual PAUSED state.
+   *
+   * Only RUNNING and PAUSED accept this action. Idempotent requests are
+   * accepted without emitting lifecycle effects. ERROR_PAUSED, IDLE, STOPPED,
+   * and an unloaded model reject the request.
+   *
+   * 进入或离开正常的手动 PAUSED 状态。
+   *
+   * 只有 RUNNING 和 PAUSED 接受本动作。幂等请求会被接受但不产生生命周期效果。
+   * ERROR_PAUSED、IDLE、STOPPED 以及未加载模型时会拒绝请求。
+   *
+   * @param paused true to pause physics; false to resume physics.
+   *               true 表示暂停物理步进，false 表示恢复物理步进。
+   * @return Owned receipt and lifecycle status effects. 自有回执与生命周期状态效果。
+   * @par Thread safety / 线程安全
+   * Call only from the SimulationCore owner thread. 仅可由 SimulationCore 所有者线程调用。
+   * @par Blocking / 阻塞
+   * Does not block or execute a physics step. 不阻塞，也不执行物理步进。
+   */
+  EngineResult<SimulationActionReceipt> SetPaused(bool paused);
+
+  /**
+   * @brief Resets authoritative MuJoCo data to the configured initial state.
+   *
+   * Reset is accepted only in RUNNING or PAUSED. It preserves epoch, tick,
+   * sessions, layouts, ownership, ServerState, and sequence counters. Cached
+   * Controller commands and interactive inputs in Core are cleared. The
+   * supplied steady-clock time restarts command liveness for Controllers that
+   * are waiting for a post-reset command.
+   *
+   * 将权威 MuJoCo data 重置为配置的初始状态。
+   *
+   * Reset 仅在 RUNNING 或 PAUSED 中被接受。它保留 epoch、tick、session、layout、
+   * 所有权、ServerState 与序列计数器，并清除 Core 中缓存的 Controller command 和交互
+   * 输入。传入的 steady-clock 时间用于重新开始等待 Reset 后 command 的存活性计时。
+   *
+   * @param now Explicit steady-clock action time. 显式的 steady-clock 动作时间。
+   * @return Owned receipt and lifecycle effects. 自有回执与生命周期效果。
+   * @par Thread safety / 线程安全
+   * Call only from the SimulationCore owner thread. 仅可由 SimulationCore 所有者线程调用。
+   * @par Blocking / 阻塞
+   * Performs only local MuJoCo reset/forward work and never waits for transport
+   * or worker threads. 仅执行本地 MuJoCo reset/forward，不等待传输或 worker 线程。
+   */
+  EngineResult<SimulationActionReceipt> Reset(std::chrono::steady_clock::time_point now);
   EngineEffects CheckDeadlines(std::chrono::steady_clock::time_point now);
   EngineEffects MarkFailed(const std::string&);
   EngineEffects MarkStopped(const std::string&);

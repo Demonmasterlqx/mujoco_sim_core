@@ -40,6 +40,7 @@ add_library(${PROJECT_NAME}_lib
   src/server_logging.cpp
   src/server_runtime.cpp
   src/simulation_loop.cpp
+  src/simulation_loop_actions.cpp
   src/viewer_input_state.cpp)
 add_library(mujoco_sim::server ALIAS ${PROJECT_NAME}_lib)
 
@@ -293,6 +294,7 @@ if(BUILD_TESTING)
     target_link_libraries(sim_viewer_test PRIVATE
       ${PROJECT_NAME}_lib
       mujoco_sim::core
+      mujoco_sim::protocol
       GTest::gtest_main
     )
     target_compile_definitions(sim_viewer_test PRIVATE
@@ -303,7 +305,7 @@ if(BUILD_TESTING)
       NAME sim_viewer_test
       COMMAND ${MUJOCO_SIM_GUI_TEST_PREFIX} $<TARGET_FILE:sim_viewer_test>
     )
-    set_tests_properties(sim_viewer_test PROPERTIES TIMEOUT 15)
+    set_tests_properties(sim_viewer_test PROPERTIES TIMEOUT 30)
 
     add_test(
       NAME server_gui_autonomous_run

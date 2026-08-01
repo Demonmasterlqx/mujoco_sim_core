@@ -115,6 +115,8 @@ sensor_subscriber_sample_period_ms: 200
 viewer_sync_period_ms: 16
 viewer_control_input_enabled: true
 viewer_mouse_force_enabled: true
+viewer_pause_run_enabled: true
+viewer_reset_enabled: true
 viewer_mouse_force_timeout_ms: 100
 log_summary_period_ms: 1000
 log_level: info
@@ -131,8 +133,10 @@ YAML 中的相对路径按配置文件所在目录解析，CLI 路径按进程�
 `--server-name`、`--max-ticks` 和 `--activation-timeout-ms` 可以覆盖对应 YAML 字段；
 `--log-level`、`--log-file`、`--log-file-max-size-mb`、`--log-file-max-files` 及
 `--log-summary-period-ms` 也有 CLI 覆盖。`--viewer-sync-period-ms` 覆盖 GUI 快照采集周期；
-取值必须是 `[1, UINT32_MAX]` 内的毫秒数，默认 `16`。headless 模式仍严格解析该值，但运行时
-不使用它。其余未声明 CLI flag 的运行策略必须写入 YAML。
+取值必须是 `[1, UINT32_MAX]` 内的毫秒数，默认 `16`。
+`viewer_pause_run_enabled` 与 `viewer_reset_enabled` 仅可在 YAML 中配置，默认均为 `true`。
+headless 模式仍严格解析全部 viewer 字段，但不创建 GUI，也不会产生本地 Pause/Run/Reset
+动作。其余未声明 CLI flag 的运行策略必须写入 YAML。
 默认启动 MuJoCo 官方
 `simulate` 图形界面；远程服务、CI 或无显示环境使用 `--headless`，该模式不会初始化
 GLFW viewer。若配置 camera Stream，sensor worker 仍会初始化 EGL 或 OSMesa offscreen
@@ -152,6 +156,17 @@ actuator 写入；同一边界中 GUI 后于 Adapter 写入生效，但下一条
 停止同步，Server 会按 `viewer_mouse_force_timeout_ms`（默认 `100` ms，最小 `1` ms）在下一
 Step 前清除残留力。GUI 输入不取得 Controller 资源所有权，也不改变 Adapter liveness；
 将对应输入字段显式设置为 `false` 可恢复纯观察行为。
+
+GUI 的 Pause 只停止 `mj_step()`：RPC、Adapter liveness、状态发布、Sensor/Viewer 管理与
+定时器仍会运行，`mujoco-sim-status --watch` 会显示 `PAUSED`，且 tick 和 simulation time
+保持不变。Run 从点击时的 steady clock 重新开始 pacing，不会追赶暂停期间的墙钟时间。
+Reset 将权威状态恢复到默认初始状态或 `initial_keyframe`，清零 control、鼠标力与旧
+Controller Command，但保留当前 Run/Pause 模式、epoch、tick、session、layout 和资源
+所有权；下一次 Step 的 tick 继续递增。Reset 后 `ONLINE` Controller 会显示为
+`ACTIVE_NO_COMMAND`，并且必须发送 sequence 大于 Reset 前最后值的新 wire Command。
+官方 SDK 的 keepalive 会继续以递增 sequence 发布最新值。`ERROR_PAUSED` 不能通过 Run
+或 Reset 恢复。将 `viewer_reset_enabled` 设为 `false` 会显式禁用 Reset 按钮并阻止被动
+viewer 副本发生本地 Reset。
 
 ## Protocol V4 运行示例
 

@@ -9,6 +9,8 @@ int main() {
   config.viewer_sync_period_ms = 16;
   config.viewer_control_input_enabled = false;
   config.viewer_mouse_force_enabled = false;
+  config.viewer_pause_run_enabled = false;
+  config.viewer_reset_enabled = false;
   config.viewer_mouse_force_timeout_ms = 100;
   mujoco_sim::server::ServerApplication server(config);
   const std::string usage = mujoco_sim::server::Usage();

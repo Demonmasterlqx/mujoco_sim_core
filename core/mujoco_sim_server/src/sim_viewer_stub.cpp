@@ -76,6 +76,9 @@ bool SimViewer::RenderLoop(std::string*) noexcept {
 }
 
 void SimViewer::RequestScreenshot() noexcept {}
+
+void SimViewer::RequestRunningIndicator(bool) noexcept {}
+void SimViewer::CompleteSimulationResetAction() noexcept {}
 void SimViewer::RequestClose() noexcept {}
 bool SimViewer::close_requested() const noexcept {
   return true;
@@ -105,6 +108,19 @@ bool SimViewer::SetControlForTesting(int, double) noexcept {
 }
 bool SimViewer::RequestClearControlsForTesting() noexcept {
   return false;
+}
+
+bool SimViewer::SetRunningForTesting(bool) noexcept {
+  return false;
+}
+
+bool SimViewer::RequestResetForTesting() noexcept {
+  return false;
+}
+
+std::optional<SimViewer::SimulationUiStateForTesting> SimViewer::GetSimulationUiStateForTesting()
+    const {
+  return std::nullopt;
 }
 void SimViewer::PublishInputForTesting(const ViewerInputBatch&) noexcept {}
 void SimViewer::HoldInputMailboxForTesting(std::chrono::milliseconds,

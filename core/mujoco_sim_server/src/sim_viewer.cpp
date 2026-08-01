@@ -5,6 +5,7 @@
 #include <atomic>
 #include <condition_variable>
 #include <cmath>
+#include <cstring>
 #include <cstdio>
 #include <exception>
 #include <limits>
@@ -71,6 +72,120 @@ struct DurationMetrics {
   std::uint64_t total_ns = 0;
   std::uint64_t max_ns = 0;
   std::uint64_t sample_count = 0;
+};
+
+class RenderSyncBoundary {
+ public:
+  class SyncGuard {
+   public:
+    explicit SyncGuard(RenderSyncBoundary* owner) : owner_(owner) {}
+    ~SyncGuard() {
+      if (owner_ != nullptr) owner_->EndSync();
+    }
+    SyncGuard(const SyncGuard&) = delete;
+    SyncGuard& operator=(const SyncGuard&) = delete;
+    SyncGuard(SyncGuard&& other) noexcept : owner_(std::exchange(other.owner_, nullptr)) {}
+    SyncGuard& operator=(SyncGuard&&) = delete;
+
+   private:
+    RenderSyncBoundary* owner_;
+  };
+
+  SyncGuard BeginSync() {
+    std::unique_lock lock(mutex_);
+    ++sync_waiters_;
+    condition_.wait(lock, [this] { return !render_active_ && !sync_active_; });
+    --sync_waiters_;
+    sync_active_ = true;
+    return SyncGuard(this);
+  }
+
+  void BeginRender() {
+    std::unique_lock lock(mutex_);
+    condition_.wait(lock,
+                    [this] { return !render_active_ && !sync_active_ && sync_waiters_ == 0; });
+    render_active_ = true;
+  }
+
+  void EndRender() noexcept {
+    bool notify = false;
+    {
+      std::lock_guard lock(mutex_);
+      if (render_active_) {
+        render_active_ = false;
+        notify = true;
+      }
+    }
+    if (notify) condition_.notify_all();
+  }
+
+ private:
+  void EndSync() noexcept {
+    {
+      std::lock_guard lock(mutex_);
+      sync_active_ = false;
+    }
+    condition_.notify_all();
+  }
+
+  std::mutex mutex_;
+  std::condition_variable condition_;
+  std::size_t sync_waiters_ = 0;
+  bool render_active_ = false;
+  bool sync_active_ = false;
+};
+
+class RenderBoundaryGlfwAdapter final : public mujoco::GlfwAdapter {
+ public:
+  explicit RenderBoundaryGlfwAdapter(RenderSyncBoundary* boundary) : boundary_(boundary) {}
+
+  ~RenderBoundaryGlfwAdapter() override { ReleaseRenderLock(); }
+
+  bool EnsureContextSize() override {
+    if (polling_events_) {
+      return mujoco::PlatformUIAdapter::EnsureContextSize();
+    }
+    boundary_->BeginRender();
+    render_lock_held_ = true;
+    try {
+      return mujoco::PlatformUIAdapter::EnsureContextSize();
+    } catch (...) {
+      ReleaseRenderLock();
+      throw;
+    }
+  }
+
+  void SwapBuffers() override {
+    try {
+      mujoco::GlfwAdapter::SwapBuffers();
+    } catch (...) {
+      ReleaseRenderLock();
+      throw;
+    }
+    ReleaseRenderLock();
+  }
+
+  void PollEvents() override {
+    polling_events_ = true;
+    try {
+      mujoco::GlfwAdapter::PollEvents();
+    } catch (...) {
+      polling_events_ = false;
+      throw;
+    }
+    polling_events_ = false;
+  }
+
+ private:
+  void ReleaseRenderLock() noexcept {
+    if (!render_lock_held_) return;
+    render_lock_held_ = false;
+    boundary_->EndRender();
+  }
+
+  RenderSyncBoundary* boundary_;
+  bool render_lock_held_ = false;
+  bool polling_events_ = false;
 };
 
 }  // namespace
@@ -141,6 +256,11 @@ struct SimViewer::Impl {
     std::uint32_t index = 0;
   };
 
+  struct PendingBuffer {
+    std::uint32_t index = 0;
+    std::uint64_t reset_generation = 0;
+  };
+
   struct SyncActivity {
     explicit SyncActivity(std::atomic<bool>* active_flag) : active(active_flag) {
       active->store(true, std::memory_order_release);
@@ -161,7 +281,7 @@ struct SimViewer::Impl {
 
   void ReleasePendingLocked() noexcept {
     if (pending_buffer.has_value()) {
-      ReleaseBuffer(*pending_buffer);
+      ReleaseBuffer(pending_buffer->index);
       pending_buffer.reset();
     }
   }
@@ -192,12 +312,112 @@ struct SimViewer::Impl {
 
   bool SnapshotStorageValid() const noexcept { return snapshot_storage_valid; }
 
+  template <class Predicate>
+  mjuiItem* FindUniqueItemLocked(Predicate predicate, std::string_view description) {
+    mjuiItem* found = nullptr;
+    for (int section_id = 0; section_id < simulate->ui0.nsect; ++section_id) {
+      auto& section = simulate->ui0.sect[section_id];
+      for (int item_id = 0; item_id < section.nitem; ++item_id) {
+        auto& item = section.item[item_id];
+        if (!predicate(item)) continue;
+        if (found != nullptr) {
+          throw std::runtime_error("multiple MuJoCo Simulation UI items matched " +
+                                   std::string(description));
+        }
+        found = &item;
+      }
+    }
+    if (found == nullptr) {
+      throw std::runtime_error("MuJoCo Simulation UI item was not found: " +
+                               std::string(description));
+    }
+    return found;
+  }
+
+  void UpdateItemLocked(mjuiItem* item) {
+    mjui_update(item->sectionid, item->itemid, &simulate->ui0, &simulate->uistate,
+                &simulate->platform_ui->mjr_context());
+  }
+
+  void ConfigureSimulationItemsLocked() {
+    if (simulation_items_configured) return;
+    run_item = FindUniqueItemLocked(
+        [this](const mjuiItem& item) { return item.pdata == static_cast<void*>(&simulate->run); },
+        "Pause/Run");
+    reset_item = FindUniqueItemLocked(
+        [](const mjuiItem& item) {
+          return item.type == mjITEM_BUTTON && std::strcmp(item.name, "Reset") == 0;
+        },
+        "Reset");
+    num_threads_item = FindUniqueItemLocked(
+        [this](const mjuiItem& item) {
+          return item.pdata == static_cast<void*>(&simulate->nthread);
+        },
+        "Num threads");
+    reload_item = FindUniqueItemLocked(
+        [](const mjuiItem& item) {
+          return item.type == mjITEM_BUTTON && std::strcmp(item.name, "Reload") == 0;
+        },
+        "Reload");
+    noise_scale_item = FindUniqueItemLocked(
+        [this](const mjuiItem& item) {
+          return item.pdata == static_cast<void*>(&simulate->ctrl_noise_std);
+        },
+        "Noise scale");
+    noise_rate_item = FindUniqueItemLocked(
+        [this](const mjuiItem& item) {
+          return item.pdata == static_cast<void*>(&simulate->ctrl_noise_rate);
+        },
+        "Noise rate");
+    history_scrub_item = FindUniqueItemLocked(
+        [this](const mjuiItem& item) {
+          return item.pdata == static_cast<void*>(&simulate->scrub_index);
+        },
+        "History scrub");
+
+    if (input_options.pause_run_enabled) {
+      run_item->state = 1;
+      UpdateItemLocked(run_item);
+    }
+    if (!input_options.reset_enabled) {
+      reset_item->state = 0;
+      UpdateItemLocked(reset_item);
+    }
+    last_observed_running = simulate->run != 0;
+    simulation_items_configured = true;
+  }
+
+  void ApplyRequestedRunIndicatorLocked() {
+    const int requested = requested_run_indicator.exchange(-1, std::memory_order_acq_rel);
+    if (requested < 0) return;
+    simulate->run = requested;
+    last_observed_running = requested != 0;
+    UpdateItemLocked(run_item);
+  }
+
   void PublishInput(std::span<const mujoco_sim::core::InteractiveActuatorWrite> control_writes,
-                    const ViewerWrenchFrame* wrench_frame) {
-    if (control_writes.empty() && wrench_frame == nullptr) return;
+                    const ViewerWrenchFrame* wrench_frame, const ViewerSimulationActions& actions,
+                    std::uint64_t batch_reset_generation) {
+    if (control_writes.empty() && wrench_frame == nullptr && !actions.running.has_value() &&
+        !actions.reset_requested) {
+      return;
+    }
     std::lock_guard lock(input_mutex);
     if (!accepting_input) return;
-    if (input_options.control_enabled) {
+    if (batch_reset_generation != reset_generation.load(std::memory_order_acquire)) {
+      if (actions.running.has_value()) pending_running = actions.running;
+      return;
+    }
+    const bool data_blocked = reset_barrier_active || actions.reset_requested;
+    if (actions.reset_requested) {
+      for (auto& value : pending_control_values)
+        value.reset();
+      latest_wrench_values.clear();
+      wrench_pending = false;
+      if (!reset_barrier_active) reset_action_available = true;
+      reset_barrier_active = true;
+    }
+    if (!data_blocked && input_options.control_enabled) {
       for (const auto& write : control_writes) {
         if (write.actuator_id >= 0 &&
             static_cast<std::size_t>(write.actuator_id) < pending_control_values.size()) {
@@ -205,13 +425,14 @@ struct SimViewer::Impl {
         }
       }
     }
-    if (input_options.mouse_force_enabled && wrench_frame != nullptr) {
+    if (!data_blocked && input_options.mouse_force_enabled && wrench_frame != nullptr) {
       latest_wrench_sequence = wrench_frame->sequence;
       latest_wrench_generated_at = wrench_frame->generated_at;
       latest_wrench_values.assign(wrench_frame->body_wrenches.begin(),
                                   wrench_frame->body_wrenches.end());
       wrench_pending = true;
     }
+    if (actions.running.has_value()) pending_running = actions.running;
   }
 
   void ExtractInputLocked() {
@@ -244,7 +465,7 @@ struct SimViewer::Impl {
     previous_wrench_nonempty = nonempty;
   }
 
-  void SynchronizeBuffer(std::uint32_t index) {
+  void SynchronizeBuffer(std::uint32_t index, std::uint64_t batch_reset_generation) {
     if (fail_next_sync.exchange(false, std::memory_order_acq_rel)) {
       throw std::runtime_error("injected viewer sync worker failure");
     }
@@ -254,7 +475,10 @@ struct SimViewer::Impl {
 
     const auto started = Clock::now();
     bool completed = false;
+    ViewerSimulationActions actions;
+    bool suppress_data_inputs = false;
     {
+      auto sync_guard = render_boundary.BeginSync();
       const mujoco::MutexLock viewer_lock(simulate->mtx);
       SyncActivity activity(&sync_active);
       const auto delay_ns = sync_delay_ns.load(std::memory_order_acquire);
@@ -265,18 +489,41 @@ struct SimViewer::Impl {
           simulate->loadrequest == 0 && simulate->m_ != nullptr) {
         mj_copyData(display_snapshot->data(), display_snapshot->model(),
                     production_snapshots[index]->data());
+        ConfigureSimulationItemsLocked();
+        ApplyRequestedRunIndicatorLocked();
         if (input_options.control_enabled && !control_before_sync.empty()) {
           mju_copy(control_before_sync.data(), display_snapshot->data()->ctrl,
                    display_snapshot->model()->nu);
         }
+        const bool current_running = simulate->run != 0;
+        if (input_options.pause_run_enabled && current_running != last_observed_running) {
+          actions.running = current_running;
+        }
+        last_observed_running = current_running;
+        if (simulate->pending_.reset) {
+          if (input_options.reset_enabled) {
+            actions.reset_requested = true;
+            suppress_data_inputs = true;
+          } else {
+            simulate->pending_.reset = false;
+          }
+        }
         simulate->Sync();
-        ExtractInputLocked();
+        if (suppress_data_inputs) {
+          extracted_control_writes.clear();
+          extracted_wrench_frame_valid = false;
+          extracted_wrenches.clear();
+          previous_wrench_nonempty = false;
+        } else {
+          ExtractInputLocked();
+        }
         completed = true;
       }
     }
     if (completed) {
       PublishInput(extracted_control_writes,
-                   extracted_wrench_frame_valid ? &extracted_wrench_frame : nullptr);
+                   extracted_wrench_frame_valid ? &extracted_wrench_frame : nullptr, actions,
+                   batch_reset_generation);
       std::lock_guard metrics_lock(sync_metrics_mutex);
       sync_duration.Record(Clock::now() - started);
       ++sync_completed;
@@ -285,7 +532,7 @@ struct SimViewer::Impl {
 
   void WorkerMain() {
     while (true) {
-      std::optional<std::uint32_t> buffer;
+      std::optional<PendingBuffer> buffer;
       {
         std::unique_lock lock(mailbox_mutex);
         mailbox_condition.wait(lock, [this] {
@@ -299,8 +546,8 @@ struct SimViewer::Impl {
         pending_buffer.reset();
       }
 
-      BufferRelease release{this, *buffer};
-      SynchronizeBuffer(*buffer);
+      BufferRelease release{this, buffer->index};
+      SynchronizeBuffer(buffer->index, buffer->reset_generation);
     }
   }
 
@@ -317,6 +564,7 @@ struct SimViewer::Impl {
   mjvCamera camera{};
   mjvOption option{};
   mjvPerturb perturb{};
+  RenderSyncBoundary render_boundary;
   std::unique_ptr<mujoco::Simulate> simulate;
   InputOptions input_options;
   std::unique_ptr<mujoco_sim::core::SimulationSnapshot> display_snapshot;
@@ -330,6 +578,16 @@ struct SimViewer::Impl {
   bool extracted_wrench_frame_valid = false;
   bool previous_wrench_nonempty = false;
   std::uint64_t wrench_sequence = 0;
+  bool simulation_items_configured = false;
+  bool last_observed_running = true;
+  mjuiItem* run_item = nullptr;
+  mjuiItem* reset_item = nullptr;
+  mjuiItem* num_threads_item = nullptr;
+  mjuiItem* reload_item = nullptr;
+  mjuiItem* noise_scale_item = nullptr;
+  mjuiItem* noise_rate_item = nullptr;
+  mjuiItem* history_scrub_item = nullptr;
+  std::atomic<int> requested_run_indicator{-1};
 
   std::mutex input_mutex;
   std::vector<std::optional<double>> pending_control_values;
@@ -337,12 +595,16 @@ struct SimViewer::Impl {
   Clock::time_point latest_wrench_generated_at{};
   std::vector<mujoco_sim::core::InteractiveBodyWrench> latest_wrench_values;
   bool wrench_pending = false;
+  std::optional<bool> pending_running;
+  bool reset_barrier_active = false;
+  bool reset_action_available = false;
   bool accepting_input = false;
 
   std::mutex mailbox_mutex;
   std::condition_variable mailbox_condition;
-  std::optional<std::uint32_t> pending_buffer;
+  std::optional<PendingBuffer> pending_buffer;
   std::atomic<std::uint32_t> free_buffers{0};
+  std::atomic<std::uint64_t> reset_generation{0};
   std::atomic<bool> stop_requested{false};
   std::atomic<bool> accepting_submissions{false};
 
@@ -443,9 +705,9 @@ bool SimViewer::Initialize(std::string* error_message) {
     mjv_defaultCamera(&impl_->camera);
     mjv_defaultOption(&impl_->option);
     mjv_defaultPerturb(&impl_->perturb);
-    impl_->simulate =
-        std::make_unique<mujoco::Simulate>(std::make_unique<mujoco::GlfwAdapter>(), &impl_->camera,
-                                           &impl_->option, &impl_->perturb, true);
+    impl_->simulate = std::make_unique<mujoco::Simulate>(
+        std::make_unique<RenderBoundaryGlfwAdapter>(&impl_->render_boundary), &impl_->camera,
+        &impl_->option, &impl_->perturb, true);
   } catch (const std::exception& error) {
     *error_message = "failed to create MuJoCo viewer: " + std::string(error.what());
     return false;
@@ -546,10 +808,13 @@ bool SimViewer::TrySubmitSnapshot(SnapshotLease&& lease) noexcept {
 
   impl_->RecordCapture(lease.capture_started_);
   if (impl_->pending_buffer.has_value()) {
-    impl_->ReleaseBuffer(*impl_->pending_buffer);
+    impl_->ReleaseBuffer(impl_->pending_buffer->index);
     impl_->pending_replaced.fetch_add(1, std::memory_order_relaxed);
   }
-  impl_->pending_buffer = lease.buffer_index_;
+  impl_->pending_buffer = Impl::PendingBuffer{
+      .index = lease.buffer_index_,
+      .reset_generation = impl_->reset_generation.load(std::memory_order_acquire),
+  };
   lease.owner_ = nullptr;
   impl_->capture_submitted.fetch_add(1, std::memory_order_relaxed);
   lock.unlock();
@@ -565,7 +830,10 @@ bool SimViewer::TryConsumeInput(ViewerInputBatch* output) noexcept {
   const auto control_count = static_cast<std::size_t>(
       std::count_if(impl_->pending_control_values.begin(), impl_->pending_control_values.end(),
                     [](const auto& value) { return value.has_value(); }));
-  if (control_count == 0 && !impl_->wrench_pending) return false;
+  if (control_count == 0 && !impl_->wrench_pending && !impl_->pending_running.has_value() &&
+      !impl_->reset_action_available) {
+    return false;
+  }
   try {
     output->actuator_writes.reserve(control_count);
     if (impl_->wrench_pending) {
@@ -594,6 +862,10 @@ bool SimViewer::TryConsumeInput(ViewerInputBatch* output) noexcept {
   } else {
     output->wrench_frame.reset();
   }
+  output->simulation_actions.running = impl_->pending_running;
+  output->simulation_actions.reset_requested = impl_->reset_action_available;
+  impl_->pending_running.reset();
+  impl_->reset_action_available = false;
   return true;
 }
 
@@ -616,6 +888,7 @@ bool SimViewer::RenderLoop(std::string* error_message) noexcept {
     *error_message = "viewer render loop failed: non-standard exception";
   }
 
+  impl_->render_boundary.EndRender();
   RequestClose();
   if (impl_->sync_worker.joinable()) {
     impl_->sync_worker.join();
@@ -633,6 +906,29 @@ void SimViewer::RequestScreenshot() noexcept {
   }
 }
 
+void SimViewer::RequestRunningIndicator(bool running) noexcept {
+  impl_->requested_run_indicator.store(running ? 1 : 0, std::memory_order_release);
+}
+
+void SimViewer::CompleteSimulationResetAction() noexcept {
+  impl_->reset_generation.fetch_add(1, std::memory_order_acq_rel);
+  try {
+    std::lock_guard input_lock(impl_->input_mutex);
+    for (auto& value : impl_->pending_control_values)
+      value.reset();
+    impl_->latest_wrench_values.clear();
+    impl_->wrench_pending = false;
+    impl_->reset_barrier_active = false;
+    impl_->reset_action_available = false;
+  } catch (...) {
+  }
+  try {
+    std::lock_guard mailbox_lock(impl_->mailbox_mutex);
+    impl_->ReleasePendingLocked();
+  } catch (...) {
+  }
+}
+
 void SimViewer::RequestClose() noexcept {
   impl_->stop_requested.store(true, std::memory_order_release);
   impl_->accepting_submissions.store(false, std::memory_order_release);
@@ -641,7 +937,11 @@ void SimViewer::RequestClose() noexcept {
     impl_->accepting_input = false;
     for (auto& value : impl_->pending_control_values)
       value.reset();
+    impl_->latest_wrench_values.clear();
     impl_->wrench_pending = false;
+    impl_->pending_running.reset();
+    impl_->reset_barrier_active = false;
+    impl_->reset_action_available = false;
   } catch (...) {
   }
   impl_->mailbox_condition.notify_all();
@@ -659,6 +959,7 @@ bool SimViewer::model_loaded() const {
   if (impl_->simulate == nullptr || close_requested()) {
     return false;
   }
+  auto sync_guard = impl_->render_boundary.BeginSync();
   const mujoco::MutexLock viewer_lock(impl_->simulate->mtx);
   return impl_->simulate->loadrequest == 0 && impl_->simulate->m_ != nullptr;
 }
@@ -727,6 +1028,7 @@ void SimViewer::SetSyncDelayForTesting(std::chrono::milliseconds duration) noexc
 bool SimViewer::SetControlForTesting(int actuator_id, double value) noexcept {
   if (impl_->simulate == nullptr) return false;
   try {
+    auto sync_guard = impl_->render_boundary.BeginSync();
     const mujoco::MutexLock viewer_lock(impl_->simulate->mtx);
     if (actuator_id < 0 || static_cast<std::size_t>(actuator_id) >= impl_->simulate->ctrl_.size()) {
       return false;
@@ -741,6 +1043,7 @@ bool SimViewer::SetControlForTesting(int actuator_id, double value) noexcept {
 bool SimViewer::RequestClearControlsForTesting() noexcept {
   if (impl_->simulate == nullptr) return false;
   try {
+    auto sync_guard = impl_->render_boundary.BeginSync();
     const mujoco::MutexLock viewer_lock(impl_->simulate->mtx);
     impl_->simulate->pending_.zero_ctrl = true;
     return true;
@@ -749,9 +1052,55 @@ bool SimViewer::RequestClearControlsForTesting() noexcept {
   }
 }
 
+bool SimViewer::SetRunningForTesting(bool running) noexcept {
+  if (impl_->simulate == nullptr) return false;
+  try {
+    auto sync_guard = impl_->render_boundary.BeginSync();
+    const mujoco::MutexLock viewer_lock(impl_->simulate->mtx);
+    if (!impl_->simulation_items_configured) return false;
+    impl_->simulate->run = running ? 1 : 0;
+    impl_->UpdateItemLocked(impl_->run_item);
+    return true;
+  } catch (...) {
+    return false;
+  }
+}
+
+bool SimViewer::RequestResetForTesting() noexcept {
+  if (impl_->simulate == nullptr) return false;
+  try {
+    auto sync_guard = impl_->render_boundary.BeginSync();
+    const mujoco::MutexLock viewer_lock(impl_->simulate->mtx);
+    if (!impl_->simulation_items_configured) return false;
+    impl_->simulate->pending_.reset = true;
+    return true;
+  } catch (...) {
+    return false;
+  }
+}
+
+std::optional<SimViewer::SimulationUiStateForTesting> SimViewer::GetSimulationUiStateForTesting()
+    const {
+  if (impl_->simulate == nullptr) return std::nullopt;
+  auto sync_guard = impl_->render_boundary.BeginSync();
+  const mujoco::MutexLock viewer_lock(impl_->simulate->mtx);
+  if (!impl_->simulation_items_configured) return std::nullopt;
+  return SimulationUiStateForTesting{
+      .run = impl_->run_item->state,
+      .reset = impl_->reset_item->state,
+      .num_threads = impl_->num_threads_item->state,
+      .reload = impl_->reload_item->state,
+      .noise_scale = impl_->noise_scale_item->state,
+      .noise_rate = impl_->noise_rate_item->state,
+      .history_scrub = impl_->history_scrub_item->state,
+  };
+}
+
 void SimViewer::PublishInputForTesting(const ViewerInputBatch& input) noexcept {
   try {
-    impl_->PublishInput(input.actuator_writes, input.wrench_frame ? &*input.wrench_frame : nullptr);
+    impl_->PublishInput(input.actuator_writes, input.wrench_frame ? &*input.wrench_frame : nullptr,
+                        input.simulation_actions,
+                        impl_->reset_generation.load(std::memory_order_acquire));
   } catch (...) {
   }
 }
@@ -775,13 +1124,14 @@ double SimViewer::PendingTimeForTesting() const {
   if (!impl_->pending_buffer.has_value()) {
     return std::numeric_limits<double>::quiet_NaN();
   }
-  return impl_->production_snapshots[*impl_->pending_buffer]->data()->time;
+  return impl_->production_snapshots[impl_->pending_buffer->index]->data()->time;
 }
 
 double SimViewer::DisplayTimeForTesting() const {
   if (impl_->simulate == nullptr) {
     return std::numeric_limits<double>::quiet_NaN();
   }
+  auto sync_guard = impl_->render_boundary.BeginSync();
   const mujoco::MutexLock viewer_lock(impl_->simulate->mtx);
   return impl_->display_snapshot == nullptr ? std::numeric_limits<double>::quiet_NaN()
                                             : impl_->display_snapshot->data()->time;

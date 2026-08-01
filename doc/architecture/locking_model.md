@@ -19,21 +19,40 @@ The remaining locks have narrow infrastructure responsibilities:
   `RequestClose()` reject new callback input without waiting; final `Close()`
   waits with the mutex released, so Core and transport setup run without an
   Inbox lock;
-- Sensor worker locks protect their private capture queues, snapshot pools, and
-  completion conditions. Each worker calls subscriber-count and send operations
-  on its eCAL publishers only from its own thread and without that lock;
+- Sensor worker locks protect their private capture queues, snapshot pools,
+  generation-coordinated stream state, and completion conditions. Each worker
+  calls renderer, serializer, subscriber-count, and send operations without
+  that lock. Reset advances an atomic generation before taking the worker lock,
+  then invalidates and returns queued work without waiting for an active capture
+  or transport call. The SimulationLoop wall-clock timer requests subscriber
+  samples even when no physics Step completes;
 - the viewer mailbox mutex protects one pending buffer index and submission
   closure. Simulation-side acquire and submit use only `try_lock`; lease return
   and free-buffer ownership use an atomic two-bit mask. The GUI sync worker
   removes a pending index before any potentially blocking operation;
-- the viewer input mutex protects per-actuator pending Control values and one
-  latest complete wrench frame. The GUI sync worker acquires it only after
-  releasing the MuJoCo viewer mutex; the simulation thread uses `try_lock` and
-  retains unconsumed values on contention;
-- the MuJoCo viewer mutex protects the lifetime-stable display snapshot and
-  its independent model copy while the GUI sync worker calls `Simulate::Sync()`
-  and the main thread renders or cleans up. The two production buffers share a
-  different model copy, and the simulation thread never acquires this mutex;
+- the viewer input mutex protects per-actuator pending Control values, one
+  latest complete wrench frame, the latest Pause/Run selection, and the Reset
+  latch. The GUI sync worker acquires it only after releasing the MuJoCo viewer
+  mutex; the simulation thread uses `try_lock` and retains unconsumed values on
+  contention. A consumed Reset retains its data barrier until the simulation
+  thread completes the action. Completion advances an atomic input generation,
+  clears data under this mutex, and keeps the latest Pause/Run selection;
+- the viewer render-boundary mutex serializes the complete MuJoCo `Render()`
+  call with first-party worker synchronization and test-only UI access. The
+  first-party GLFW adapter acquires it at `EnsureContextSize()` (the first
+  render operation) and releases it after `SwapBuffers()`. A GLFW window-refresh
+  callback can synchronously re-enter `Render()` while MuJoCo already holds its
+  viewer mutex; the adapter recognizes that event-poll path and omits the outer
+  lock because the held viewer mutex already excludes worker sync. The worker
+  otherwise acquires the render-boundary mutex before MuJoCo's viewer mutex,
+  which then protects the
+  lifetime-stable display snapshot and independent model copy during
+  `Simulate::Sync()`. MuJoCo releases its viewer mutex before entering
+  `Render()`, so this outer boundary also protects pending UI flags and the
+  rendered scene without modifying bundled source. The two production buffers
+  share a different model copy, and the simulation thread never acquires either
+  viewer mutex. If `Render()` unwinds before buffer swap, `RenderLoop()` releases
+  the boundary before closing and joining the worker;
 - the viewer sync-metrics mutex protects one coherent count-and-duration
   record. The worker may wait for it after releasing MuJoCo state; summary
   collection uses `try_lock` and retains the whole record on contention;
@@ -93,6 +112,15 @@ This means registry RPCs queued during the fence wait until it completes; they
 do not run concurrently with Core. A stop request does not enter Core: it closes
 the event queue and Inbox and signals the Sensor conditions, allowing the loop
 to leave the fence and finish teardown.
+
+Simulation Reset is not a Sensor fence. The SimulationLoop advances every
+worker generation and clears queues while holding each worker lock only long
+enough to update owned state and return snapshots. An obsolete job checks its
+generation outside long operations and coordinates state/metric commits under
+the worker lock. No project lock is held across renderer capture,
+serialization, or publisher `send()`. Reset does not wait for a send already in
+progress; that narrow race may complete, but it cannot commit obsolete
+last-capture state after returning.
 
 Viewer backpressure is never a blocking fence. With one buffer in the sync
 worker and one pending, the next capture is skipped. With a pending buffer and

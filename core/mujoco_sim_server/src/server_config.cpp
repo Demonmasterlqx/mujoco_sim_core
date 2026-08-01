@@ -193,6 +193,8 @@ generated::ServerConfig ToGenerated(const ServerConfig& config) {
   output.viewer_sync_period_ms = config.viewer_sync_period_ms;
   output.viewer_control_input_enabled = config.viewer_control_input_enabled;
   output.viewer_mouse_force_enabled = config.viewer_mouse_force_enabled;
+  output.viewer_pause_run_enabled = config.viewer_pause_run_enabled;
+  output.viewer_reset_enabled = config.viewer_reset_enabled;
   output.viewer_mouse_force_timeout_ms = config.viewer_mouse_force_timeout_ms;
   output.log_level = ToGeneratedLogLevel(config.log_level);
   output.log_file = config.log_file;
@@ -270,6 +272,8 @@ ServerConfig ToPublic(generated::ServerConfig config) {
   output.viewer_sync_period_ms = config.viewer_sync_period_ms;
   output.viewer_control_input_enabled = config.viewer_control_input_enabled;
   output.viewer_mouse_force_enabled = config.viewer_mouse_force_enabled;
+  output.viewer_pause_run_enabled = config.viewer_pause_run_enabled;
+  output.viewer_reset_enabled = config.viewer_reset_enabled;
   output.viewer_mouse_force_timeout_ms = config.viewer_mouse_force_timeout_ms;
   output.log_level = ToPublicLogLevel(config.log_level);
   output.log_file = std::move(config.log_file).string();

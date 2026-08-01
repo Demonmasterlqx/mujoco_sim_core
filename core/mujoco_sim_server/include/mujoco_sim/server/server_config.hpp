@@ -138,6 +138,12 @@ struct ServerConfig {
       true;  ///< Accept one-shot GUI actuator writes. 接受一次性 GUI actuator 写入。
   bool viewer_mouse_force_enabled =
       true;  ///< Accept GUI mouse perturbation forces. 接受 GUI 鼠标扰动力。
+  bool viewer_pause_run_enabled =
+      true;  ///< Allow YAML-configured local GUI Pause/Run; ignored headless.
+             ///< 允许 YAML 配置的本地 GUI Pause/Run；headless 时忽略。
+  bool viewer_reset_enabled =
+      true;  ///< Allow YAML-configured authoritative GUI Reset; ignored headless.
+             ///< 允许 YAML 配置的 GUI 权威 Reset；headless 时忽略。
   std::uint32_t viewer_mouse_force_timeout_ms =
       100;  ///< Stale GUI force timeout in ms; ignored headless. GUI 陈旧力超时（毫秒）；headless
             ///< 时忽略。

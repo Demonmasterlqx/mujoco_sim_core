@@ -79,4 +79,46 @@ TEST(ViewerInputStateTest, ReplacesClearsAndExpiresWrenchFromGenerationTime) {
   EXPECT_FALSE(prepared.wrench_expired);
 }
 
+TEST(ViewerInputStateTest, MergesLifecycleActionsUsingLatestAndLatchedRules) {
+  ViewerInputState state(100ms);
+  SimViewer::ViewerInputBatch first;
+  first.simulation_actions.running = false;
+  first.simulation_actions.reset_requested = true;
+  state.Merge(first);
+
+  SimViewer::ViewerInputBatch second;
+  second.simulation_actions.running = true;
+  state.Merge(second);
+
+  const auto actions = state.TakeSimulationActions();
+  ASSERT_TRUE(actions.running.has_value());
+  EXPECT_TRUE(*actions.running);
+  EXPECT_TRUE(actions.reset_requested);
+
+  const auto consumed = state.TakeSimulationActions();
+  EXPECT_FALSE(consumed.running.has_value());
+  EXPECT_FALSE(consumed.reset_requested);
+}
+
+TEST(ViewerInputStateTest, ResetAfterSimulationResetClearsAllDataInput) {
+  ViewerInputState state(100ms);
+  SimViewer::ViewerInputBatch input;
+  input.actuator_writes = {{.actuator_id = 0, .value = 0.7}};
+  input.wrench_frame.emplace();
+  input.wrench_frame->generated_at = std::chrono::steady_clock::time_point(10ms);
+  input.wrench_frame->body_wrenches = {
+      {.body_id = 1, .force = {1.0, 0.0, 0.0}},
+  };
+  state.Merge(input);
+  ASSERT_FALSE(
+      state.PrepareStep(std::chrono::steady_clock::time_point(20ms)).input.actuator_writes.empty());
+
+  state.ResetAfterSimulationReset();
+  const auto prepared = state.PrepareStep(std::chrono::steady_clock::time_point(1s));
+  EXPECT_TRUE(prepared.input.actuator_writes.empty());
+  EXPECT_TRUE(prepared.input.body_wrenches.empty());
+  EXPECT_FALSE(prepared.input.replace_body_wrenches);
+  EXPECT_FALSE(prepared.wrench_expired);
+}
+
 }  // namespace

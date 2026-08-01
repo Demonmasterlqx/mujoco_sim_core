@@ -17,12 +17,17 @@ void ViewerInputState::Merge(const SimViewer::ViewerInputBatch& input) {
       found->value = write.value;
     }
   }
-  if (!input.wrench_frame) return;
-  active_body_wrenches_ = input.wrench_frame->body_wrenches;
-  last_wrench_update_ = input.wrench_frame->generated_at;
-  wrench_state_received_ = true;
-  wrench_dirty_ = true;
-  wrench_timed_out_ = false;
+  if (input.wrench_frame) {
+    active_body_wrenches_ = input.wrench_frame->body_wrenches;
+    last_wrench_update_ = input.wrench_frame->generated_at;
+    wrench_state_received_ = true;
+    wrench_dirty_ = true;
+    wrench_timed_out_ = false;
+  }
+  if (input.simulation_actions.running.has_value()) {
+    pending_running_ = input.simulation_actions.running;
+  }
+  reset_pending_ = reset_pending_ || input.simulation_actions.reset_requested;
 }
 
 ViewerInputState::PreparedStep ViewerInputState::PrepareStep(
@@ -49,6 +54,25 @@ ViewerInputState::PreparedStep ViewerInputState::PrepareStep(
 void ViewerInputState::CommitCompletedStep() noexcept {
   pending_control_writes_.clear();
   wrench_dirty_ = false;
+}
+
+ViewerInputState::PendingSimulationActions ViewerInputState::TakeSimulationActions() noexcept {
+  PendingSimulationActions output{
+      .running = pending_running_,
+      .reset_requested = reset_pending_,
+  };
+  pending_running_.reset();
+  reset_pending_ = false;
+  return output;
+}
+
+void ViewerInputState::ResetAfterSimulationReset() noexcept {
+  pending_control_writes_.clear();
+  active_body_wrenches_.clear();
+  last_wrench_update_ = {};
+  wrench_state_received_ = false;
+  wrench_dirty_ = false;
+  wrench_timed_out_ = false;
 }
 
 }  // namespace mujoco_sim::server

@@ -20,6 +20,8 @@ bool SensorRuntime::Initialize(core::SimulationCore&, const ServerConfig& config
   return false;
 }
 void SensorRuntime::OnStepCompleted(core::SimulationCore&) {}
+void SensorRuntime::ProcessTimers(std::chrono::steady_clock::time_point) {}
+void SensorRuntime::OnSimulationReset(const core::CoreState&) {}
 void SensorRuntime::CompleteBlockingEnqueues(std::stop_token) {}
 void SensorRuntime::RequestStop() {}
 void SensorRuntime::Stop() {}

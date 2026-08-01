@@ -66,7 +66,8 @@ class detail::ServerApplicationImpl {
                   "command_timeout_ms={} command_keepalive_ms={} "
                   "activation_timeout_ms={} status_period_ms={} "
                   "viewer_sync_period_ms={} viewer_control_input_enabled={} "
-                  "viewer_mouse_force_enabled={} viewer_mouse_force_timeout_ms={} "
+                  "viewer_mouse_force_enabled={} viewer_pause_run_enabled={} "
+                  "viewer_reset_enabled={} viewer_mouse_force_timeout_ms={} "
                   "log_level={} log_file={} "
                   "log_summary_period_ms={}",
                   LogValue(config.server_name), LogValue(config.model_path),
@@ -75,7 +76,8 @@ class detail::ServerApplicationImpl {
                   config.command_timeout_ms, config.command_keepalive_ms,
                   config.activation_timeout_ms, config.status_period_ms,
                   config.viewer_sync_period_ms, config.viewer_control_input_enabled,
-                  config.viewer_mouse_force_enabled, config.viewer_mouse_force_timeout_ms,
+                  config.viewer_mouse_force_enabled, config.viewer_pause_run_enabled,
+                  config.viewer_reset_enabled, config.viewer_mouse_force_timeout_ms,
                   config.log_level, LogValue(config.log_file), config.log_summary_period_ms);
             },
             &boundary_error)) {
@@ -109,6 +111,8 @@ class detail::ServerApplicationImpl {
       viewer = std::make_unique<SimViewer>(SimViewer::InputOptions{
           .control_enabled = config.viewer_control_input_enabled,
           .mouse_force_enabled = config.viewer_mouse_force_enabled,
+          .pause_run_enabled = config.viewer_pause_run_enabled,
+          .reset_enabled = config.viewer_reset_enabled,
       });
       if (!viewer->Initialize(error_message)) return false;
       if (!RunWithExceptionBoundary([&] { log->info("event=viewer_initialized mode=gui"); },
@@ -242,6 +246,26 @@ class detail::ServerApplicationImpl {
     return true;
   }
 
+  bool SetViewerRunningForTesting(bool running) noexcept {
+    SimViewer* active_viewer = nullptr;
+    {
+      std::lock_guard lock(mutex);
+      if (!started || run_completed || !viewer) return false;
+      active_viewer = viewer.get();
+    }
+    return active_viewer->SetRunningForTesting(running);
+  }
+
+  bool RequestViewerResetForTesting() noexcept {
+    SimViewer* active_viewer = nullptr;
+    {
+      std::lock_guard lock(mutex);
+      if (!started || run_completed || !viewer) return false;
+      active_viewer = viewer.get();
+    }
+    return active_viewer->RequestResetForTesting();
+  }
+
   void Shutdown() noexcept {
     std::string error;
     if (loop &&
@@ -331,6 +355,14 @@ int ServerApplicationTestHarness::Run() {
 
 bool ServerApplicationTestHarness::RequestViewerSyncFailure() noexcept {
   return impl_->RequestViewerSyncFailureForTesting();
+}
+
+bool ServerApplicationTestHarness::SetViewerRunning(bool running) noexcept {
+  return impl_->SetViewerRunningForTesting(running);
+}
+
+bool ServerApplicationTestHarness::RequestViewerReset() noexcept {
+  return impl_->RequestViewerResetForTesting();
 }
 
 }  // namespace mujoco_sim::server

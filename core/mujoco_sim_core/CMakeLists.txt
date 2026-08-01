@@ -38,6 +38,7 @@ add_library(${PROJECT_NAME}
   src/internal/resource_catalog.cpp
   src/internal/snapshot_manager.cpp
   src/simulation_core.cpp
+  src/simulation_core_lifecycle.cpp
 )
 add_library(mujoco_sim::core ALIAS ${PROJECT_NAME})
 

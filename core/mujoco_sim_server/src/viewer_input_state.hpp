@@ -2,6 +2,7 @@
 
 #include <chrono>
 #include <cstddef>
+#include <optional>
 #include <vector>
 
 #include <mujoco_sim/core/interactive_input.hpp>
@@ -16,11 +17,14 @@ namespace mujoco_sim::server {
  * Control writes are merged per actuator until one Step completes. Wrench
  * frames are complete state replacements and remain active until replaced,
  * explicitly cleared, or expired using their viewer generation timestamp.
+ * Pause/Run retains only the latest desired state and Reset coalesces as an
+ * edge until consumed independently from Step input.
  *
  * 在 viewer 消费与 Step 之间持有仅属于仿真线程的 GUI 输入。
  *
  * Control 写入按 actuator 合并并保留到一个 Step 完成。扰动力帧是完整状态替换，并持续
- * 有效，直到被替换、显式清除或依据 viewer 生成时间过期。
+ * 有效，直到被替换、显式清除或依据 viewer 生成时间过期。Pause/Run 仅保留最新期望
+ * 状态，Reset 则将边沿合并并保持到独立于 Step 输入的消费时刻。
  *
  * @par Thread safety / 线程安全
  * All methods must be called by the SimulationLoop thread only.
@@ -28,6 +32,24 @@ namespace mujoco_sim::server {
  */
 class ViewerInputState {
  public:
+  /**
+   * @brief Owns one-shot local simulation actions ready for SimulationLoop.
+   *
+   * Values are detached from data input so Reset can run before Pause/Run and
+   * both can be consumed before deciding whether a Step is allowed.
+   *
+   * 持有供 SimulationLoop 使用的一次性本地仿真动作。
+   *
+   * 这些值与数据输入分离，因此 Reset 可先于 Pause/Run 执行，并且二者可在决定是否允许
+   * Step 前完成消费。
+   */
+  struct PendingSimulationActions {
+    /** Latest desired running state. 最新期望运行状态。 */
+    std::optional<bool> running;
+    /** Whether one or more Reset edges were received. 是否收到一个或多个 Reset 边沿。 */
+    bool reset_requested = false;
+  };
+
   /** One Step preparation and optional one-shot expiry diagnostic.
    * 一次 Step 准备结果以及可选的一次性过期诊断。 */
   struct PreparedStep {
@@ -58,6 +80,29 @@ class ViewerInputState {
    * 在成功完成一个 Step 后清除一次性值。 */
   void CommitCompletedStep() noexcept;
 
+  /**
+   * @brief Takes and clears pending lifecycle actions without touching data input.
+   * @return Owned latest Pause/Run selection and coalesced Reset edge.
+   *         自有的最新 Pause/Run 选择与已合并 Reset 边沿。
+   *
+   * 取出并清除待处理生命周期动作，不修改数据输入。
+   */
+  PendingSimulationActions TakeSimulationActions() noexcept;
+
+  /**
+   * @brief Clears all persistent GUI data input after authoritative Reset.
+   *
+   * Removes Control, active Wrench, generation time, dirty, and timeout state.
+   * Lifecycle actions already returned by `TakeSimulationActions()` are not
+   * modified.
+   *
+   * 在权威 Reset 后清除全部持久 GUI 数据输入。
+   *
+   * 清除 Control、活动 Wrench、生成时间、dirty 与 timeout 状态。不修改已经由
+   * `TakeSimulationActions()` 返回的生命周期动作。
+   */
+  void ResetAfterSimulationReset() noexcept;
+
  private:
   std::chrono::milliseconds wrench_timeout_;
   std::vector<mujoco_sim::core::InteractiveActuatorWrite> pending_control_writes_;
@@ -66,6 +111,8 @@ class ViewerInputState {
   bool wrench_state_received_ = false;
   bool wrench_dirty_ = false;
   bool wrench_timed_out_ = false;
+  std::optional<bool> pending_running_;
+  bool reset_pending_ = false;
 };
 
 }  // namespace mujoco_sim::server

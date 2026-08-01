@@ -288,6 +288,38 @@ TEST(ControllerClientTest, StopWakesBlockingStateWait) {
   EXPECT_EQ(waiting.get(), StateReadResult::kStopped);
 }
 
+TEST(ControllerClientTest, PausedStatusKeepsStateWaitAndCommandPublisherActive) {
+  ControllerClient client(Options());
+  auto transport = std::make_shared<FakeControllerTransport>();
+  ControllerClientTestPeer::Configure(client, transport, 20ms);
+  std::string error;
+  const std::array command{1.0, -1.0};
+  ASSERT_TRUE(client.SetCommand(command, &error)) << error;
+  ControllerClientTestPeer::StartPublisher(client);
+  ASSERT_TRUE(transport->WaitForCommands(1, 1s));
+
+  auto waiting = std::async(std::launch::async, [&] {
+    StateLease frame;
+    std::string wait_error;
+    return client.WaitForNewState(std::chrono::milliseconds::max(), &frame, &wait_error);
+  });
+  ASSERT_TRUE(WaitUntilReading(client));
+  mujoco_sim::v4::ServerStatus paused;
+  paused.set_epoch(7);
+  paused.set_state(mujoco_sim::v4::PAUSED);
+  auto* adapter = paused.add_adapters();
+  adapter->set_adapter_id("controller");
+  adapter->set_role(mujoco_sim::v4::CONTROLLER);
+  adapter->set_session_id(42);
+  adapter->set_state(mujoco_sim::v4::ONLINE);
+  ControllerClientTestPeer::HandleStatus(client, paused);
+
+  EXPECT_EQ(waiting.wait_for(50ms), std::future_status::timeout);
+  EXPECT_TRUE(transport->WaitForCommands(2, 1s));
+  client.Stop();
+  EXPECT_EQ(waiting.get(), StateReadResult::kStopped);
+}
+
 TEST(ControllerClientTest, StopCancelsActivationAtRpcCommitBoundary) {
   ControllerClient client(Options());
   auto transport = std::make_shared<FakeControllerTransport>();

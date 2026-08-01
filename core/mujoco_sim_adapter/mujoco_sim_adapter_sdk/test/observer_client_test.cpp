@@ -46,7 +46,7 @@ class FakeObserverTransport final : public internal::AdapterTransport {
       const mujoco_sim::v4::SessionHeartbeat& heartbeat) override {
     std::lock_guard lock(mutex_);
     last_heartbeat = heartbeat;
-    heartbeat_published_ = true;
+    ++heartbeat_count_;
     heartbeat_condition_.notify_all();
     if (throw_on_heartbeat_) throw std::runtime_error("injected heartbeat publish failure");
     return {heartbeat_publish_result_, heartbeat_error_};
@@ -69,7 +69,13 @@ class FakeObserverTransport final : public internal::AdapterTransport {
 
   bool WaitForHeartbeat(std::chrono::milliseconds timeout) {
     std::unique_lock lock(mutex_);
-    return heartbeat_condition_.wait_for(lock, timeout, [this] { return heartbeat_published_; });
+    return heartbeat_condition_.wait_for(lock, timeout, [this] { return heartbeat_count_ > 0; });
+  }
+
+  bool WaitForHeartbeats(std::size_t count, std::chrono::milliseconds timeout) {
+    std::unique_lock lock(mutex_);
+    return heartbeat_condition_.wait_for(lock, timeout,
+                                         [this, count] { return heartbeat_count_ >= count; });
   }
 
   void BlockActivate() {
@@ -105,7 +111,7 @@ class FakeObserverTransport final : public internal::AdapterTransport {
   mutable std::mutex mutex_;
   std::condition_variable heartbeat_condition_;
   std::size_t unregister_calls_ = 0;
-  bool heartbeat_published_ = false;
+  std::size_t heartbeat_count_ = 0;
   bool throw_on_heartbeat_ = false;
   bool heartbeat_publish_result_ = true;
   bool block_activate_ = false;
@@ -371,6 +377,28 @@ TEST(ObserverClientTest, ServerStopEndsWaitWithoutDiagnostic) {
   std::string error = "stale diagnostic";
   EXPECT_EQ(client.WaitForObservation(0ms, &frame, &error), ObservationWaitResult::kStopped);
   EXPECT_TRUE(error.empty());
+}
+
+TEST(ObserverClientTest, PausedStatusKeepsObservationWaitAndHeartbeatActive) {
+  ObserverClient client(Options());
+  const auto transport = ObserverClientTestPeer::Configure(&client);
+  ASSERT_TRUE(ObserverClientTestPeer::StartHeartbeatThread(&client));
+  ASSERT_TRUE(transport->WaitForHeartbeats(1, 1s));
+
+  auto waiting = std::async(std::launch::async, [&] {
+    ObservationLease frame;
+    std::string wait_error;
+    return client.WaitForObservation(std::chrono::milliseconds::max(), &frame, &wait_error);
+  });
+  ASSERT_TRUE(WaitUntilObservationReadBlocks(&client));
+  auto paused = ObserverStatus(42, mujoco_sim::v4::ONLINE);
+  paused.set_state(mujoco_sim::v4::PAUSED);
+  ObserverClientTestPeer::HandleStatus(&client, paused);
+
+  EXPECT_EQ(waiting.wait_for(50ms), std::future_status::timeout);
+  EXPECT_TRUE(transport->WaitForHeartbeats(2, 1s));
+  client.Stop();
+  EXPECT_EQ(waiting.get(), ObservationWaitResult::kStopped);
 }
 
 TEST(ObserverClientTest, HeartbeatTracksLatestConsumedSequence) {
