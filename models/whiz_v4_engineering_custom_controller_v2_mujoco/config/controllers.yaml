@@ -1,0 +1,9 @@
+controller_manager:
+  ros__parameters:
+    update_rate: 1000
+    # The hardware read() callback is the /clock producer, so the controller
+    # manager itself must use wall time to avoid a startup dependency cycle.
+    use_sim_time: false
+
+    joint_state_broadcaster:
+      type: joint_state_broadcaster/JointStateBroadcaster
