@@ -159,11 +159,25 @@ TEST(ResourceFactoryTest, BuildsAndBindsJointMappingsWithClamping) {
   EXPECT_DOUBLE_EQ(ros_commands[0], 2.0);
 
   std::array nan_command{std::numeric_limits<double>::quiet_NaN()};
-  EXPECT_FALSE(resource->StageCommand(nan_command, dense, error));
-  EXPECT_NE(error.find("non-finite"), std::string::npos);
+  ASSERT_TRUE(resource->StageCommand(nan_command, dense, error)) << error;
+  EXPECT_DOUBLE_EQ(nan_command[0], 0.0);
+  EXPECT_DOUBLE_EQ(dense[0], 0.0);
 
+  ControllerLayout positive_layout({Observation("joint_vel", 0, 1), Observation("joint_pos", 1, 1)},
+                                   {Command("joint_motor", 0, 1.0, 2.0)}, 2, 1);
+  ASSERT_TRUE(resource->Bind(positive_layout, error)) << error;
   std::array infinite_command{std::numeric_limits<double>::infinity()};
-  EXPECT_FALSE(resource->StageCommand(infinite_command, dense, error));
+  ASSERT_TRUE(resource->StageCommand(infinite_command, dense, error)) << error;
+  EXPECT_DOUBLE_EQ(infinite_command[0], 1.0);
+  EXPECT_DOUBLE_EQ(dense[0], 1.0);
+
+  ControllerLayout negative_layout({Observation("joint_vel", 0, 1), Observation("joint_pos", 1, 1)},
+                                   {Command("joint_motor", 0, -2.0, -1.0)}, 2, 1);
+  ASSERT_TRUE(resource->Bind(negative_layout, error)) << error;
+  std::array negative_infinite_command{-std::numeric_limits<double>::infinity()};
+  ASSERT_TRUE(resource->StageCommand(negative_infinite_command, dense, error)) << error;
+  EXPECT_DOUBLE_EQ(negative_infinite_command[0], -1.0);
+  EXPECT_DOUBLE_EQ(dense[0], -1.0);
 }
 
 TEST(ResourceFactoryTest, RejectsInvalidGenericSensorDimensions) {

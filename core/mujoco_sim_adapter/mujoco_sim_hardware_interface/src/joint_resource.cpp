@@ -162,12 +162,10 @@ bool JointResource::StageCommand(std::span<double> ros_commands, std::span<doubl
         binding.dense_offset >= dense_command.size()) {
       return Fail("dense command offset is out of bounds for '" + binding.FullName() + "'", error);
     }
-    if (!std::isfinite(ros_commands[binding.command_index])) {
-      return Fail("non-finite command value for '" + binding.FullName() + "'", error);
-    }
   }
   for (const auto& binding : commands_) {
     double value = ros_commands[binding.command_index];
+    if (!std::isfinite(value)) value = 0.0;
     if (binding.has_range) value = std::clamp(value, binding.minimum, binding.maximum);
     ros_commands[binding.command_index] = value;
     dense_command[binding.dense_offset] = value;

@@ -20,8 +20,9 @@
   和 Activate。
 - `read()` 非阻塞读取最新完整 State；没有新帧时保持末值并返回 OK。新帧只有在所有值、
   维度和仿真时间均有效后才整体更新 ROS state interface。
-- `write()` 收集全部 ROS command，拒绝 NaN/Inf，按 Server 注册范围限幅，然后调用一次
-  `SetCommand()`。该调用只更新 SDK depth-1 latest mailbox，不等待传输或仿真步。
+- `write()` 收集全部 ROS command，将 joint command 中的 NaN/Inf 替换为 `0.0`，再按
+  Server 注册范围限幅，然后调用一次 `SetCommand()`。如果合法范围不包含零，替换值会继续
+  限幅到绝对值最小的合法边界。该调用只更新 SDK depth-1 latest mailbox，不等待传输或仿真步。
 - `on_deactivate()` 先停止本地 command/state 通信，再注销并销毁当前 session；注销失败时
   保留已停止的 client 供清理路径重试。下一次成功激活创建新 session，因此支持重复
   activate/deactivate。
@@ -44,8 +45,9 @@ publisher，通用 sensor 管理整组数组 publisher，IMU 管理整组数组 
 TF publisher。资源负责创建、预分配消息、发布与销毁这些 publisher。主类只在生命周期
 边界要求资源 configure/reset，并在整帧 State 已写入 ROS handles 后发送 commit 事件、在
 整帧 Command 已被 SDK 接受并完成限幅值回写后发送 accepted 事件。`StageState()` 与
-`StageCommand()` 只校验和填充预分配缓冲区，不允许发布，因此失败帧不会产生任何 debug
-或 TF 副作用。
+`StageCommand()` 只校验、修正和填充预分配缓冲区，不允许发布；其中 joint 的非有限指令会
+先修正为零再执行范围限幅。只有 SDK 接受整帧 Command 后才会发布对应 debug 消息，失败帧
+不会产生任何 debug 或 TF 副作用。
 
 ## 公共硬件参数
 

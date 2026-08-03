@@ -280,7 +280,7 @@ TEST(SystemIoTest, AppliesOnlyCompleteFiniteStateFramesAndReportsOneFault) {
   EXPECT_EQ(system.on_cleanup(rclcpp_lifecycle::State()), CallbackReturn::SUCCESS);
 }
 
-TEST(SystemIoTest, ClampsDenseCommandRejectsNanAndSurfacesSdkRejection) {
+TEST(SystemIoTest, ClampsAndSanitizesDenseCommandAndSurfacesSdkRejection) {
   MujocoSimSystem system;
   std::vector<hardware_interface::StateInterface::ConstSharedPtr> states;
   std::vector<hardware_interface::CommandInterface::SharedPtr> commands;
@@ -303,9 +303,13 @@ TEST(SystemIoTest, ClampsDenseCommandRejectsNanAndSurfacesSdkRejection) {
 
   SetCommand(commands[0], std::numeric_limits<double>::quiet_NaN());
   EXPECT_EQ(system.write(rclcpp::Time(0), rclcpp::Duration(0, 0)),
-            hardware_interface::return_type::ERROR);
-  ASSERT_EQ(transport->fault_codes().size(), 1U);
-  EXPECT_EQ(transport->fault_codes()[0], mujoco_sim::v4::INVALID_OUTPUT);
+            hardware_interface::return_type::OK);
+  EXPECT_DOUBLE_EQ(commands[0]->get_optional<double>().value(), 0.0);
+  ASSERT_TRUE(transport->WaitForCommands(2, 1s));
+  const auto sanitized_dense = DecodeCommand(transport->commands().back());
+  ASSERT_EQ(sanitized_dense.size(), 1U);
+  EXPECT_DOUBLE_EQ(sanitized_dense[0], 0.0);
+  EXPECT_TRUE(transport->fault_codes().empty());
 
   SetCommand(commands[0], 1.0);
   MujocoSimSystemTestPeer::StopClient(system);

@@ -197,11 +197,18 @@ class ResourceInterface {
                           std::string& error) const = 0;
 
   /**
-   * @brief Validates and maps this resource's commands into a dense array.
-   *        校验并将本资源指令映射到稠密数组。
+   * @brief Validates, sanitizes, and maps this resource's commands into a dense array.
+   *        校验、修正并将本资源指令映射到稠密数组。
+   *
+   * Joint command mappings replace NaN and infinity with zero before applying
+   * the registered inclusive range. If zero is outside that range, clamping
+   * selects the valid boundary with the smallest absolute value.
+   *
+   * Joint 指令映射会先将 NaN 和无穷值替换为零，再应用注册的闭区间范围。如果零不在该
+   * 范围内，限幅会选择绝对值最小的合法边界。
    * @param ros_commands Complete generated ROS command staging values. The resource replaces its
-   *                     entries with validated and clamped accepted values.
-   *                     完整的 ROS 指令暂存值；资源以已校验、限幅的接受值替换自身条目。
+   *                     entries with sanitized and clamped accepted values.
+   *                     完整的 ROS 指令暂存值；资源以已修正、限幅的接受值替换自身条目。
    * @param dense_command Preallocated SDK command array. 预分配的 SDK 指令数组。
    * @param error Required diagnostic output. 必需的诊断输出。
    */
