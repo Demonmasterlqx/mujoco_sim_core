@@ -134,6 +134,19 @@ struct ServerConfig {
   std::uint32_t viewer_sync_period_ms =
       16;  ///< Graphical capture cadence in ms in [1, UINT32_MAX]; ignored headless.
            ///< 图形采集周期（毫秒），范围 [1, UINT32_MAX]；headless 时忽略。
+  bool viewer_control_input_enabled =
+      true;  ///< Accept one-shot GUI actuator writes. 接受一次性 GUI actuator 写入。
+  bool viewer_mouse_force_enabled =
+      true;  ///< Accept GUI mouse perturbation forces. 接受 GUI 鼠标扰动力。
+  bool viewer_pause_run_enabled =
+      true;  ///< Allow YAML-configured local GUI Pause/Run; ignored headless.
+             ///< 允许 YAML 配置的本地 GUI Pause/Run；headless 时忽略。
+  bool viewer_reset_enabled =
+      true;  ///< Allow YAML-configured authoritative GUI Reset; ignored headless.
+             ///< 允许 YAML 配置的 GUI 权威 Reset；headless 时忽略。
+  std::uint32_t viewer_mouse_force_timeout_ms =
+      100;  ///< Stale GUI force timeout in ms; ignored headless. GUI 陈旧力超时（毫秒）；headless
+            ///< 时忽略。
   std::string initial_keyframe;  ///< Named initial MuJoCo keyframe. MuJoCo 初始关键帧名称。
   std::string log_level = "info";  ///< Minimum logging severity. 最低日志级别。
   std::string log_file;            ///< Optional rotating log path. 可选轮转日志路径。

@@ -23,6 +23,11 @@ results leave it empty; `false` and `kError` provide contextual diagnostics.
 State, Observation, and Sensor sample outputs are transactional and change only
 for `kReceived`. A client is single-use after `Stop()` or successful cleanup.
 
+Server `PAUSED` is nonterminal. Controller State waits, Observer Observation
+waits, and Sensor sample waits remain active; Controller command publication
+and Observer heartbeat continue. Only normal `STOPPED` ends waits normally and
+`ERROR_PAUSED` ends them with an error.
+
 ## Controller
 
 ```cpp
@@ -63,6 +68,14 @@ bytes for retry; newer mailbox generations remain pending until that retry
 succeeds. A structured serialization, endpoint, or eCAL error is terminal and
 is returned by subsequent State reads instead of being retried indefinitely.
 Controllers do not send session heartbeats.
+
+A local Server Reset preserves the Controller session, layout, ownership, and
+last accepted Command sequence, but changes an `ONLINE` session to
+`ACTIVE_NO_COMMAND` and clears the Server's cached command. The SDK publisher
+continues sending its latest value at keepalive cadence with increasing wire
+sequences, so it naturally supplies a post-Reset Command. A custom Protocol V4
+publisher must likewise send a sequence strictly greater than the last
+pre-Reset Command; replaying an old sequence cannot reactivate the Controller.
 
 The registration response supplies the Server-granted command timeout,
 keepalive, State cadence, control policies, and offline expiry. `Stop()` wakes

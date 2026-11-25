@@ -269,6 +269,12 @@ TEST(StatusFormattingTest, ProducesSortedHumanOutput) {
   EXPECT_NE(output.find("zeta\tCONTROLLER\tONLINE\t9\t8\t8\t-\t3\t0\t-\n"), std::string::npos);
 }
 
+TEST(StatusFormattingTest, DisplaysPausedServerState) {
+  auto report = MakeReport();
+  report.status.set_state(mujoco_sim::v4::PAUSED);
+  EXPECT_NE(FormatHuman(report).find("State: PAUSED"), std::string::npos);
+}
+
 TEST(StatusFormattingTest, PreservesUint64AndEscapesJson) {
   auto report = MakeReport();
   report.status.set_tick_id(std::numeric_limits<std::uint64_t>::max());

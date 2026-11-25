@@ -1,5 +1,8 @@
 #include "model_runtime.hpp"
 
+#include <algorithm>
+#include <cmath>
+
 #include <mujoco/mujoco.h>
 #include <mujoco_sim/core/simulation_core.hpp>
 
@@ -12,6 +15,30 @@ void ModelDeleter::operator()(mjModel_* model) const {
 void DataDeleter::operator()(mjData_* data) const {
   if (data != nullptr) mj_deleteData(data);
 }
+
+namespace {
+
+bool InitializePreparedData(ModelRuntime::PreparedModel* prepared, const ModelLoadOptions& options,
+                            std::string* error_message) {
+  if (options.initial_keyframe.empty()) {
+    mj_resetData(prepared->model.get(), prepared->data.get());
+    return true;
+  }
+  const int keyframe_id =
+      mj_name2id(prepared->model.get(), mjOBJ_KEY, options.initial_keyframe.c_str());
+  if (keyframe_id < 0) {
+    if (error_message != nullptr) {
+      *error_message =
+          "initial keyframe '" + options.initial_keyframe + "' was not found in MuJoCo model";
+    }
+    return false;
+  }
+  prepared->initial_keyframe_id = keyframe_id;
+  mj_resetDataKeyframe(prepared->model.get(), prepared->data.get(), keyframe_id);
+  return true;
+}
+
+}  // namespace
 
 std::optional<ModelRuntime::PreparedModel> ModelRuntime::Prepare(const std::string& model_path,
                                                                  const ModelLoadOptions& options,
@@ -32,20 +59,7 @@ std::optional<ModelRuntime::PreparedModel> ModelRuntime::Prepare(const std::stri
     }
     return std::nullopt;
   }
-  if (options.initial_keyframe.empty()) {
-    mj_resetData(prepared.model.get(), prepared.data.get());
-  } else {
-    const int keyframe_id =
-        mj_name2id(prepared.model.get(), mjOBJ_KEY, options.initial_keyframe.c_str());
-    if (keyframe_id < 0) {
-      if (error_message != nullptr) {
-        *error_message =
-            "initial keyframe '" + options.initial_keyframe + "' was not found in MuJoCo model";
-      }
-      return std::nullopt;
-    }
-    mj_resetDataKeyframe(prepared.model.get(), prepared.data.get(), keyframe_id);
-  }
+  if (!InitializePreparedData(&prepared, options, error_message)) return std::nullopt;
   if (prepared.model->nu > 0) {
     mju_zero(prepared.data->ctrl, prepared.model->nu);
   }
@@ -55,9 +69,14 @@ std::optional<ModelRuntime::PreparedModel> ModelRuntime::Prepare(const std::stri
 
 void ModelRuntime::Commit(PreparedModel prepared) {
   model_ = std::move(prepared.model);
-  data_ = std::move(prepared.data);
+  AdoptPreparedData(&prepared);
   simulation_time_ = data_->time;
   ++generation_;
+}
+
+void ModelRuntime::AdoptPreparedData(PreparedModel* prepared) {
+  data_ = std::move(prepared->data);
+  initial_keyframe_id_ = prepared->initial_keyframe_id;
 }
 
 bool ModelRuntime::loaded() const noexcept {
@@ -71,6 +90,46 @@ void ModelRuntime::ApplyActuatorWrites(const std::vector<ValidatedActuatorWrite>
   }
 }
 
+void ModelRuntime::ApplyInteractiveActuatorWrites(
+    std::span<const InteractiveActuatorWrite> writes) {
+  if (!loaded()) return;
+  for (const auto& write : writes) {
+    if (write.actuator_id < 0 || write.actuator_id >= model_->nu || !std::isfinite(write.value)) {
+      continue;
+    }
+    data_->ctrl[write.actuator_id] = static_cast<mjtNum>(write.value);
+  }
+}
+
+void ModelRuntime::ReplaceInteractiveBodyWrenches(std::span<const InteractiveBodyWrench> wrenches) {
+  if (!loaded()) return;
+
+  if (interactive_wrench_generation_ == generation_) {
+    for (const int body_id : interactive_wrench_body_ids_) {
+      mju_zero(data_->xfrc_applied + 6 * body_id, 6);
+    }
+  }
+  interactive_wrench_body_ids_.clear();
+  interactive_wrench_generation_ = generation_;
+
+  for (const auto& write : wrenches) {
+    const bool valid_body = write.body_id > 0 && write.body_id < model_->nbody &&
+                            model_->body_dofnum[write.body_id] > 0;
+    const bool finite =
+        std::ranges::all_of(write.force, [](double value) { return std::isfinite(value); }) &&
+        std::ranges::all_of(write.torque, [](double value) { return std::isfinite(value); });
+    if (!valid_body || !finite) continue;
+
+    mjtNum* target = data_->xfrc_applied + 6 * write.body_id;
+    std::copy(write.force.begin(), write.force.end(), target);
+    std::copy(write.torque.begin(), write.torque.end(), target + 3);
+    if (std::ranges::find(interactive_wrench_body_ids_, write.body_id) ==
+        interactive_wrench_body_ids_.end()) {
+      interactive_wrench_body_ids_.push_back(write.body_id);
+    }
+  }
+}
+
 void ModelRuntime::ZeroActuators(const std::vector<int>& actuator_ids) {
   if (data_ == nullptr) return;
   for (const int actuator_id : actuator_ids)
@@ -79,6 +138,20 @@ void ModelRuntime::ZeroActuators(const std::vector<int>& actuator_ids) {
 
 void ModelRuntime::ZeroAllControls() {
   if (loaded() && model_->nu > 0) mju_zero(data_->ctrl, model_->nu);
+}
+
+void ModelRuntime::ResetToInitialState() {
+  if (!loaded()) return;
+  if (initial_keyframe_id_ >= 0) {
+    mj_resetDataKeyframe(model_.get(), data_.get(), initial_keyframe_id_);
+  } else {
+    mj_resetData(model_.get(), data_.get());
+  }
+  ZeroAllControls();
+  mj_forward(model_.get(), data_.get());
+  simulation_time_ = data_->time;
+  interactive_wrench_body_ids_.clear();
+  interactive_wrench_generation_ = generation_;
 }
 
 void ModelRuntime::Step() {

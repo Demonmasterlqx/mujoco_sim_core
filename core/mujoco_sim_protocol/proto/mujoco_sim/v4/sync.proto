@@ -82,6 +82,7 @@ enum ServerState {
   RUNNING = 2;
   ERROR_PAUSED = 3;
   STOPPED = 4;
+  PAUSED = 5;
 }
 
 enum FaultCode {

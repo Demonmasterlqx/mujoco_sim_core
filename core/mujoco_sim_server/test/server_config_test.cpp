@@ -104,6 +104,47 @@ viewer_sync_period_ms: 4294967295
 TEST(ServerConfigTest, ViewerSyncPeriodDefaultsToSixteenMilliseconds) {
   const ServerConfig config;
   EXPECT_EQ(config.viewer_sync_period_ms, 16U);
+  EXPECT_TRUE(config.viewer_control_input_enabled);
+  EXPECT_TRUE(config.viewer_mouse_force_enabled);
+  EXPECT_TRUE(config.viewer_pause_run_enabled);
+  EXPECT_TRUE(config.viewer_reset_enabled);
+  EXPECT_EQ(config.viewer_mouse_force_timeout_ms, 100U);
+}
+
+TEST(ServerConfigTest, LoadsDisabledViewerInputAndValidatesForceTimeout) {
+  TemporaryConfig disabled_file(R"(
+model_path: model.xml
+headless: true
+viewer_control_input_enabled: false
+viewer_mouse_force_enabled: false
+viewer_pause_run_enabled: false
+viewer_reset_enabled: false
+viewer_mouse_force_timeout_ms: 1
+)");
+  auto config = ValidConfig();
+  std::string error;
+  ASSERT_TRUE(LoadConfigFile(disabled_file.path().string(), &config, &error)) << error;
+  EXPECT_FALSE(config.viewer_control_input_enabled);
+  EXPECT_FALSE(config.viewer_mouse_force_enabled);
+  EXPECT_FALSE(config.viewer_pause_run_enabled);
+  EXPECT_FALSE(config.viewer_reset_enabled);
+  EXPECT_EQ(config.viewer_mouse_force_timeout_ms, 1U);
+
+  TemporaryConfig zero_file(R"(
+model_path: model.xml
+headless: true
+viewer_mouse_force_timeout_ms: 0
+)");
+  config = ValidConfig();
+  config.viewer_mouse_force_timeout_ms = 321;
+  EXPECT_FALSE(LoadConfigFile(zero_file.path().string(), &config, &error));
+  EXPECT_NE(error.find("viewer_mouse_force_timeout_ms"), std::string::npos);
+  EXPECT_EQ(config.viewer_mouse_force_timeout_ms, 321U);
+
+  config = ValidConfig();
+  config.viewer_mouse_force_timeout_ms = 0;
+  EXPECT_FALSE(ValidateServerConfig(config, &error));
+  EXPECT_NE(error.find("viewer_mouse_force_timeout_ms"), std::string::npos);
 }
 
 TEST(ServerConfigTest, RejectsZeroAndUnknownViewerSyncFields) {

@@ -228,6 +228,23 @@ TEST(ProtocolSerializationTest, CarriesObserverLifecycleAndSimulationTime) {
   EXPECT_EQ(parsed.delivery().every_n_steps(), 4U);
 }
 
+TEST(ProtocolSerializationTest, PreservesServerStateValuesAndPausedRoundTrip) {
+  EXPECT_EQ(static_cast<int>(mujoco_sim::v4::SERVER_STATE_UNSPECIFIED), 0);
+  EXPECT_EQ(static_cast<int>(mujoco_sim::v4::IDLE), 1);
+  EXPECT_EQ(static_cast<int>(mujoco_sim::v4::RUNNING), 2);
+  EXPECT_EQ(static_cast<int>(mujoco_sim::v4::ERROR_PAUSED), 3);
+  EXPECT_EQ(static_cast<int>(mujoco_sim::v4::STOPPED), 4);
+  EXPECT_EQ(static_cast<int>(mujoco_sim::v4::PAUSED), 5);
+  EXPECT_EQ(mujoco_sim::v4::ServerState_Name(mujoco_sim::v4::PAUSED), "PAUSED");
+
+  mujoco_sim::v4::ServerStatus status;
+  status.set_state(mujoco_sim::v4::PAUSED);
+  const std::string bytes = status.SerializeAsString();
+  mujoco_sim::v4::ServerStatus parsed;
+  ASSERT_TRUE(parsed.ParseFromString(bytes));
+  EXPECT_EQ(parsed.state(), mujoco_sim::v4::PAUSED);
+}
+
 TEST(StreamFrameTest, RoundTripsHeaderAndViewsRawPayload) {
   mujoco_sim::v4::StreamFrameHeader header;
   header.set_epoch(2);

@@ -9,6 +9,11 @@
 
 namespace mujoco_sim::server {
 
+bool detail::ExtractViewerBodyWrenches(const mjModel_*, const mjData_*,
+                                       std::vector<mujoco_sim::core::InteractiveBodyWrench>*) {
+  return false;
+}
+
 struct SimViewer::Impl {};
 
 SimViewer::SnapshotLease::~SnapshotLease() = default;
@@ -36,7 +41,8 @@ void SimViewer::SnapshotLease::Reset(bool) noexcept {
   owner_ = nullptr;
 }
 
-SimViewer::SimViewer() : impl_(std::make_unique<Impl>()) {}
+SimViewer::SimViewer() : SimViewer(InputOptions{}) {}
+SimViewer::SimViewer(InputOptions) : impl_(std::make_unique<Impl>()) {}
 SimViewer::~SimViewer() = default;
 
 bool SimViewer::Initialize(std::string* error_message) {
@@ -61,11 +67,18 @@ bool SimViewer::TrySubmitSnapshot(SnapshotLease&&) noexcept {
   return false;
 }
 
+bool SimViewer::TryConsumeInput(ViewerInputBatch*) noexcept {
+  return false;
+}
+
 bool SimViewer::RenderLoop(std::string*) noexcept {
   return true;
 }
 
 void SimViewer::RequestScreenshot() noexcept {}
+
+void SimViewer::RequestRunningIndicator(bool) noexcept {}
+void SimViewer::CompleteSimulationResetAction() noexcept {}
 void SimViewer::RequestClose() noexcept {}
 bool SimViewer::close_requested() const noexcept {
   return true;
@@ -90,6 +103,32 @@ void SimViewer::HoldSyncMetricsForTesting(std::chrono::milliseconds,
   }
 }
 void SimViewer::SetSyncDelayForTesting(std::chrono::milliseconds) noexcept {}
+bool SimViewer::SetControlForTesting(int, double) noexcept {
+  return false;
+}
+bool SimViewer::RequestClearControlsForTesting() noexcept {
+  return false;
+}
+
+bool SimViewer::SetRunningForTesting(bool) noexcept {
+  return false;
+}
+
+bool SimViewer::RequestResetForTesting() noexcept {
+  return false;
+}
+
+std::optional<SimViewer::SimulationUiStateForTesting> SimViewer::GetSimulationUiStateForTesting()
+    const {
+  return std::nullopt;
+}
+void SimViewer::PublishInputForTesting(const ViewerInputBatch&) noexcept {}
+void SimViewer::HoldInputMailboxForTesting(std::chrono::milliseconds,
+                                           std::atomic<bool>* lock_acquired) noexcept {
+  if (lock_acquired != nullptr) {
+    lock_acquired->store(true, std::memory_order_release);
+  }
+}
 bool SimViewer::sync_active_for_testing() const noexcept {
   return false;
 }

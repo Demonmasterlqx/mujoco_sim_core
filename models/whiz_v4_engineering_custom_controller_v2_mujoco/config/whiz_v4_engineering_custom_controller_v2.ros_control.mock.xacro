@@ -1,0 +1,72 @@
+<robot
+  name="whiz_v4_engineering_custom_controller_v2">
+
+  <ros2_control name="mujoco_sim_diff_drive" type="system">
+    <hardware>
+      <plugin>mujoco_sim_hardware_interface/MujocoSimSystem</plugin>
+      <param name="server_id">whiz_v4_engineering_custom_controller_v2</param>
+      <param name="adapter_id">whiz_v4_engineering_custom_controller_v2_controller</param>
+      <param name="server_time_out_ms">10000</param>
+      <param name="publish_sim_time">true</param>
+      <param name="debug">true</param>
+    </hardware>
+
+    <joint name="j0">
+      <param name="actuator_effort">j0_actuator</param>
+
+      <param name="sensor_position">j0_pos</param>
+      <param name="sensor_velocity">j0_vel</param>
+      <param name="sensor_effort">j0_tor</param>
+    </joint>
+
+    <joint name="j1">
+      <param name="actuator_effort">j1_actuator</param>
+
+      <param name="sensor_position">j1_pos</param>
+      <param name="sensor_velocity">j1_vel</param>
+      <param name="sensor_effort">j1_tor</param>
+    </joint>
+
+    <joint name="j2">
+      <param name="actuator_effort">j2_actuator</param>
+
+      <param name="sensor_position">j2_pos</param>
+      <param name="sensor_velocity">j2_vel</param>
+      <param name="sensor_effort">j2_tor</param>
+    </joint>
+
+    <joint name="j3">
+      <param name="actuator_effort">j3_actuator</param>
+
+      <param name="sensor_position">j3_pos</param>
+      <param name="sensor_velocity">j3_vel</param>
+      <param name="sensor_effort">j3_tor</param>
+    </joint>
+
+    <joint name="j4">
+      <param name="actuator_effort">j4_actuator</param>
+
+      <param name="sensor_position">j4_pos</param>
+      <param name="sensor_velocity">j4_vel</param>
+      <param name="sensor_effort">j4_tor</param>
+    </joint>
+
+    <joint name="j5">
+      <param name="actuator_effort">j5_actuator</param>
+
+      <param name="sensor_position">j5_pos</param>
+      <param name="sensor_velocity">j5_vel</param>
+      <param name="sensor_effort">j5_tor</param>
+    </joint>
+
+    <joint name="j6">
+      <param name="actuator_effort">j6_actuator</param>
+
+      <param name="sensor_position">j6_pos</param>
+      <param name="sensor_velocity">j6_vel</param>
+      <param name="sensor_effort">j6_tor</param>
+    </joint>
+
+  </ros2_control>
+
+</robot>

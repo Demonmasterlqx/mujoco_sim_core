@@ -3,19 +3,27 @@
 #include <algorithm>
 #include <atomic>
 #include <chrono>
+#include <condition_variable>
 #include <cstddef>
 #include <cstdlib>
 #include <filesystem>
 #include <fstream>
+#include <limits>
+#include <mutex>
 #include <memory>
 #include <new>
+#include <optional>
 #include <sstream>
 #include <string>
 #include <thread>
 #include <utility>
+#include <vector>
 
+#include <ecal/pubsub/subscriber.h>
 #include <mujoco/mujoco.h>
 #include <mujoco_sim/core/simulation_core.hpp>
+#include <mujoco_sim/protocol/topics.hpp>
+#include <mujoco_sim/v4/sync.pb.h>
 
 #include "server_application_test_harness.hpp"
 #include "sim_viewer.hpp"
@@ -28,13 +36,18 @@ std::atomic<bool> track_allocations{false};
 std::atomic<std::uint64_t> allocation_count{0};
 
 struct ConfiguredViewer {
+  explicit ConfiguredViewer(mujoco_sim::server::SimViewer::InputOptions options)
+      : viewer(options) {}
+
   mujoco_sim::core::SimulationCore core;
   mujoco_sim::server::SimViewer viewer;
 };
 
-std::unique_ptr<ConfiguredViewer> CreateViewer(std::string* error) {
-  auto configured = std::make_unique<ConfiguredViewer>();
-  const auto model_load = configured->core.LoadModel(MUJOCO_SIM_SERVER_TEST_MODEL);
+std::unique_ptr<ConfiguredViewer> CreateViewer(
+    std::string* error, mujoco_sim::server::SimViewer::InputOptions options = {},
+    const char* model_path = MUJOCO_SIM_SERVER_TEST_MODEL) {
+  auto configured = std::make_unique<ConfiguredViewer>(options);
+  const auto model_load = configured->core.LoadModel(model_path);
   if (!model_load.response.loaded) {
     *error = model_load.response.message;
     return nullptr;
@@ -53,7 +66,7 @@ std::unique_ptr<ConfiguredViewer> CreateViewer(std::string* error) {
   auto second = configured->core.CloneSnapshot(*first, error);
   if (first == nullptr || second == nullptr ||
       !configured->viewer.QueueLoad(std::move(display), std::move(first), std::move(second),
-                                    MUJOCO_SIM_SERVER_TEST_MODEL, error)) {
+                                    model_path, error)) {
     return nullptr;
   }
   return configured;
@@ -98,6 +111,47 @@ class TemporaryLog {
 
  private:
   std::filesystem::path path_;
+};
+
+class StatusCollector {
+ public:
+  explicit StatusCollector(const std::string& server_name)
+      : subscriber_(mujoco_sim::protocol::StatusTopicName(server_name)) {
+    subscriber_.SetReceiveCallback([this](const eCAL::STopicId&, const eCAL::SDataTypeInformation&,
+                                          const eCAL::SReceiveCallbackData& data) {
+      mujoco_sim::v4::ServerStatus status;
+      if (!status.ParseFromArray(data.buffer, static_cast<int>(data.buffer_size))) return;
+      {
+        std::lock_guard lock(mutex_);
+        statuses_.push_back(std::move(status));
+      }
+      condition_.notify_all();
+    });
+  }
+
+  ~StatusCollector() { subscriber_.RemoveReceiveCallback(); }
+
+  template <class Predicate>
+  bool WaitFor(Predicate predicate, std::size_t* cursor, mujoco_sim::v4::ServerStatus* output,
+               std::chrono::milliseconds timeout = 3s) {
+    const auto deadline = std::chrono::steady_clock::now() + timeout;
+    std::unique_lock lock(mutex_);
+    while (true) {
+      while (*cursor < statuses_.size()) {
+        const auto& candidate = statuses_[(*cursor)++];
+        if (!predicate(candidate)) continue;
+        *output = candidate;
+        return true;
+      }
+      if (condition_.wait_until(lock, deadline) == std::cv_status::timeout) return false;
+    }
+  }
+
+ private:
+  std::mutex mutex_;
+  std::condition_variable condition_;
+  std::vector<mujoco_sim::v4::ServerStatus> statuses_;
+  eCAL::CSubscriber subscriber_;
 };
 
 template <typename Predicate>
@@ -173,6 +227,179 @@ TEST(SimViewerTest, DepthOneMailboxReplacesPendingAndBoundsBuffers) {
 
   configured->viewer.RequestClose();
   EXPECT_TRUE(configured->viewer.RenderLoop(&error)) << error;
+}
+
+TEST(SimViewerTest, ExtractsOnlyFiniteDynamicBodyWrenchesTransactionally) {
+  std::string error;
+  auto configured =
+      CreateViewer(&error, {.mouse_force_enabled = true}, MUJOCO_SIM_SERVER_DUAL_TEST_MODEL);
+  ASSERT_NE(configured, nullptr) << error;
+  auto snapshot = configured->core.CreateSnapshot(&error);
+  ASSERT_NE(snapshot, nullptr) << error;
+  const int dynamic_body = mj_name2id(snapshot->model(), mjOBJ_BODY, "first_link");
+  const int static_body = mj_name2id(snapshot->model(), mjOBJ_BODY, "static_link");
+  ASSERT_GT(dynamic_body, 0);
+  ASSERT_GT(static_body, 0);
+  snapshot->data()->xfrc_applied[6 * dynamic_body] = 1.0;
+  snapshot->data()->xfrc_applied[6 * dynamic_body + 5] = 2.0;
+  snapshot->data()->xfrc_applied[6 * static_body] = 9.0;
+
+  std::vector<mujoco_sim::core::InteractiveBodyWrench> output;
+  ASSERT_TRUE(mujoco_sim::server::detail::ExtractViewerBodyWrenches(snapshot->model(),
+                                                                    snapshot->data(), &output));
+  ASSERT_EQ(output.size(), 1U);
+  EXPECT_EQ(output.front().body_id, dynamic_body);
+  EXPECT_DOUBLE_EQ(output.front().force[0], 1.0);
+  EXPECT_DOUBLE_EQ(output.front().torque[2], 2.0);
+
+  snapshot->data()->xfrc_applied[6 * dynamic_body] = std::numeric_limits<double>::quiet_NaN();
+  EXPECT_FALSE(mujoco_sim::server::detail::ExtractViewerBodyWrenches(snapshot->model(),
+                                                                     snapshot->data(), &output));
+  ASSERT_EQ(output.size(), 1U);
+  EXPECT_EQ(output.front().body_id, dynamic_body);
+}
+
+TEST(SimViewerTest, InputMailboxMergesControlAndKeepsExplicitEmptyWrench) {
+  std::string error;
+  auto configured = CreateViewer(&error, {.control_enabled = true, .mouse_force_enabled = true});
+  ASSERT_NE(configured, nullptr) << error;
+
+  mujoco_sim::server::SimViewer::ViewerInputBatch first;
+  first.actuator_writes = {{.actuator_id = 0, .value = 0.2}};
+  first.wrench_frame.emplace();
+  first.wrench_frame->sequence = 1;
+  first.wrench_frame->body_wrenches = {
+      {.body_id = 1, .force = {1.0, 0.0, 0.0}},
+  };
+  configured->viewer.PublishInputForTesting(first);
+
+  mujoco_sim::server::SimViewer::ViewerInputBatch second;
+  second.actuator_writes = {{.actuator_id = 0, .value = 0.4}};
+  second.wrench_frame.emplace();
+  second.wrench_frame->sequence = 2;
+  configured->viewer.PublishInputForTesting(second);
+
+  mujoco_sim::server::SimViewer::ViewerInputBatch consumed;
+  ASSERT_TRUE(configured->viewer.TryConsumeInput(&consumed));
+  ASSERT_EQ(consumed.actuator_writes.size(), 1U);
+  EXPECT_DOUBLE_EQ(consumed.actuator_writes.front().value, 0.4);
+  ASSERT_TRUE(consumed.wrench_frame.has_value());
+  EXPECT_EQ(consumed.wrench_frame->sequence, 2U);
+  EXPECT_TRUE(consumed.wrench_frame->body_wrenches.empty());
+  EXPECT_FALSE(configured->viewer.TryConsumeInput(&consumed));
+}
+
+TEST(SimViewerTest, ActionMailboxUsesLatestRunAndResetBarrierRules) {
+  std::string error;
+  auto configured = CreateViewer(&error, {.control_enabled = true,
+                                          .mouse_force_enabled = true,
+                                          .pause_run_enabled = true,
+                                          .reset_enabled = true});
+  ASSERT_NE(configured, nullptr) << error;
+
+  mujoco_sim::server::SimViewer::ViewerInputBatch first;
+  first.actuator_writes = {{.actuator_id = 0, .value = 0.2}};
+  first.wrench_frame.emplace();
+  first.wrench_frame->body_wrenches = {
+      {.body_id = 1, .force = {1.0, 0.0, 0.0}},
+  };
+  first.simulation_actions.running = false;
+  configured->viewer.PublishInputForTesting(first);
+
+  mujoco_sim::server::SimViewer::ViewerInputBatch reset;
+  reset.actuator_writes = {{.actuator_id = 0, .value = 0.9}};
+  reset.wrench_frame.emplace();
+  reset.wrench_frame->body_wrenches = {
+      {.body_id = 1, .force = {2.0, 0.0, 0.0}},
+  };
+  reset.simulation_actions.running = true;
+  reset.simulation_actions.reset_requested = true;
+  configured->viewer.PublishInputForTesting(reset);
+
+  mujoco_sim::server::SimViewer::ViewerInputBatch consumed;
+  ASSERT_TRUE(configured->viewer.TryConsumeInput(&consumed));
+  EXPECT_TRUE(consumed.actuator_writes.empty());
+  EXPECT_FALSE(consumed.wrench_frame.has_value());
+  ASSERT_TRUE(consumed.simulation_actions.running.has_value());
+  EXPECT_TRUE(*consumed.simulation_actions.running);
+  EXPECT_TRUE(consumed.simulation_actions.reset_requested);
+  EXPECT_FALSE(configured->viewer.TryConsumeInput(&consumed));
+
+  mujoco_sim::server::SimViewer::ViewerInputBatch blocked;
+  blocked.actuator_writes = {{.actuator_id = 0, .value = 0.4}};
+  configured->viewer.PublishInputForTesting(blocked);
+  EXPECT_FALSE(configured->viewer.TryConsumeInput(&consumed));
+
+  configured->viewer.CompleteSimulationResetAction();
+  configured->viewer.PublishInputForTesting(blocked);
+  ASSERT_TRUE(configured->viewer.TryConsumeInput(&consumed));
+  ASSERT_EQ(consumed.actuator_writes.size(), 1U);
+  EXPECT_DOUBLE_EQ(consumed.actuator_writes.front().value, 0.4);
+}
+
+TEST(SimViewerTest, DisabledInputOptionsRejectSyntheticExtractedValues) {
+  std::string error;
+  auto configured = CreateViewer(&error);
+  ASSERT_NE(configured, nullptr) << error;
+  mujoco_sim::server::SimViewer::ViewerInputBatch input;
+  input.actuator_writes = {{.actuator_id = 0, .value = 0.5}};
+  input.wrench_frame.emplace();
+  input.wrench_frame->sequence = 1;
+  input.wrench_frame->body_wrenches = {
+      {.body_id = 1, .force = {1.0, 0.0, 0.0}},
+  };
+  configured->viewer.PublishInputForTesting(input);
+  EXPECT_FALSE(configured->viewer.TryConsumeInput(&input));
+}
+
+TEST(SimViewerTest, InputConsumerDoesNotWaitForMailboxOwner) {
+  std::string error;
+  auto configured = CreateViewer(&error, {.control_enabled = true});
+  ASSERT_NE(configured, nullptr) << error;
+  mujoco_sim::server::SimViewer::ViewerInputBatch input;
+  input.actuator_writes = {{.actuator_id = 0, .value = 0.5}};
+  configured->viewer.PublishInputForTesting(input);
+
+  std::atomic<bool> locked{false};
+  std::jthread holder([&] { configured->viewer.HoldInputMailboxForTesting(500ms, &locked); });
+  ASSERT_TRUE(WaitUntil([&] { return locked.load(std::memory_order_acquire); }, 1s));
+  mujoco_sim::server::SimViewer::ViewerInputBatch output;
+  const auto started = std::chrono::steady_clock::now();
+  EXPECT_FALSE(configured->viewer.TryConsumeInput(&output));
+  EXPECT_LT(std::chrono::steady_clock::now() - started, 100ms);
+  holder.join();
+  EXPECT_TRUE(configured->viewer.TryConsumeInput(&output));
+}
+
+TEST(SimViewerTest, EnabledIdleAndStableWrenchReusePreallocatedInputStorage) {
+  std::string error;
+  auto configured = CreateViewer(&error, {.control_enabled = true, .mouse_force_enabled = true},
+                                 MUJOCO_SIM_SERVER_DUAL_TEST_MODEL);
+  ASSERT_NE(configured, nullptr) << error;
+
+  mujoco_sim::server::SimViewer::ViewerInputBatch input;
+  input.wrench_frame.emplace();
+  input.wrench_frame->body_wrenches = {
+      {.body_id = 1, .force = {1.0, 0.0, 0.0}},
+  };
+  mujoco_sim::server::SimViewer::ViewerInputBatch output;
+  configured->viewer.PublishInputForTesting(input);
+  ASSERT_TRUE(configured->viewer.TryConsumeInput(&output));
+
+  allocation_count.store(0, std::memory_order_relaxed);
+  track_allocations.store(true, std::memory_order_release);
+  bool all_consumed = true;
+  for (std::uint64_t sequence = 1; sequence <= 1000; ++sequence) {
+    input.wrench_frame->sequence = sequence;
+    configured->viewer.PublishInputForTesting(input);
+    all_consumed = configured->viewer.TryConsumeInput(&output) && all_consumed;
+  }
+  const bool idle_has_input = configured->viewer.TryConsumeInput(&output);
+  track_allocations.store(false, std::memory_order_release);
+
+  EXPECT_TRUE(all_consumed);
+  EXPECT_FALSE(idle_has_input);
+  EXPECT_EQ(allocation_count.load(std::memory_order_relaxed), 0U);
 }
 
 TEST(SimViewerTest, ValidatesEverySnapshotSignatureAndBufferSize) {
@@ -287,6 +514,245 @@ TEST(SimViewerTest, LoadsSynchronizesSubmittedDataAndClosesWindow) {
   EXPECT_GT(metrics.sync_completed, 0U);
   EXPECT_EQ(metrics.sync_failures, 0U);
   EXPECT_TRUE(configured->viewer.close_requested());
+}
+
+TEST(SimViewerTest, ConfiguresSimulationUiAndExtractsLifecycleActionsWithoutEcho) {
+  std::string error;
+  auto configured = CreateViewer(
+      &error, {.control_enabled = true, .pause_run_enabled = true, .reset_enabled = true});
+  ASSERT_NE(configured, nullptr) << error;
+  std::optional<mujoco_sim::server::SimViewer::SimulationUiStateForTesting> ui_state;
+  bool pause_extracted = false;
+  bool correction_silent = false;
+  bool reset_barrier_applied = false;
+  std::string producer_error;
+  std::jthread producer([&] {
+    const auto fail = [&] {
+      configured->viewer.RequestClose();
+      return;
+    };
+    if (!WaitUntil([&] { return configured->viewer.model_loaded(); }, 2s) ||
+        !CaptureAndSubmit(configured.get(), &producer_error) ||
+        !WaitUntil(
+            [&] {
+              ui_state = configured->viewer.GetSimulationUiStateForTesting();
+              return ui_state.has_value();
+            },
+            2s)) {
+      fail();
+      return;
+    }
+
+    if (!configured->viewer.SetRunningForTesting(false) ||
+        !CaptureTimeAndSubmit(configured.get(), 10.0, &producer_error)) {
+      fail();
+      return;
+    }
+    mujoco_sim::server::SimViewer::ViewerInputBatch input;
+    pause_extracted = WaitUntil(
+        [&] {
+          if (!configured->viewer.TryConsumeInput(&input)) return false;
+          return input.simulation_actions.running.has_value() &&
+                 !*input.simulation_actions.running && !input.simulation_actions.reset_requested;
+        },
+        2s);
+    if (!pause_extracted) {
+      producer_error = "viewer did not extract the Pause selection";
+      fail();
+      return;
+    }
+
+    configured->viewer.RequestRunningIndicator(true);
+    if (!CaptureTimeAndSubmit(configured.get(), 11.0, &producer_error) ||
+        !WaitUntil([&] { return configured->viewer.DisplayTimeForTesting() == 11.0; }, 2s)) {
+      fail();
+      return;
+    }
+    correction_silent = !configured->viewer.TryConsumeInput(&input);
+
+    if (!configured->viewer.SetControlForTesting(0, 0.75) ||
+        !configured->viewer.RequestResetForTesting() ||
+        !CaptureTimeAndSubmit(configured.get(), 12.0, &producer_error)) {
+      fail();
+      return;
+    }
+    reset_barrier_applied = WaitUntil(
+        [&] {
+          if (!configured->viewer.TryConsumeInput(&input)) return false;
+          return input.simulation_actions.reset_requested &&
+                 !input.simulation_actions.running.has_value() && input.actuator_writes.empty() &&
+                 !input.wrench_frame.has_value();
+        },
+        2s);
+    configured->viewer.RequestClose();
+  });
+
+  EXPECT_TRUE(configured->viewer.RenderLoop(&error)) << error;
+  producer.join();
+  ASSERT_TRUE(ui_state.has_value()) << producer_error;
+  EXPECT_EQ(ui_state->run, 1);
+  EXPECT_EQ(ui_state->reset, 2);
+  EXPECT_EQ(ui_state->num_threads, 5);
+  EXPECT_EQ(ui_state->reload, 5);
+  EXPECT_EQ(ui_state->noise_scale, 5);
+  EXPECT_EQ(ui_state->noise_rate, 5);
+  EXPECT_EQ(ui_state->history_scrub, 5);
+  EXPECT_TRUE(pause_extracted) << producer_error;
+  EXPECT_TRUE(correction_silent) << producer_error;
+  EXPECT_TRUE(reset_barrier_applied) << producer_error;
+}
+
+TEST(SimViewerTest, DisabledResetIsGreyedAndCannotResetPassiveCopy) {
+  std::string error;
+  auto configured = CreateViewer(&error, {.pause_run_enabled = true, .reset_enabled = false});
+  ASSERT_NE(configured, nullptr) << error;
+  std::optional<mujoco_sim::server::SimViewer::SimulationUiStateForTesting> ui_state;
+  bool passive_copy_preserved = false;
+  bool action_suppressed = false;
+  std::string producer_error;
+  std::jthread producer([&] {
+    const auto fail = [&] {
+      configured->viewer.RequestClose();
+      return;
+    };
+    if (!WaitUntil([&] { return configured->viewer.model_loaded(); }, 2s) ||
+        !CaptureAndSubmit(configured.get(), &producer_error) ||
+        !WaitUntil(
+            [&] {
+              ui_state = configured->viewer.GetSimulationUiStateForTesting();
+              return ui_state.has_value();
+            },
+            2s) ||
+        !configured->viewer.RequestResetForTesting() ||
+        !CaptureTimeAndSubmit(configured.get(), 42.0, &producer_error)) {
+      fail();
+      return;
+    }
+    passive_copy_preserved =
+        WaitUntil([&] { return configured->viewer.DisplayTimeForTesting() == 42.0; }, 2s);
+    mujoco_sim::server::SimViewer::ViewerInputBatch input;
+    action_suppressed = !configured->viewer.TryConsumeInput(&input);
+    configured->viewer.RequestClose();
+  });
+
+  EXPECT_TRUE(configured->viewer.RenderLoop(&error)) << error;
+  producer.join();
+  ASSERT_TRUE(ui_state.has_value()) << producer_error;
+  EXPECT_EQ(ui_state->run, 1);
+  EXPECT_EQ(ui_state->reset, 0);
+  EXPECT_TRUE(passive_copy_preserved) << producer_error;
+  EXPECT_TRUE(action_suppressed) << producer_error;
+}
+
+TEST(SimViewerTest, ResetCompletionDiscardsInFlightOldGenerationSyncInput) {
+  std::string error;
+  auto configured = CreateViewer(
+      &error, {.control_enabled = true, .pause_run_enabled = true, .reset_enabled = true});
+  ASSERT_NE(configured, nullptr) << error;
+  bool stale_data_discarded_and_running_preserved = false;
+  std::string producer_error;
+  std::jthread producer([&] {
+    const auto fail = [&] {
+      configured->viewer.RequestClose();
+      return;
+    };
+    if (!WaitUntil([&] { return configured->viewer.model_loaded(); }, 2s) ||
+        !CaptureAndSubmit(configured.get(), &producer_error) ||
+        !WaitUntil([&] { return configured->viewer.GetSimulationUiStateForTesting().has_value(); },
+                   2s) ||
+        !configured->viewer.RequestResetForTesting() ||
+        !CaptureTimeAndSubmit(configured.get(), 10.0, &producer_error)) {
+      fail();
+      return;
+    }
+
+    mujoco_sim::server::SimViewer::ViewerInputBatch input;
+    if (!WaitUntil(
+            [&] {
+              return configured->viewer.TryConsumeInput(&input) &&
+                     input.simulation_actions.reset_requested;
+            },
+            2s) ||
+        !configured->viewer.SetControlForTesting(0, 0.75) ||
+        !configured->viewer.SetRunningForTesting(false)) {
+      producer_error = "viewer did not produce Reset or accept old-generation Control/Run input";
+      fail();
+      return;
+    }
+
+    configured->viewer.SetSyncDelayForTesting(100ms);
+    if (!CaptureTimeAndSubmit(configured.get(), 11.0, &producer_error) ||
+        !WaitUntil([&] { return configured->viewer.sync_active_for_testing(); }, 2s)) {
+      fail();
+      return;
+    }
+    configured->viewer.CompleteSimulationResetAction();
+    configured->viewer.SetSyncDelayForTesting(0ms);
+    if (!WaitUntil([&] { return configured->viewer.DisplayTimeForTesting() == 11.0; }, 2s)) {
+      fail();
+      return;
+    }
+    stale_data_discarded_and_running_preserved = WaitUntil(
+        [&] {
+          if (!configured->viewer.TryConsumeInput(&input)) return false;
+          return input.actuator_writes.empty() && !input.wrench_frame.has_value() &&
+                 input.simulation_actions.running.has_value() &&
+                 !*input.simulation_actions.running && !input.simulation_actions.reset_requested;
+        },
+        2s);
+    configured->viewer.RequestClose();
+  });
+
+  EXPECT_TRUE(configured->viewer.RenderLoop(&error)) << error;
+  producer.join();
+  EXPECT_TRUE(stale_data_discarded_and_running_preserved) << producer_error;
+}
+
+TEST(SimViewerTest, ExtractsPassiveControlEditAndClearAllThroughRealSync) {
+  std::string error;
+  auto configured = CreateViewer(&error, {.control_enabled = true});
+  ASSERT_NE(configured, nullptr) << error;
+
+  std::atomic<bool> succeeded{false};
+  std::string producer_error;
+  std::jthread producer([&] {
+    const auto fail = [&] {
+      configured->viewer.RequestClose();
+      return;
+    };
+    if (!WaitUntil([&] { return configured->viewer.model_loaded(); }, 2s) ||
+        !configured->viewer.SetControlForTesting(0, 0.5) ||
+        !CaptureAndSubmit(configured.get(), &producer_error)) {
+      fail();
+      return;
+    }
+    mujoco_sim::server::SimViewer::ViewerInputBatch input;
+    if (!WaitUntil([&] { return configured->viewer.TryConsumeInput(&input); }, 2s) ||
+        input.actuator_writes.size() != 1 || input.actuator_writes.front().value != 0.5) {
+      producer_error = "viewer did not extract the injected Control edit";
+      fail();
+      return;
+    }
+    if (!configured->core.Step({.actuator_writes = input.actuator_writes}).step_completed ||
+        !configured->viewer.RequestClearControlsForTesting() ||
+        !CaptureAndSubmit(configured.get(), &producer_error)) {
+      fail();
+      return;
+    }
+    input.actuator_writes.clear();
+    if (!WaitUntil([&] { return configured->viewer.TryConsumeInput(&input); }, 2s) ||
+        input.actuator_writes.size() != 1 || input.actuator_writes.front().value != 0.0) {
+      producer_error = "viewer did not extract Clear all";
+      fail();
+      return;
+    }
+    succeeded.store(true, std::memory_order_release);
+    configured->viewer.RequestClose();
+  });
+
+  EXPECT_TRUE(configured->viewer.RenderLoop(&error)) << error;
+  producer.join();
+  EXPECT_TRUE(succeeded.load(std::memory_order_acquire)) << producer_error;
 }
 
 TEST(SimViewerTest, ProducerCallsRemainBoundedWhileWorkerConsumes) {
@@ -534,6 +1000,88 @@ TEST(SimViewerTest, WorkerFailurePropagatesThroughServerApplication) {
   EXPECT_NE(contents.find("reason=\"viewer_sync_failed\""), std::string::npos);
   EXPECT_NE(contents.find("exit_code=2"), std::string::npos);
   EXPECT_EQ(contents.find("reason=\"viewer_closed\""), std::string::npos);
+}
+
+TEST(SimViewerTest, ProductionLoopPublishesPauseResetAndRunSemantics) {
+  TemporaryLog log;
+  mujoco_sim::server::ServerConfig config;
+  config.server_name = "viewer_action_test_" +
+                       std::to_string(std::chrono::steady_clock::now().time_since_epoch().count());
+  config.model_path = MUJOCO_SIM_SERVER_TEST_MODEL;
+  config.headless = false;
+  config.max_ticks = 500;
+  config.status_period_ms = 20;
+  config.status_min_interval_ms = 5;
+  config.viewer_sync_period_ms = 1;
+  config.log_file = log.path().string();
+  config.log_summary_period_ms = 20;
+
+  mujoco_sim::server::ServerApplicationTestHarness application(config);
+  std::string error;
+  ASSERT_TRUE(application.Start(&error)) << error;
+  StatusCollector statuses(config.server_name);
+
+  bool paused_twice_without_progress = false;
+  bool reset_preserved_pause_and_tick = false;
+  bool resumed_without_catch_up = false;
+  std::jthread actions([&] {
+    std::size_t cursor = 0;
+    if (!WaitUntil([&] { return application.SetViewerRunning(false); }, 2s)) return;
+
+    mujoco_sim::v4::ServerStatus paused;
+    if (statuses.WaitFor(
+            [](const auto& status) { return status.state() == mujoco_sim::v4::PAUSED; }, &cursor,
+            &paused)) {
+      mujoco_sim::v4::ServerStatus paused_again;
+      paused_twice_without_progress = statuses.WaitFor(
+          [&paused](const auto& status) {
+            return status.state() == mujoco_sim::v4::PAUSED &&
+                   status.tick_id() == paused.tick_id() &&
+                   status.simulation_time_s() == paused.simulation_time_s();
+          },
+          &cursor, &paused_again);
+
+      mujoco_sim::v4::ServerStatus reset;
+      if (paused_twice_without_progress && application.RequestViewerReset() &&
+          statuses.WaitFor(
+              [&paused](const auto& status) {
+                return status.state() == mujoco_sim::v4::PAUSED &&
+                       status.tick_id() == paused.tick_id() &&
+                       status.simulation_time_s() < paused.simulation_time_s();
+              },
+              &cursor, &reset)) {
+        reset_preserved_pause_and_tick = true;
+        if (application.SetViewerRunning(true)) {
+          mujoco_sim::v4::ServerStatus running;
+          if (statuses.WaitFor(
+                  [&reset](const auto& status) {
+                    return status.state() == mujoco_sim::v4::RUNNING &&
+                           status.tick_id() > reset.tick_id();
+                  },
+                  &cursor, &running)) {
+            resumed_without_catch_up =
+                running.tick_id() <= reset.tick_id() + 10 &&
+                running.simulation_time_s() <= reset.simulation_time_s() + 0.01;
+          }
+        }
+      }
+    }
+    application.SetViewerRunning(true);
+  });
+
+  EXPECT_EQ(application.Run(), 0);
+  actions.join();
+  EXPECT_TRUE(paused_twice_without_progress);
+  EXPECT_TRUE(reset_preserved_pause_and_tick);
+  EXPECT_TRUE(resumed_without_catch_up);
+
+  const auto contents = log.Read();
+  EXPECT_NE(contents.find("event=simulation_paused source=local_gui"), std::string::npos);
+  EXPECT_NE(contents.find("event=simulation_reset source=local_gui"), std::string::npos);
+  EXPECT_NE(contents.find("event=simulation_resumed source=local_gui"), std::string::npos);
+  EXPECT_EQ(contents.find("simulation_delta_s=-"), std::string::npos);
+  EXPECT_NE(contents.find("event=server_stopped reason=\"max_ticks\" exit_code=0 tick_id=500"),
+            std::string::npos);
 }
 
 }  // namespace

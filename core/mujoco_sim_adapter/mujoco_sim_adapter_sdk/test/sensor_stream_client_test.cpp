@@ -408,6 +408,28 @@ TEST(SensorStreamClientTest, ServerTerminalStatesWakeInfiniteWait) {
   EXPECT_EQ(error_client.stream_diagnostic("rgb"), "fatal simulation error");
 }
 
+TEST(SensorStreamClientTest, PausedStatusLeavesInfiniteWaitNonterminal) {
+  SensorStreamClient client(MakeOptions());
+  SensorStreamClientTestPeer::Configure(&client, {MakeDescriptor()});
+  OwnedStreamSample output;
+  std::string error;
+  auto waiting = std::async(std::launch::async, [&] {
+    return client.WaitForSample("rgb", std::chrono::milliseconds::max(), &output, &error);
+  });
+  for (int i = 0; i < 100 && !SensorStreamClientTestPeer::WaitInProgress(&client, "rgb"); ++i) {
+    std::this_thread::sleep_for(1ms);
+  }
+  ASSERT_TRUE(SensorStreamClientTestPeer::WaitInProgress(&client, "rgb"));
+  auto paused = MakeStatus(20, "rgb", mujoco_sim::v4::STREAM_RUNNING);
+  paused.set_state(mujoco_sim::v4::PAUSED);
+  SensorStreamClientTestPeer::HandleStatus(&client, paused);
+
+  EXPECT_EQ(waiting.wait_for(50ms), std::future_status::timeout);
+  client.Stop();
+  EXPECT_EQ(waiting.get(), SampleWaitResult::kStopped);
+  EXPECT_TRUE(error.empty());
+}
+
 TEST(SensorStreamClientTest, SameTickRunningThenErrorWakesWaiter) {
   SensorStreamClient client(MakeOptions());
   SensorStreamClientTestPeer::Configure(&client, {MakeDescriptor()});

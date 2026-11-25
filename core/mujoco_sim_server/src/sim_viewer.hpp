@@ -4,7 +4,14 @@
 #include <chrono>
 #include <cstdint>
 #include <memory>
+#include <optional>
 #include <string>
+#include <vector>
+
+#include <mujoco_sim/core/interactive_input.hpp>
+
+struct mjData_;
+struct mjModel_;
 
 namespace mujoco_sim::core {
 class SimulationSnapshot;
@@ -79,6 +86,25 @@ inline bool ViewerSnapshotsCompatible(const ViewerSnapshotMetadata& display,
          first.data_buffer_bytes == second.data_buffer_bytes;
 }
 
+/**
+ * @brief Extracts finite nonzero wrenches for dynamic bodies from one snapshot.
+ *
+ * The output is replaced transactionally. World and static bodies are skipped.
+ * A non-finite wrench makes the function fail without changing output.
+ *
+ * 从一个快照中提取动态刚体的有限非零扰动力。
+ *
+ * 输出以事务方式替换。world body 与静态刚体会被跳过；存在非有限扰动力时函数失败且
+ * 不改变输出。
+ *
+ * @param model Borrowed MuJoCo model. 借用的 MuJoCo model。
+ * @param data Borrowed compatible MuJoCo data. 借用的兼容 MuJoCo data。
+ * @param output Transactional owned output. 事务性的自有输出。
+ * @return true on valid input; otherwise false. 输入有效时返回 true，否则返回 false。
+ */
+bool ExtractViewerBodyWrenches(const mjModel_* model, const mjData_* data,
+                               std::vector<mujoco_sim::core::InteractiveBodyWrench>* output);
+
 }  // namespace detail
 
 /**
@@ -87,21 +113,26 @@ inline bool ViewerSnapshotsCompatible(const ViewerSnapshotMetadata& display,
  * The simulation thread is the sole snapshot producer. It may acquire and
  * submit one of two reusable production buffers without waiting. A dedicated
  * worker copies the latest submitted buffer into a lifetime-stable display
- * snapshot before synchronizing the passive viewer. RenderLoop() remains a
- * main-thread operation.
+ * snapshot before synchronizing the passive viewer. Viewer synchronization is
+ * serialized with the complete MuJoCo render call at the first-party platform
+ * adapter boundary. RenderLoop() remains a main-thread operation.
  *
  * 拥有 MuJoCo 被动查看器及其异步快照通路。
  *
  * 仿真线程是唯一的快照生产者。它可以在不等待的情况下获取并提交两个可复用生产缓冲
  * 之一。专用 worker 将最新提交的缓冲复制到生命周期稳定的显示快照，然后同步被动查看器。
+ * viewer sync 与完整 MuJoCo render 调用会在第一方 platform adapter 边界串行化。
  * RenderLoop() 仍必须在主线程运行。
  *
  * @par Thread safety / 线程安全
  * TryAcquireSnapshot() and TrySubmitSnapshot() are single-producer APIs.
- * RequestClose(), RequestScreenshot(), and metric collection may run
- * concurrently. Destruction must not overlap RenderLoop().
+ * RequestClose(), RequestScreenshot(), RequestRunningIndicator(),
+ * CompleteSimulationResetAction(), and metric collection may run concurrently.
+ * TryConsumeInput() is called only by the simulation producer. Destruction must
+ * not overlap RenderLoop().
  * TryAcquireSnapshot() 和 TrySubmitSnapshot() 是单生产者 API。RequestClose()、
- * RequestScreenshot() 与指标采集可以并发执行。析构不得与 RenderLoop() 重叠。
+ * RequestScreenshot()、RequestRunningIndicator()、CompleteSimulationResetAction() 与指标采集
+ * 可以并发执行。TryConsumeInput() 仅由仿真生产者调用。析构不得与 RenderLoop() 重叠。
  */
 class SimViewer {
  private:
@@ -110,6 +141,110 @@ class SimViewer {
   struct Impl;
 
  public:
+  /**
+   * @brief Selects which local GUI values may be forwarded to SimulationCore.
+   *
+   * Options are immutable after construction. They are still carried by the
+   * GUI-disabled stub, which never produces input or actions.
+   *
+   * 选择允许转发给 SimulationCore 的本地 GUI 输入。
+   *
+   * 选项在构造后不可变。GUI-disabled stub 仍保留这些选项，但永不产生输入或动作。
+   */
+  struct InputOptions {
+    /** Accept Control-panel actuator edits. 接受 Control 面板的 actuator 编辑。 */
+    bool control_enabled = false;
+    /** Accept mouse perturbation wrenches. 接受鼠标扰动力。 */
+    bool mouse_force_enabled = false;
+    /** Allow the local GUI to pause and resume physics stepping.
+     * 允许本地 GUI 暂停和恢复物理步进。 */
+    bool pause_run_enabled = false;
+    /** Allow the local GUI to reset authoritative simulation data.
+     * 允许本地 GUI 重置权威仿真数据。 */
+    bool reset_enabled = false;
+  };
+
+  /**
+   * @brief Owns local simulation lifecycle actions extracted from viewer sync.
+   *
+   * Pause/Run is a latest desired state. Reset is a coalescing edge latch and
+   * forms a barrier that removes older and same-sync Control/Wrench input.
+   *
+   * 持有从 viewer sync 提取的本地仿真生命周期动作。
+   *
+   * Pause/Run 是 latest 期望状态。Reset 是会合并边沿的 latch，并形成屏障，移除更早以及
+   * 同次 sync 的 Control/Wrench 输入。
+   */
+  struct ViewerSimulationActions {
+    /** Latest desired running state; no value means no new selection.
+     * 最新期望运行状态；无值表示没有新的选择。 */
+    std::optional<bool> running;
+    /** Latched Reset edge; repeated unconsumed requests coalesce.
+     * 锁存的 Reset 边沿；未消费前的重复请求会合并。 */
+    bool reset_requested = false;
+  };
+
+  /** Complete mouse-wrench state produced by one successful viewer sync.
+   * 一次成功 viewer sync 产生的完整鼠标扰动力状态。 */
+  struct ViewerWrenchFrame {
+    /** Monotonic viewer-worker sequence. viewer worker 单调递增序列。 */
+    std::uint64_t sequence = 0;
+    /** Steady-clock generation time. steady clock 生成时间。 */
+    std::chrono::steady_clock::time_point generated_at{};
+    /** Complete dynamic-body wrench state; empty explicitly clears.
+     * 完整动态刚体扰动力状态；为空时表示显式清除。 */
+    std::vector<mujoco_sim::core::InteractiveBodyWrench> body_wrenches;
+  };
+
+  /**
+   * @brief Owns one transactionally consumed viewer input batch.
+   *
+   * Every vector and optional value owns its payload. The SimulationLoop may
+   * reuse the object after `TryConsumeInput()` returns.
+   *
+   * 持有一个以事务方式消费的 viewer 输入批次。
+   *
+   * 每个 vector 与 optional 值都自有 payload。`TryConsumeInput()` 返回后，
+   * SimulationLoop 可以复用该对象。
+   */
+  struct ViewerInputBatch {
+    /** Last pending value for each changed actuator. 每个已修改 actuator 的最后待处理值。 */
+    std::vector<mujoco_sim::core::InteractiveActuatorWrite> actuator_writes;
+    /** No value means no new frame; an empty frame means clear.
+     * 无值表示没有新帧；空帧表示清除。 */
+    std::optional<ViewerWrenchFrame> wrench_frame;
+    /** Independently merged lifecycle actions. 独立合并的生命周期动作。 */
+    ViewerSimulationActions simulation_actions;
+  };
+
+  /**
+   * @brief Owns Simulation-panel item predicates for first-party tests.
+   *
+   * Values are copied while holding the MuJoCo viewer mutex. They are MuJoCo
+   * item-state predicates, not booleans, and have no production consumer.
+   *
+   * 持有供第一方测试使用的 Simulation 面板 item predicate。
+   *
+   * 各值在持有 MuJoCo viewer mutex 时复制。它们是 MuJoCo item-state predicate，
+   * 不是布尔值，且没有生产消费者。
+   */
+  struct SimulationUiStateForTesting {
+    /** Pause/Run item predicate. Pause/Run item predicate。 */
+    int run = -1;
+    /** Reset item predicate. Reset item predicate。 */
+    int reset = -1;
+    /** Num threads item predicate. Num threads item predicate。 */
+    int num_threads = -1;
+    /** Reload item predicate. Reload item predicate。 */
+    int reload = -1;
+    /** Noise scale item predicate. Noise scale item predicate。 */
+    int noise_scale = -1;
+    /** Noise rate item predicate. Noise rate item predicate。 */
+    int noise_rate = -1;
+    /** History scrub item predicate. History scrub item predicate。 */
+    int history_scrub = -1;
+  };
+
   /**
    * @brief Interval-local viewer capture and synchronization metrics.
    *
@@ -208,8 +343,13 @@ class SimViewer {
     std::chrono::steady_clock::time_point capture_started_{};
   };
 
-  /** Constructs an uninitialized viewer. 构造未初始化的查看器。 */
+  /** Constructs an uninitialized viewer with input forwarding disabled.
+   * 构造禁用输入转发的未初始化查看器。 */
   SimViewer();
+
+  /** Constructs an uninitialized viewer with immutable input options.
+   * 使用不可变输入选项构造未初始化的查看器。 */
+  explicit SimViewer(InputOptions options);
 
   /** Requests closure and joins an active sync worker. 请求关闭并 join 活跃同步 worker。 */
   ~SimViewer();
@@ -294,6 +434,24 @@ class SimViewer {
   bool TrySubmitSnapshot(SnapshotLease&& lease) noexcept;
 
   /**
+   * @brief Tries to consume merged GUI input without waiting.
+   *
+   * On success output is replaced and the consumed values are removed. Lock
+   * contention, closure, no input, or allocation failure returns false and
+   * retains all pending input.
+   *
+   * 尝试以非阻塞方式消费合并后的 GUI 输入。
+   *
+   * 成功时替换输出并移除已消费值。锁竞争、关闭、无输入或分配失败会返回 false，并保留
+   * 全部待处理输入。
+   *
+   * @param output Reusable simulation-thread-owned output. 仿真线程所有的可复用输出。
+   * @return true when at least one value was consumed; otherwise false.
+   *         消费至少一个值时返回 true，否则返回 false。
+   */
+  bool TryConsumeInput(ViewerInputBatch* output) noexcept;
+
+  /**
    * @brief Runs the GUI, joins the sync worker, and reports sticky failure.
    * @param error_message Receives a sync-worker or render failure diagnostic.
    *                      接收同步 worker 或渲染失败诊断。
@@ -307,6 +465,45 @@ class SimViewer {
 
   /** Queues a non-blocking screenshot request. 非阻塞排队一次截图请求。 */
   void RequestScreenshot() noexcept;
+
+  /**
+   * @brief Requests a non-blocking correction of the GUI Run indicator.
+   *
+   * The latest request is applied by the sync worker under the MuJoCo viewer
+   * mutex. Applying a correction does not emit a new lifecycle action.
+   *
+   * 非阻塞请求修正 GUI Run 指示器。
+   *
+   * 最新请求由 sync worker 在 MuJoCo viewer mutex 下应用。修正不会产生新的生命周期动作。
+   *
+   * @param running true for Run; false for Pause. true 表示 Run，false 表示 Pause。
+   * @par Thread safety / 线程安全
+   * May be called by SimulationLoop while rendering. 可由 SimulationLoop 在渲染期间调用。
+   */
+  void RequestRunningIndicator(bool running) noexcept;
+
+  /**
+   * @brief Completes one consumed Reset action and advances the viewer input generation.
+   *
+   * The Reset barrier remains active after `TryConsumeInput()` returns the edge.
+   * SimulationLoop calls this after accepting or rejecting that action. The
+   * method clears queued Control/Wrench data and pending pre-completion
+   * snapshots, invalidates an in-flight old-generation sync, and releases the
+   * barrier while preserving the latest pending Pause/Run selection.
+   *
+   * 完成一个已消费的 Reset 动作，并推进 viewer 输入 generation。
+   *
+   * `TryConsumeInput()` 返回 Reset 边沿后，Reset 屏障仍保持活跃。SimulationLoop 在接受或
+   * 拒绝该动作后调用本函数。本函数清除排队的 Control/Wrench 数据及完成前的待处理快照，
+   * 使在途旧 generation sync 失效，并在保留最新待处理 Pause/Run 选择的同时释放屏障。
+   *
+   * @par Thread safety / 线程安全
+   * Called only by SimulationLoop. It may briefly wait for first-party mailbox
+   * critical sections but never waits for render, sync, or transport work.
+   * 仅由 SimulationLoop 调用。可能短暂等待第一方 mailbox 临界区，但不等待 render、sync
+   * 或 transport 工作。
+   */
+  void CompleteSimulationResetAction() noexcept;
 
   /**
    * @brief Closes submission, wakes the worker, and requests window exit.
@@ -389,6 +586,53 @@ class SimViewer {
    *                 不持有邮箱互斥锁时施加的非负延迟。
    */
   void SetSyncDelayForTesting(std::chrono::milliseconds duration) noexcept;
+
+  /** Sets the passive viewer's Control value under its mutex for tests.
+   * 在测试中持有 passive viewer mutex 设置 Control 值。 */
+  bool SetControlForTesting(int actuator_id, double value) noexcept;
+
+  /** Requests the passive viewer's Clear all action for tests.
+   * 在测试中请求 passive viewer 的 Clear all 操作。 */
+  bool RequestClearControlsForTesting() noexcept;
+
+  /**
+   * @brief Changes the passive viewer Run selection for extraction tests.
+   * @param running true selects Run; false selects Pause. true 选择 Run；false 选择 Pause。
+   * @return true after UI setup accepted the change; otherwise false.
+   *         UI 配置完成且接受修改时返回 true，否则返回 false。
+   * @par Thread safety / 线程安全
+   * Acquires the MuJoCo viewer mutex and may run beside RenderLoop().
+   * 获取 MuJoCo viewer mutex，可与 RenderLoop() 并发运行。
+   */
+  bool SetRunningForTesting(bool running) noexcept;
+
+  /**
+   * @brief Sets the passive viewer Reset edge for extraction tests.
+   * @return true after UI setup accepted the edge; otherwise false.
+   *         UI 配置完成且接受边沿时返回 true，否则返回 false。
+   * @par Thread safety / 线程安全
+   * Acquires the MuJoCo viewer mutex and may run beside RenderLoop().
+   * 获取 MuJoCo viewer mutex，可与 RenderLoop() 并发运行。
+   */
+  bool RequestResetForTesting() noexcept;
+
+  /**
+   * @brief Copies configured Simulation-panel predicates for tests.
+   * @return Owned values, or no value before UI setup. 自有值；UI 配置前返回无值。
+   * @par Thread safety / 线程安全
+   * Acquires the MuJoCo viewer mutex and may run beside RenderLoop().
+   * 获取 MuJoCo viewer mutex，可与 RenderLoop() 并发运行。
+   */
+  std::optional<SimulationUiStateForTesting> GetSimulationUiStateForTesting() const;
+
+  /** Publishes a synthetic extracted batch through production merge rules.
+   * 通过生产合并规则发布一个合成的已提取批次。 */
+  void PublishInputForTesting(const ViewerInputBatch& input) noexcept;
+
+  /** Holds the input mailbox mutex for deterministic non-blocking tests.
+   * 为确定性非阻塞测试持有输入邮箱互斥锁。 */
+  void HoldInputMailboxForTesting(std::chrono::milliseconds duration,
+                                  std::atomic<bool>* lock_acquired) noexcept;
 
   /**
    * @return true while the worker owns a production buffer for test sync.

@@ -57,6 +57,27 @@ class ServerApplicationTestHarness {
    */
   bool RequestViewerSyncFailure() noexcept;
 
+  /**
+   * @brief Changes the production viewer Run selection for lifecycle tests.
+   * @param running true selects Run; false selects Pause. true 选择 Run；false 选择 Pause。
+   * @return true when an active initialized GUI accepted the change.
+   *         活跃且已初始化 GUI 接受修改时返回 true。
+   * @par Thread safety / 线程安全
+   * May run beside `Run()`; it never calls SimulationCore. 可与 `Run()` 并发；不调用
+   * SimulationCore。
+   */
+  bool SetViewerRunning(bool running) noexcept;
+
+  /**
+   * @brief Injects one production-viewer Reset edge for lifecycle tests.
+   * @return true when an active initialized GUI accepted the edge.
+   *         活跃且已初始化 GUI 接受边沿时返回 true。
+   * @par Thread safety / 线程安全
+   * May run beside `Run()`; it never calls SimulationCore. 可与 `Run()` 并发；不调用
+   * SimulationCore。
+   */
+  bool RequestViewerReset() noexcept;
+
  private:
   /** Exact production runtime owned by this private harness.
    * 此私有测试夹具持有的实际生产运行时。 */

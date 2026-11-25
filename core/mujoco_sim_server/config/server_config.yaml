@@ -181,6 +181,27 @@ fields:
     default: 16
     min: 1
     cli: [--viewer-sync-period-ms]
+  viewer_control_input_enabled:
+    type: bool
+    description: Accept one-shot actuator control writes from the graphical viewer
+    default: true
+  viewer_mouse_force_enabled:
+    type: bool
+    description: Accept dynamic-body mouse perturbation forces from the graphical viewer
+    default: true
+  viewer_pause_run_enabled:
+    type: bool
+    description: Allow the graphical viewer to pause and resume physics stepping
+    default: true
+  viewer_reset_enabled:
+    type: bool
+    description: Allow the graphical viewer to reset authoritative simulation data
+    default: true
+  viewer_mouse_force_timeout_ms:
+    type: uint32
+    description: Clear stale graphical-viewer mouse forces after this timeout
+    default: 100
+    min: 1
   log_level:
     type: enum
     description: Minimum server log level

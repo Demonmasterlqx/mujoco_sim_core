@@ -8,6 +8,7 @@
 
 #include <cmath>
 #include <cstring>
+#include <iostream>
 
 namespace control
 {
@@ -235,17 +236,16 @@ public:
     {
         if (input.w && !input.s)
         {
-            vel_slope_.update_val(vel_slope_.value() + 0.0006f);
+            vel_slope_.update_val(k_cmd_velocity);
         }
         else if (input.s && !input.w)
         {
-            vel_slope_.update_val(vel_slope_.value() - 0.0006f);
+            vel_slope_.update_val(-k_cmd_velocity);
         }
         else
         {
-            vel_slope_.update_val(0.0f);
+            vel_slope_.set_default(0.0f);
         }
-        vel_slope_.set_default(clamp(vel_slope_.value(), -k_cmd_velocity_limit, k_cmd_velocity_limit));
 
         const bool yaw_active = input.a != input.d;
         if (!yaw_ref_initialized_)
@@ -256,11 +256,11 @@ public:
 
         if (input.a && !input.d)
         {
-            yaw_slope_.update_val(yaw_slope_.value() + 0.0006f);
+            yaw_slope_.update_val(k_cmd_yaw_rate);
         }
         else if (input.d && !input.a)
         {
-            yaw_slope_.update_val(yaw_slope_.value() - 0.0006f);
+            yaw_slope_.update_val(-k_cmd_yaw_rate);
         }
         else
         {
@@ -321,7 +321,8 @@ public:
     const msg_cmd_t& msg() const { return msg_; }
 
 private:
-    static constexpr float k_cmd_velocity_limit = 0.8f;
+    static constexpr float k_cmd_velocity = 1.0f;
+    static constexpr float k_cmd_yaw_rate = 5.0f;
     static constexpr float k_cmd_position_hold_step = 0.00025f;
 
     msg_cmd_t msg_{};

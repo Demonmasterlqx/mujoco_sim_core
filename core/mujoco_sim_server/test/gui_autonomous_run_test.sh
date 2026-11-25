@@ -33,7 +33,7 @@ fi
 set +e
 timeout 10s "${server_bin}" \
   --model "${model_path}" \
-  --max-ticks 200 \
+  --max-ticks 1000 \
   --viewer-sync-period-ms 5 \
   --log-summary-period-ms 50 \
   >"${metrics_log_path}" 2>&1

@@ -43,12 +43,28 @@ enum AdapterState {
   ERROR = 5,
   UNREGISTERED = 6
 };
+/**
+ * @brief Describes the authoritative Server simulation lifecycle state.
+ *
+ * PAUSED is a normal local manual pause that keeps communication and liveness
+ * processing active while completed-step tick and simulation time remain
+ * unchanged. ERROR_PAUSED is terminal for ordinary client operation and cannot
+ * be resumed through manual pause control. Existing numeric values remain
+ * fixed and PAUSED is appended as value 5.
+ *
+ * 描述权威 Server 的仿真生命周期状态。
+ *
+ * PAUSED 是正常的本地手动暂停，通信和存活性处理仍然继续，completed-step tick 与
+ * simulation time 保持不变。ERROR_PAUSED 是普通客户端操作的终止错误状态，不能通过
+ * 手动暂停控制恢复。既有数值保持固定，PAUSED 以数值 5 追加。
+ */
 enum ServerState {
   SERVER_STATE_UNSPECIFIED = 0,
   IDLE = 1,
   RUNNING = 2,
   ERROR_PAUSED = 3,
-  STOPPED = 4
+  STOPPED = 4,
+  PAUSED = 5
 };
 enum class ControlPolicy {
   kZero,

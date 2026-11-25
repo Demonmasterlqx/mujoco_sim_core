@@ -1,6 +1,9 @@
 <mujoco model="dual_actuator">
   <option timestep="0.001"/>
   <worldbody>
+    <body name="static_link" pos="0 -0.2 0">
+      <geom name="static_geom" type="box" size="0.02 0.02 0.02"/>
+    </body>
     <body name="first_link" pos="0 0 0">
       <joint name="hinge" type="hinge" axis="0 0 1" limited="true" range="-180 180"/>
       <geom name="first_geom" type="capsule" size="0.02" fromto="0 0 0 0.2 0 0" mass="1"/>

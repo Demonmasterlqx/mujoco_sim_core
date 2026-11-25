@@ -18,6 +18,7 @@ add_library(${PROJECT_NAME}
   src/layout_hash.cpp
   src/stream_frame.cpp
 )
+set_target_properties(${PROJECT_NAME} PROPERTIES POSITION_INDEPENDENT_CODE ON)
 add_library(mujoco_sim::protocol ALIAS ${PROJECT_NAME})
 
 protobuf_generate(

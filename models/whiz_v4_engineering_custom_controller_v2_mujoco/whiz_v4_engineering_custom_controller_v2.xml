@@ -1,0 +1,169 @@
+<?xml version='1.0' encoding='utf-8'?>
+<mujoco model="whiz_v4_engineering_custom_controller_v2">
+  <compiler angle="radian" meshdir="." strippath="false" autolimits="true" balanceinertia="true" />
+  <option gravity="0 0 -9.81" timestep="0.002" integrator="implicitfast" />
+  <default>
+    <joint damping="0.02" armature="0.0002" />
+    <default class="visual">
+      <geom type="mesh" contype="0" conaffinity="0" group="2" />
+    </default>
+    <default class="collision">
+      <geom type="capsule" friction="1 0.005 0.0001" condim="3" group="3"
+            solref="0.02 1" solimp="0.9 0.95 0.001" rgba="0.15 0.45 0.8 0.25" />
+    </default>
+  </default>
+  <asset>
+    <mesh name="base_link" file="meshes/base_link.STL" />
+    <mesh name="j0_link" file="meshes/j0_link.STL" />
+    <mesh name="j1_link" file="meshes/j1_link.STL" />
+    <mesh name="j2_link" file="meshes/j2_link.STL" />
+    <mesh name="j3_link" file="meshes/j3_link.STL" />
+    <mesh name="j4_link" file="meshes/j4_link.STL" />
+    <mesh name="j5_link" file="meshes/j5_link.STL" />
+    <mesh name="j6_link" file="meshes/j6_link.STL" />
+  </asset>
+  <worldbody>
+    <body name="base_link">
+      <inertial mass="0.488199262047546" fullinertia="0.000784448963884 0.000548064394392 0.00123320794258 -8.89447825939e-06 -1.02198363412e-05 -5.4976343508e-07" pos="-0.0910115236275 -0.114428252971 0.0570930785984" />
+      <geom name="base_link_visual" class="visual" mesh="base_link" rgba="1 1 1 1" />
+      <geom name="base_link_collision" class="collision" type="box"
+            pos="-0.085 -0.045 0.035" size="0.097 0.057 0.05" />
+      <geom name="base_link_collision_rear_left" class="collision" type="box"
+            pos="-0.141 -0.165 0.035" size="0.041 0.04 0.05" />
+      <geom name="base_link_collision_rear_floor" class="collision" type="box"
+            pos="-0.044 -0.165 0.0275" size="0.056 0.04 0.0425" />
+      <geom name="base_link_collision_upper_front_left" class="collision"
+            fromto="-0.139 -0.028 0.1 -0.107 -0.028 0.145" size="0.012" />
+      <geom name="base_link_collision_upper_front_right" class="collision"
+            fromto="-0.139 -0.053 0.1 -0.107 -0.053 0.145" size="0.012" />
+      <geom name="base_link_collision_upper_rear_left" class="collision"
+            fromto="-0.104 -0.028 0.12 -0.072 -0.028 0.165" size="0.012" />
+      <geom name="base_link_collision_upper_rear_right" class="collision"
+            fromto="-0.104 -0.053 0.12 -0.072 -0.053 0.165" size="0.012" />
+      <body name="j0_link" pos="-0.045 -0.155 0.0959">
+        <inertial mass="0.177558429490151" fullinertia="8.06527001145e-05 0.000102813283666 0.000104212682861 -1.00728377006e-08 1.14775279387e-08 -6.19022229671e-07" pos="-5.80512650361e-05 -0.00786891965986 0.037106187436" />
+        <joint name="j0" type="hinge" axis="0 0 1" limited="true" range="-0.3 3.14159"
+               damping="0.05" armature="0.002" />
+        <geom name="j0_link_visual" class="visual" mesh="j0_link" rgba="0.698039215686 0.698039215686 0.698039215686 1" />
+        <geom name="j0_link_collision" class="collision" type="cylinder"
+              pos="0 0 0.03" size="0.05 0.044" />
+        <body name="j1_link" pos="0 0.05198 0.0455" quat="0.707105482511 -0.707108079859 0 0">
+          <inertial mass="0.22562086737292" fullinertia="0.000217631417802 0.00036612439196 0.000409469407769 -0.000118841792161 9.63462418602e-06 2.91062972708e-06" pos="-0.144936804929 -0.0833948525991 -0.047733648751" />
+          <joint name="j1" type="hinge" axis="0 0 1" limited="true" range="-0.1 1.7"
+                 damping="0.05" armature="0.001" />
+          <geom name="j1_link_visual" class="visual" mesh="j1_link" rgba="0.698039215686 0.698039215686 0.698039215686 1" />
+          <geom name="j1_link_collision" class="collision"
+                fromto="0 0 -0.04 -0.18187 -0.105 -0.04" size="0.028" />
+          <geom name="j1_link_collision_lower" class="collision"
+                fromto="-0.025 -0.012 -0.075 -0.165 -0.095 -0.075" size="0.029" />
+          <geom name="j1_link_collision_distal" class="collision"
+                fromto="-0.18187 -0.105 -0.075 -0.18187 -0.105 -0.025" size="0.032" />
+          <body name="j2_link" pos="-0.18187 -0.105 -0.0145">
+            <inertial mass="0.199022191104027" fullinertia="0.000103439131603 0.000111179062975 0.000116912224015 1.00172687424e-05 -4.53865218113e-06 6.98878622611e-07" pos="0.0752085433654 -0.0426440017049 0.0338424999448" />
+            <joint name="j2" type="hinge" axis="0 0 -1" limited="true" range="-0.1 3.14159"
+                   damping="0.05" armature="0.001" />
+            <geom name="j2_link_visual" class="visual" mesh="j2_link" rgba="0.698039215686 0.698039215686 0.698039215686 1" />
+            <geom name="j2_link_collision" class="collision"
+                  fromto="0 0 0.0345 0.05 -0.06 0.0345" size="0.022" />
+            <geom name="j2_link_collision_proximal" class="collision"
+                  fromto="0.05 -0.06 0.0345 0.088 -0.06 0.0345" size="0.029" />
+            <geom name="j2_link_collision_bridge" class="collision"
+                  fromto="0.078 -0.055 0.0345 0.094 -0.008 0.0345" size="0.021" />
+            <geom name="j2_link_collision_distal" class="collision"
+                  fromto="0.093 0 0.0345 0.1 0 0.0345" size="0.028" />
+            <body name="j3_link" pos="0.0887 0 0.0345" quat="0.707105482511 0 -0.707108079859 0">
+              <inertial mass="0.163545514411216" fullinertia="6.55240283152e-05 5.62257515496e-05 6.83464980262e-05 -1.15945431171e-08 1.70981211129e-07 7.25788323007e-07" pos="0.000911279392072 -0.000343654084326 -0.0539776418474" />
+              <joint name="j3" type="hinge" axis="0 0 -1" limited="true" range="-1.4 3.14159"
+                     damping="0.02" armature="0.0005" />
+              <geom name="j3_link_visual" class="visual" mesh="j3_link" rgba="0.898039215686 0.917647058824 0.929411764706 1" />
+              <geom name="j3_link_collision" class="collision" type="sphere"
+                    pos="0 0 -0.017" size="0.032" />
+              <geom name="j3_link_collision_arm" class="collision"
+                    fromto="0 0 -0.025 -0.005 0 -0.055" size="0.018" />
+              <geom name="j3_link_collision_distal" class="collision"
+                    fromto="-0.018 0 -0.069 0.028 0 -0.069" size="0.029" />
+              <body name="j4_link" pos="0.04352 0 -0.06928" quat="0.707105482511 0 0.707108079859 0">
+                <inertial mass="0.0800976574967828" fullinertia="3.30173543048e-05 4.49900006487e-05 3.72395018961e-05 6.80826495131e-07 2.21688608053e-07 -1.82555233383e-08" pos="0.0548637216287 -0.00320233062669 -0.0404761353424" />
+                <joint name="j4" type="hinge" axis="0 0 -1" limited="true" range="-0.5 1.7"
+                       damping="0.015" armature="0.0002" />
+                <geom name="j4_link_visual" class="visual" mesh="j4_link" rgba="1 1 1 1" />
+                <geom name="j4_link_collision" class="collision"
+                      fromto="0 0 -0.082 0 0 -0.075" size="0.023" />
+                <geom name="j4_link_collision_arm" class="collision"
+                      fromto="0 0 -0.07 0.069886 -0.004 -0.045" size="0.016" />
+                <geom name="j4_link_collision_distal" class="collision"
+                      fromto="0.069886 -0.004 -0.055 0.069886 -0.004 -0.027" size="0.024" />
+                <geom name="j4_link_collision_proximal" class="collision" type="sphere"
+                      pos="0 0 -0.0115" size="0.018" />
+                <body name="j5_link" pos="0.069886 -0.004 -0.0065">
+                  <inertial mass="0.0868689357362734" fullinertia="3.39784206174e-05 3.58896814918e-05 2.80023005638e-05 8.56792582848e-07 -8.75024491696e-08 7.96332319361e-09" pos="0.0420197790967 -0.00141923045152 -0.0421061885503" />
+                  <joint name="j5" type="hinge" axis="0 0 -1" limited="true" range="-1.05 1.9"
+                         damping="0.015" armature="0.0002" />
+                  <geom name="j5_link_visual" class="visual" mesh="j5_link" rgba="1 1 1 1" />
+                  <geom name="j5_link_collision" class="collision"
+                        fromto="0 0 -0.068 0.008 0 -0.064" size="0.02" />
+                  <geom name="j5_link_collision_arm" class="collision"
+                        fromto="0.006 0 -0.064 0.032 0.002 -0.04" size="0.015" />
+                  <geom name="j5_link_collision_distal" class="collision"
+                        fromto="0.03 0.002 -0.0395 0.066 0.002 -0.0395" size="0.024" />
+                  <geom name="j5_link_collision_side" class="collision" type="sphere"
+                        pos="0.066 -0.035 -0.0395" size="0.022" />
+                  <body name="j6_link" pos="0.083939 0.0032072 -0.0395" quat="0.50945638336 -0.509458254701 0.490361217186 -0.490359415992">
+                    <inertial mass="0.00666677140172814" fullinertia="4.8324256262e-06 2.01812224261e-06 3.69676336456e-06 -1.3016213175e-07 -2.73653755455e-16 8.85181086674e-16" pos="3.17440518316e-13 -3.4732633436e-14 0.00852217820789" />
+                    <joint name="j6" type="hinge" axis="0 0 1" limited="true" range="-3.14159 3.14159"
+                           damping="0.01" armature="0.0001" />
+                    <geom name="j6_link_visual" class="visual" mesh="j6_link" rgba="0.698039215686 0.698039215686 0.698039215686 1" />
+                    <geom name="j6_link_collision" class="collision"
+                          fromto="0 0 -0.008 0 0 0.03" size="0.018" />
+                    <geom name="j6_link_collision_crossbar" class="collision"
+                          fromto="0 -0.017 0.01 0 0.017 0.01" size="0.019" />
+                  </body>
+                </body>
+              </body>
+            </body>
+          </body>
+        </body>
+      </body>
+    </body>
+  </worldbody>
+
+  <sensor>
+    <jointpos name="j0_pos" joint="j0" />
+    <jointpos name="j1_pos" joint="j1" />
+    <jointpos name="j2_pos" joint="j2" />
+    <jointpos name="j3_pos" joint="j3" />
+    <jointpos name="j4_pos" joint="j4" />
+    <jointpos name="j5_pos" joint="j5" />
+    <jointpos name="j6_pos" joint="j6" />
+
+    <jointvel name="j0_vel" joint="j0" />
+    <jointvel name="j1_vel" joint="j1" />
+    <jointvel name="j2_vel" joint="j2" />
+    <jointvel name="j3_vel" joint="j3" />
+    <jointvel name="j4_vel" joint="j4" />
+    <jointvel name="j5_vel" joint="j5" />
+    <jointvel name="j6_vel" joint="j6" />
+
+    <actuatorfrc name="j0_tor" actuator="j0_actuator" />
+    <actuatorfrc name="j1_tor" actuator="j1_actuator" />
+    <actuatorfrc name="j2_tor" actuator="j2_actuator" />
+    <actuatorfrc name="j3_tor" actuator="j3_actuator" />
+    <actuatorfrc name="j4_tor" actuator="j4_actuator" />
+    <actuatorfrc name="j5_tor" actuator="j5_actuator" />
+    <actuatorfrc name="j6_tor" actuator="j6_actuator" />
+  </sensor>
+
+  <actuator>
+    <motor name="j0_actuator" joint="j0" gear="1" ctrlrange="-10 10" forcerange="-10 10" />
+    <motor name="j1_actuator" joint="j1" gear="1" ctrlrange="-10 10" forcerange="-10 10" />
+    <motor name="j2_actuator" joint="j2" gear="1" ctrlrange="-10 10" forcerange="-10 10" />
+    <motor name="j3_actuator" joint="j3" gear="1" ctrlrange="-10 10" forcerange="-10 10" />
+    <motor name="j4_actuator" joint="j4" gear="1" ctrlrange="-10 10" forcerange="-10 10" />
+    <motor name="j5_actuator" joint="j5" gear="1" ctrlrange="-10 10" forcerange="-10 10" />
+    <motor name="j6_actuator" joint="j6" gear="1" ctrlrange="-10 10" forcerange="-10 10" />
+  </actuator>
+
+  <keyframe>
+    <key name="home" qpos="0 0 0 0 0 0 0" />
+  </keyframe>
+</mujoco>

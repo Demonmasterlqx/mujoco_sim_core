@@ -14,12 +14,24 @@ pending value wakes the loop without placing Controller payloads in the general
 FIFO.
 
 Each loop iteration handles ordinary events, drains Commands followed by
-Faults, checks liveness, and executes at most one Step. Draining Faults last
-ensures a valid Fault wins over Commands received for the same boundary.
+Faults, merges the viewer mailbox, applies Reset and then the latest Pause/Run
+selection, checks liveness, executes at most one Step when the resulting state
+is `RUNNING`, and processes timers. Draining Faults last ensures a valid Fault
+wins over Commands received for the same boundary; Reset still clears that
+boundary's cached Command before the possible Step.
 `realtime` pacing uses a wall period of model timestep divided by
 `realtime_factor` and reanchors when late; `unthrottled` pacing performs one
 Step per iteration without a wall-clock wait. Missing Controllers, OFFLINE
 sessions, missing subscribers, and publish failures never block Step.
+
+`PAUSED` stops only physics Steps. RPCs, heartbeats, commands, liveness,
+status, Sensor/viewer management, summaries, and stop conditions remain live,
+and the loop uses its bounded poll wait rather than busy-spinning. Resuming
+reanchors pacing at the current steady-clock time and never catches up the
+paused interval. Reset restores the default state or configured
+`initial_keyframe`, zeros authoritative controls and forces, clears cached
+Controller/viewer inputs, and preserves Run/Pause mode, epoch, tick, sessions,
+layouts, ownership, and sequences. `ERROR_PAUSED` rejects both Run and Reset.
 
 Completed-step ordering remains Sensor snapshot/blocking fence, Controller
 State and Observer publication, non-blocking viewer snapshot capture, status,
@@ -28,6 +40,11 @@ Step, but external Controller computation is never in that path. Viewer
 capture uses two reusable producer buffers and a depth-one latest mailbox. A
 dedicated GUI sync worker may wait for MuJoCo rendering, while the simulation
 thread skips a frame immediately on mailbox contention or buffer exhaustion.
+Local actions use a separate depth-one Pause/Run selection and Reset latch; a
+Reset barrier clears Control/Wrench input but retains the same-batch running
+selection. Sensor workers use non-blocking Reset generations to discard queued
+and not-yet-published old frames. A send already entered at Reset may return,
+but old-generation work cannot begin another send or restore old capture state.
 
 ## Configuration
 
@@ -56,6 +73,8 @@ controller_overrides: []
 session_timeout_ms: 1000
 observer_heartbeat_period_ms: 250
 viewer_sync_period_ms: 16
+viewer_pause_run_enabled: true
+viewer_reset_enabled: true
 log_summary_period_ms: 1000
 headless: true
 ```
@@ -94,8 +113,11 @@ Only identity, model selection, run limit, activation timeout, viewer mode,
 viewer snapshot period, and logging fields have direct CLI flags; pacing and
 Controller policy are YAML fields. CLI values override their YAML
 counterparts. `viewer_sync_period_ms` is a positive `uint32` value and defaults
-to 16 ms. It is parsed and validated in headless mode but has no runtime effect
-there. `--max-ticks 0` runs until interruption or runtime shutdown.
+to 16 ms. `viewer_pause_run_enabled` and `viewer_reset_enabled` are YAML-only
+booleans and both default to true. All viewer fields are parsed and validated in
+headless mode, but no viewer action is produced there. Disabling Reset greys out
+the button and prevents a passive-copy-only reset. `--max-ticks 0` runs until
+interruption or runtime shutdown.
 
 ```bash
 mujoco-sim-server --config server.yaml --headless
@@ -106,6 +128,13 @@ Status is periodic and lifecycle changes are coalesced. Unregister, expiry, and
 replacement publish one `UNREGISTERED` tombstone before the session publisher
 and Inbox slot are removed. Terminal Server status is published before
 transport teardown.
+
+Reset keeps the completed-step tick monotonic, so a nonzero `max_ticks` cannot
+be bypassed. It may move simulation time back to the configured initial value;
+summary anchors are rebuilt so interval simulation deltas remain nonnegative.
+An `ONLINE` Controller becomes `ACTIVE_NO_COMMAND` and must send a wire Command
+with a sequence greater than its preserved pre-Reset sequence before becoming
+`ONLINE` again. Observer cadence makes the first completed post-Reset Step due.
 
 ## Periodic Runtime Summary
 

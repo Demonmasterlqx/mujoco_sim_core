@@ -106,6 +106,7 @@ struct SensorRuntime::Impl {
     double simulation_time_s = 0.0;
     std::uint64_t capture_id = 0;
     std::uint64_t dropped_since_previous = 0;
+    std::uint64_t reset_generation = 0;
   };
 
   struct Worker {
@@ -138,6 +139,7 @@ struct SensorRuntime::Impl {
     std::uint64_t latest_blocking_capture_id = 0;
     std::uint64_t completed_capture_id = 0;
     std::uint64_t acknowledged_blocking_capture_id = 0;
+    std::atomic<std::uint64_t> reset_generation{0};
     std::function<void(const std::string&)> before_capture;
     std::function<void(const std::string&)> on_blocking_wait_started;
     std::function<void(mujoco_sim::v4::StreamFrameHeader*)> before_serialize;
@@ -191,6 +193,10 @@ struct SensorRuntime::Impl {
       return std::all_of(streams.begin(), streams.end(), [](const auto& info) {
         return info.state == mujoco_sim::v4::STREAM_ERROR;
       });
+    }
+
+    bool IsCurrentGeneration(const Job& job) const noexcept {
+      return reset_generation.load(std::memory_order_acquire) == job.reset_generation;
     }
 
     void MarkDroppedLocked(std::uint64_t count = 1, std::uint64_t carried = 0) {
@@ -267,8 +273,9 @@ struct SensorRuntime::Impl {
       job.epoch = core_state.epoch;
       job.tick_id = core_state.current_tick_id;
       job.simulation_time_s = simulation_time;
+      job.reset_generation = reset_generation.load(std::memory_order_acquire);
       lock.lock();
-      if (stopping) {
+      if (stopping || !IsCurrentGeneration(job)) {
         free.push_back(std::move(job.snapshot));
         return true;
       }
@@ -354,8 +361,9 @@ struct SensorRuntime::Impl {
       acknowledged_blocking_capture_id = target_capture_id;
     }
 
-    void SetCaptureError(const std::string& error) {
+    void SetCaptureError(const std::string& error, std::uint64_t job_generation) {
       std::lock_guard lock(mutex);
+      if (reset_generation.load(std::memory_order_acquire) != job_generation) return;
       for (auto& stream : streams) {
         stream.state = mujoco_sim::v4::STREAM_ERROR;
         stream.message = error;
@@ -375,11 +383,30 @@ struct SensorRuntime::Impl {
       }
     }
 
-    void SetStreamError(StreamInfo* stream, const std::string& error) {
+    void SetStreamError(StreamInfo* stream, const std::string& error,
+                        std::uint64_t job_generation) {
       std::lock_guard lock(mutex);
-      stream->state = mujoco_sim::v4::STREAM_ERROR;
-      stream->message = error;
       ++stream->publish_errors;
+      if (reset_generation.load(std::memory_order_acquire) == job_generation) {
+        stream->state = mujoco_sim::v4::STREAM_ERROR;
+        stream->message = error;
+      }
+      condition.notify_all();
+    }
+
+    void OnSimulationReset(double simulation_time_s) {
+      reset_generation.fetch_add(1, std::memory_order_acq_rel);
+      next_due_time = simulation_time_s;
+      {
+        std::lock_guard lock(mutex);
+        DiscardQueuedJobsLocked();
+        pending_dropped = 0;
+        completed_capture_id = std::max(completed_capture_id, latest_blocking_capture_id);
+        acknowledged_blocking_capture_id =
+            std::max(acknowledged_blocking_capture_id, latest_blocking_capture_id);
+        for (auto& stream : streams)
+          stream.last_capture_tick.reset();
+      }
       condition.notify_all();
     }
 
@@ -452,6 +479,15 @@ struct SensorRuntime::Impl {
         }
         if (sample_subscribers) UpdateSubscriberCache();
         if (!has_job) continue;
+        if (!IsCurrentGeneration(job)) {
+          {
+            std::lock_guard lock(mutex);
+            completed_capture_id = std::max(completed_capture_id, job.capture_id);
+            free.push_back(std::move(job.snapshot));
+          }
+          condition.notify_all();
+          continue;
+        }
         if (!HasLiveSubscriber()) {
           {
             std::lock_guard lock(mutex);
@@ -474,22 +510,27 @@ struct SensorRuntime::Impl {
           std::string error;
           bool captured = false;
           if (before_capture) before_capture(source_name);
-          if (is_camera) {
+          if (!IsCurrentGeneration(job)) {
+            captured = false;
+          } else if (is_camera) {
             captured = renderer->Capture(*job.snapshot, metadata, &frames, &error);
           } else {
             mujoco_sim::sensor::RawFrame frame;
             captured = lidar->Capture(*job.snapshot, metadata, &frame, &error);
             if (captured) frames.push_back(std::move(frame));
           }
-          if (!captured) {
-            SetCaptureError("capture failed: " + error);
+          if (!IsCurrentGeneration(job)) {
+            // Reset invalidated this capture. The snapshot is recycled below.
+          } else if (!captured) {
+            SetCaptureError("capture failed: " + error, job.reset_generation);
           } else {
-            Publish(job.tick_id, frames);
+            Publish(job.tick_id, job.reset_generation, frames);
           }
         } catch (const std::exception& exception) {
-          SetCaptureError(std::string("sensor job threw: ") + exception.what());
+          SetCaptureError(std::string("sensor job threw: ") + exception.what(),
+                          job.reset_generation);
         } catch (...) {
-          SetCaptureError("sensor job threw");
+          SetCaptureError("sensor job threw", job.reset_generation);
         }
         {
           std::lock_guard lock(mutex);
@@ -510,8 +551,10 @@ struct SensorRuntime::Impl {
       }
     }
 
-    void Publish(std::uint64_t tick_id, const std::vector<mujoco_sim::sensor::RawFrame>& frames) {
+    void Publish(std::uint64_t tick_id, std::uint64_t job_generation,
+                 const std::vector<mujoco_sim::sensor::RawFrame>& frames) {
       for (const auto& frame : frames) {
+        if (reset_generation.load(std::memory_order_acquire) != job_generation) return;
         const auto found =
             std::find_if(streams.begin(), streams.end(), [&frame](const auto& stream) {
               return stream.descriptor.name() == frame.header.stream_name();
@@ -519,6 +562,7 @@ struct SensorRuntime::Impl {
         if (found == streams.end()) continue;
         {
           std::lock_guard lock(mutex);
+          if (reset_generation.load(std::memory_order_acquire) != job_generation) return;
           ++found->captures;
           found->last_capture_tick = tick_id;
           if (found->state == mujoco_sim::v4::STREAM_ERROR) continue;
@@ -527,34 +571,45 @@ struct SensorRuntime::Impl {
           std::string bytes;
           std::string error;
           auto frame_header = frame.header;
+          if (reset_generation.load(std::memory_order_acquire) != job_generation) return;
           if (before_serialize) before_serialize(&frame_header);
+          if (reset_generation.load(std::memory_order_acquire) != job_generation) return;
           if (!mujoco_sim::protocol::SerializeStreamFrame(frame_header, frame.payload, &bytes,
                                                           &error)) {
-            SetStreamError(&*found, error);
+            SetStreamError(&*found, error, job_generation);
             continue;
           }
           bool has_subscriber = false;
           {
             std::lock_guard lock(mutex);
+            if (reset_generation.load(std::memory_order_acquire) != job_generation) return;
             has_subscriber = found->subscribers > 0;
           }
           if (!has_subscriber) continue;
+          if (reset_generation.load(std::memory_order_acquire) != job_generation) return;
           const bool sent = found->publisher.send(bytes);
           std::lock_guard lock(mutex);
+          const bool is_current =
+              reset_generation.load(std::memory_order_acquire) == job_generation;
           if (sent) {
-            found->state = mujoco_sim::v4::STREAM_RUNNING;
-            found->message.clear();
             ++found->published;
+            if (is_current) {
+              found->state = mujoco_sim::v4::STREAM_RUNNING;
+              found->message.clear();
+            }
           } else {
-            found->state = mujoco_sim::v4::STREAM_RUNNING;
-            found->message = "eCAL rejected stream frame publish; retrying";
             ++found->publish_errors;
+            if (is_current) {
+              found->state = mujoco_sim::v4::STREAM_RUNNING;
+              found->message = "eCAL rejected stream frame publish; retrying";
+            }
             condition.notify_all();
           }
         } catch (const std::exception& exception) {
-          SetStreamError(&*found, std::string("stream publish threw: ") + exception.what());
+          SetStreamError(&*found, std::string("stream publish threw: ") + exception.what(),
+                         job_generation);
         } catch (...) {
-          SetStreamError(&*found, "stream publish threw");
+          SetStreamError(&*found, "stream publish threw", job_generation);
         }
       }
     }
@@ -795,15 +850,25 @@ bool SensorRuntime::Initialize(mujoco_sim::core::SimulationCore& core, const Ser
 
 void SensorRuntime::OnStepCompleted(mujoco_sim::core::SimulationCore& core) {
   if (!impl_->initialized) return;
-  const auto now = Clock::now();
+  ProcessTimers(Clock::now());
+  for (auto& worker : impl_->workers) {
+    worker->Enqueue(core, impl_->next_capture_id.fetch_add(1));
+  }
+}
+
+void SensorRuntime::ProcessTimers(std::chrono::steady_clock::time_point now) {
+  if (!impl_->initialized) return;
   if (now >= impl_->next_subscriber_sample) {
     for (auto& worker : impl_->workers)
       worker->RequestSubscriberSample();
     impl_->next_subscriber_sample = now + impl_->subscriber_sample_period;
   }
-  for (auto& worker : impl_->workers) {
-    worker->Enqueue(core, impl_->next_capture_id.fetch_add(1));
-  }
+}
+
+void SensorRuntime::OnSimulationReset(const mujoco_sim::core::CoreState& state) {
+  if (!impl_->initialized) return;
+  for (auto& worker : impl_->workers)
+    worker->OnSimulationReset(state.simulation_time_s);
 }
 
 void SensorRuntime::CompleteBlockingEnqueues(std::stop_token stop_token) {

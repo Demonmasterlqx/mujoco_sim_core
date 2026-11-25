@@ -10,14 +10,17 @@
 | `mujoco_sim_sensor` | 从隔离 Snapshot 捕获 headless camera 与 360 度 ray LiDAR | [查看](core/mujoco_sim_sensor/README.md) |
 | `mujoco_sim_server` | 提供 eCAL server、配置解析和图形界面 | [查看](core/mujoco_sim_server/Readme.md) |
 | `mujoco_sim_adapter_sdk` | 提供异步 Controller、Observer 与 Sensor Stream C++ Client | [查看](core/mujoco_sim_adapter/mujoco_sim_adapter_sdk/Readme.md) |
+| `mujoco_sim_hardware_interface` | 将 Protocol V4 Controller 映射为 ROS 2 Jazzy ros2_control system plugin | [查看](core/mujoco_sim_adapter/mujoco_sim_hardware_interface/Readme.md) |
 | `mujoco_sim_double_inverted_control_demo` | 使用独立 Controller adapter 控制双倒立摆 | [查看](demos/mujoco_sim_double_inverted_control_demo/README.md) |
 | `mujoco_sim_wbr_lqr_demo` | 迁移 WBR LQR 抡腿机器人控制器，提供可配置接口和完整闭环示例 | [查看](demos/mujoco_sim_wbr_lqr_demo/README.md) |
 | `mujoco_sim_dual_adapter_demo` | 在同一个 Server 中同时运行 WBR LQR 与双倒立摆 Controller | [查看](demos/mujoco_sim_dual_adapter_demo/README.md) |
 | `mujoco_sim_sensor_demo` | 四进程房间巡航、相机消费和 IMU/LiDAR ICP 建图示例 | [查看](demos/mujoco_sim_sensor_demo/README.md) |
+| `mujoco_sim_hardware_interface_demo` | 使用标准 diff_drive/IMU broadcaster 的 ROS 2 差速车闭环示例 | [查看](demos/mujoco_sim_hardware_interface_demo/README.md) |
 
 ## 构建方式
 
-使用 colcon 作为构建工具。所有包均为纯 CMake 包：
+使用 colcon 作为构建工具。仿真运行时包为纯 CMake 包；可选的 ROS 2 Control 集成包和
+对应 demo 使用 ROS 2 Jazzy ament_cmake：
 
 系统依赖统一通过 apt 安装，禁止使用 rosdep。安装前需要为 Ubuntu 24.04 配置可提供
 `ecal` 和 `python3-colcon-common-extensions` 的 apt 软件源。配置生成依赖
@@ -34,13 +37,28 @@ sudo apt install --yes \
   python3-colcon-common-extensions python3-venv python3-yaml xvfb
 ```
 
+构建 ROS 2 Control 集成还需先配置 ROS 2 Jazzy apt 软件源，然后安装：
+
 ```bash
-colcon list --topological-order
-colcon build --symlink-install --cmake-args -DBUILD_TESTING=ON
-colcon test --packages-select \
+sudo apt install --yes \
+  ros-jazzy-ament-cmake ros-jazzy-controller-manager \
+  ros-jazzy-diff-drive-controller ros-jazzy-hardware-interface \
+  ros-jazzy-geometry-msgs \
+  ros-jazzy-imu-sensor-broadcaster ros-jazzy-joint-state-broadcaster \
+  ros-jazzy-nav-msgs ros-jazzy-pluginlib ros-jazzy-rclpy \
+  ros-jazzy-realtime-tools ros-jazzy-robot-state-publisher ros-jazzy-sensor-msgs \
+  ros-jazzy-rosgraph-msgs ros-jazzy-std-msgs ros-jazzy-tf2-msgs ros-jazzy-tf2-ros
+source /opt/ros/jazzy/setup.bash
+```
+
+```bash
+colcon list --base-paths core demos --topological-order
+colcon build --base-paths core demos --symlink-install --cmake-args -DBUILD_TESTING=ON
+colcon test --base-paths core demos --packages-select \
   mujoco_sim_config mujoco_sim_protocol mujoco_sim_core mujoco_sim_sensor \
   mujoco_sim_server mujoco_sim_adapter_sdk mujoco_sim_wbr_lqr_demo \
-  mujoco_sim_sensor_demo --event-handlers console_cohesion+
+  mujoco_sim_sensor_demo mujoco_sim_hardware_interface \
+  mujoco_sim_hardware_interface_demo --event-handlers console_cohesion+
 colcon test-result --all --verbose
 ```
 
@@ -95,6 +113,11 @@ allow_every_step_observer: false
 transport_subscriber_sample_period_ms: 1000
 sensor_subscriber_sample_period_ms: 200
 viewer_sync_period_ms: 16
+viewer_control_input_enabled: true
+viewer_mouse_force_enabled: true
+viewer_pause_run_enabled: true
+viewer_reset_enabled: true
+viewer_mouse_force_timeout_ms: 100
 log_summary_period_ms: 1000
 log_level: info
 log_file: ""
@@ -110,8 +133,10 @@ YAML 中的相对路径按配置文件所在目录解析，CLI 路径按进程�
 `--server-name`、`--max-ticks` 和 `--activation-timeout-ms` 可以覆盖对应 YAML 字段；
 `--log-level`、`--log-file`、`--log-file-max-size-mb`、`--log-file-max-files` 及
 `--log-summary-period-ms` 也有 CLI 覆盖。`--viewer-sync-period-ms` 覆盖 GUI 快照采集周期；
-取值必须是 `[1, UINT32_MAX]` 内的毫秒数，默认 `16`。headless 模式仍严格解析该值，但运行时
-不使用它。其余未声明 CLI flag 的运行策略必须写入 YAML。
+取值必须是 `[1, UINT32_MAX]` 内的毫秒数，默认 `16`。
+`viewer_pause_run_enabled` 与 `viewer_reset_enabled` 仅可在 YAML 中配置，默认均为 `true`。
+headless 模式仍严格解析全部 viewer 字段，但不创建 GUI，也不会产生本地 Pause/Run/Reset
+动作。其余未声明 CLI flag 的运行策略必须写入 YAML。
 默认启动 MuJoCo 官方
 `simulate` 图形界面；远程服务、CI 或无显示环境使用 `--headless`，该模式不会初始化
 GLFW viewer。若配置 camera Stream，sensor worker 仍会初始化 EGL 或 OSMesa offscreen
@@ -120,8 +145,28 @@ OpenGL context。若 YAML 设置了 `headless: true`，可用 `--gui` 在命令�
 图形界面读取 Core 生成的隔离快照，支持官方相机旋转、平移、缩放、左右侧栏、
 渲染选项、传感器和性能面板。仿真线程以非阻塞方式使用两个固定生产缓冲和 depth-1
 latest 邮箱；锁竞争、缓冲耗尽或 GUI 变慢时允许跳过或替换显示帧。独立 GUI sync worker
-可以等待 MuJoCo viewer mutex，但仿真步进不会等待它。UI 不持有也不会修改真实
-`mjModel/mjData`，控制器所有权和异步 State/Command 行为在 GUI 与 headless 模式下完全一致。
+可以等待 MuJoCo viewer mutex，但仿真步进不会等待它。UI 不持有也不直接修改真实
+`mjModel/mjData`；白名单 GUI 输入经独立邮箱交给仿真线程应用，且不改变控制器所有权和
+异步 State/Command 语义。
+
+GUI 输入默认开启。Control Slider 与 `Clear all` 会在下一个 Step 边界产生一次性
+actuator 写入；同一边界中 GUI 后于 Adapter 写入生效，但下一条 Adapter Command 可以
+重新覆盖它。可先双击选择动态刚体，再用 `Ctrl + 右键拖动`施加
+平移扰动力或用 `Ctrl + 左键拖动`施加旋转扰动力。松开鼠标会发布清除状态；若 Viewer
+停止同步，Server 会按 `viewer_mouse_force_timeout_ms`（默认 `100` ms，最小 `1` ms）在下一
+Step 前清除残留力。GUI 输入不取得 Controller 资源所有权，也不改变 Adapter liveness；
+将对应输入字段显式设置为 `false` 可恢复纯观察行为。
+
+GUI 的 Pause 只停止 `mj_step()`：RPC、Adapter liveness、状态发布、Sensor/Viewer 管理与
+定时器仍会运行，`mujoco-sim-status --watch` 会显示 `PAUSED`，且 tick 和 simulation time
+保持不变。Run 从点击时的 steady clock 重新开始 pacing，不会追赶暂停期间的墙钟时间。
+Reset 将权威状态恢复到默认初始状态或 `initial_keyframe`，清零 control、鼠标力与旧
+Controller Command，但保留当前 Run/Pause 模式、epoch、tick、session、layout 和资源
+所有权；下一次 Step 的 tick 继续递增。Reset 后 `ONLINE` Controller 会显示为
+`ACTIVE_NO_COMMAND`，并且必须发送 sequence 大于 Reset 前最后值的新 wire Command。
+官方 SDK 的 keepalive 会继续以递增 sequence 发布最新值。`ERROR_PAUSED` 不能通过 Run
+或 Reset 恢复。将 `viewer_reset_enabled` 设为 `false` 会显式禁用 Reset 按钮并阻止被动
+viewer 副本发生本地 Reset。
 
 ## Protocol V4 运行示例
 
@@ -208,10 +253,26 @@ mujoco-sim-wbr-lqr-adapter \
 使用 adapter 的 `--ticks` 设置本地 State 上限，不要把 server 的启动总 step 上限
 当作 adapter 预算。21 个 state resource 和 6 个 command resource 均可在 adapter YAML
 中改名；控制器仍按六个固定语义槽位执行上游 LQR/FSM 逻辑。
-默认脚本会在第 1 个 Controller tick 使能底盘，并在第 2000 个 tick 切换到中腿长后
-持续站立。控制方程固定到 `wbr_mujoco@1d895574`，输入快照语义对齐
+默认脚本会在第 1 个 Controller tick 使能底盘；可继续配置 Q/E/F 的确定性区间来选择
+腿长目标。控制主体固定到 `wbr_mujoco@1d895574`，另有下述固定速度/偏航率的显式
+本地映射补丁；输入快照语义对齐
 `mujoco_interface@a2501454`；包内 6000-Step MuJoCo 闭环测试验证最终持续处于
 `NORMAL`、机身抬升、俯仰受控且水平漂移有界。
+
+需要实时键盘控制时，选择标准输入终端模式：
+
+```bash
+mujoco-sim-wbr-lqr-adapter \
+  --config install/mujoco_sim_wbr_lqr_demo/share/mujoco_sim_wbr_lqr_demo/config/wbr_lqr.yaml \
+  --input-mode cin \
+  --cin-hold-ticks 200
+```
+
+每个 W/A/S/D 字符会作用于可配置的 `input.cin.hold_ticks` 次 Controller update
+（默认 200 次，1 kHz 控制周期下约 200 ms），按住时终端自动重复会刷新对应方向。
+W/S 分别给出 `+2/-2 m/s`，A/D 分别给出 `+1/-1 rad/ms`（即 `+1000/-1000 rad/s`）；
+相反方向同时有效时输入为中性。Q/E/F 调整腿长，Space 切换底盘，X 清除运动计时，
+Esc 安全退出。cin 模式要求前台交互式 TTY，输入跟随终端焦点，不读取系统全局键盘事件。
 
 ## Dual Adapter Demo
 

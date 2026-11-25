@@ -302,6 +302,8 @@ const char* AdapterEventName(mujoco_sim::core::AdapterChangeKind kind) {
       return "adapter_server_failed";
     case mujoco_sim::core::AdapterChangeKind::kReplaced:
       return "adapter_replaced";
+    case mujoco_sim::core::AdapterChangeKind::kSimulationReset:
+      return "simulation_reset";
   }
   return "adapter_changed";
 }
@@ -317,6 +319,7 @@ SimulationLoop::SimulationLoop(ServerConfig config, std::shared_ptr<spdlog::logg
       transport_(transport),
       viewer_(viewer),
       core_(CoreOptionsFor(config_)),
+      viewer_input_state_(std::chrono::milliseconds(config_.viewer_mouse_force_timeout_ms)),
       sensor_runtime_(std::make_unique<SensorRuntime>()) {}
 
 SimulationLoop::~SimulationLoop() {
@@ -495,16 +498,34 @@ void SimulationLoop::Run(std::stop_token stop) noexcept {
 
     while (!stop_requested_.load(std::memory_order_acquire) && !stop.stop_requested() &&
            eCAL::Ok()) {
+      const auto state_before_wait = core_.state();
+      const bool physics_running = state_before_wait.server_state == mujoco_sim::core::RUNNING;
       const bool unthrottled = config_.pacing_mode == "unthrottled";
-      auto deadline = unthrottled ? Clock::now() : std::min(next_step_, Clock::now() + kPollPeriod);
+      const auto now_for_deadline = Clock::now();
+      const auto deadline =
+          physics_running ? (unthrottled ? now_for_deadline
+                                         : std::min(next_step_, now_for_deadline + kPollPeriod))
+                          : now_for_deadline + kPollPeriod;
       for (auto& event : queue_.WaitUntil(deadline)) {
         HandleEvent(std::move(event));
       }
       now = Clock::now();
       DrainControllerInputs(now);
+      DrainViewerInputs();
+      HandleViewerSimulationActions(now);
       ApplyEffects(core_.CheckDeadlines(now));
-      if (unthrottled || now >= next_step_) {
-        ApplyEffects(core_.Step());
+      const bool can_step = core_.state().server_state == mujoco_sim::core::RUNNING;
+      if (can_step && (unthrottled || now >= next_step_)) {
+        auto prepared = viewer_input_state_.PrepareStep(now);
+        if (prepared.wrench_expired) {
+          logger_->warn("event=viewer_mouse_force_expired active_bodies={} age_ms={} timeout_ms={}",
+                        prepared.expired_body_count, prepared.wrench_age.count(),
+                        config_.viewer_mouse_force_timeout_ms);
+        }
+        auto step_effects = core_.Step(prepared.input);
+        const bool step_completed = step_effects.step_completed.has_value();
+        ApplyEffects(std::move(step_effects));
+        if (step_completed) viewer_input_state_.CommitCompletedStep();
         if (unthrottled) {
           next_step_ = now;
         } else if (now - next_step_ > step_period_) {
@@ -626,6 +647,12 @@ void SimulationLoop::DrainControllerInputs(Clock::time_point now) {
   }
   for (auto& fault : command_inbox_.DrainFaults()) {
     ApplyEffects(core_.SubmitFault(fault).effects);
+  }
+}
+
+void SimulationLoop::DrainViewerInputs() {
+  if (viewer_ != nullptr && viewer_->TryConsumeInput(&viewer_input_batch_)) {
+    viewer_input_state_.Merge(viewer_input_batch_);
   }
 }
 
@@ -779,6 +806,7 @@ void SimulationLoop::PublishSummary(Clock::time_point now,
 }
 
 void SimulationLoop::ProcessTimers(Clock::time_point now) {
+  sensor_runtime_->ProcessTimers(now);
   auto state = core_.state();
   if (config_.max_ticks && state.current_tick_id >= config_.max_ticks) {
     RequestStop("max_ticks");

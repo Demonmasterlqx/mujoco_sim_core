@@ -10,6 +10,7 @@
 #include "internal/model_runtime.hpp"
 #include "internal/layout_fingerprint.hpp"
 #include "internal/resource_catalog.hpp"
+#include "internal/simulation_core_impl.hpp"
 #include "internal/snapshot_manager.hpp"
 namespace mujoco_sim::core {
 namespace {
@@ -31,6 +32,10 @@ bool FaultCodeValid(FaultCode code) {
   return code == FaultCode::kControllerError || code == FaultCode::kInvalidOutput ||
          code == FaultCode::kInternalControllerError;
 }
+bool CommandScalarValid(const ResourceDescriptor& descriptor, double value) {
+  return std::isfinite(value) && (!descriptor.has_ctrl_range() || (value >= descriptor.ctrl_min() &&
+                                                                   value <= descriptor.ctrl_max()));
+}
 AdapterChange Change(AdapterChangeKind kind, std::string id, AdapterRole role,
                      std::uint64_t session, AdapterState old_state, AdapterState new_state,
                      std::uint64_t tick, std::string message = {}) {
@@ -38,405 +43,362 @@ AdapterChange Change(AdapterChangeKind kind, std::string id, AdapterRole role,
           new_state, std::move(message), tick};
 }
 }  // namespace
-class SimulationCore::Impl {
- public:
-  struct Controller {
-    std::string id;
-    std::uint64_t session = 0;
-    AdapterState state = PROVISIONAL;
-    ResourceLayout layout;
-    ControllerRuntimePolicy policy;
-    std::chrono::steady_clock::time_point registered_at{}, activated_at{}, last_command_at{},
-        offline_at{};
-    std::uint64_t activation_tick = 0, state_since_tick = 0, state_sequence = 0,
-                  last_command_sequence = 0, timeout_count = 0, next_period = 1;
-    std::vector<double> last_command;
-    bool command_dirty = false;
-    std::optional<ControlPolicy> pending_policy;
-    std::string message;
-  };
-  struct Observer {
-    std::string id;
-    std::uint64_t session = 0;
-    AdapterState state = PROVISIONAL;
-    ResourceLayout layout;
-    ObservationDelivery delivery;
-    std::uint32_t timeout_ms = 1000;
-    std::chrono::steady_clock::time_point registered_at{}, last_heartbeat_at{};
-    std::uint64_t activation_tick = 0, state_since_tick = 0, sequence = 0, timeout_count = 0,
-                  next_period = 1;
-    std::optional<std::uint64_t> last_delivery_tick;
-    std::string message;
-  };
-  explicit Impl(CoreOptions value)
-      : options(std::move(value)),
-        model(std::make_unique<internal::ModelRuntime>()),
-        catalog(std::make_unique<internal::ResourceCatalog>()),
-        snapshots(std::make_unique<detail::SnapshotManager>()) {}
-  ResourceLayout MakeLayout(const RegisterAdapterRequest& request, ErrorCode* code,
-                            std::string* message) const {
-    ResourceLayout result;
-    std::unordered_set<std::string> names;
-    for (const auto& name : request.observation_names()) {
-      if (!names.insert(name).second) {
-        *code = INVALID_ARGUMENT;
-        *message = "duplicate observation: " + name;
-        return {};
-      }
-      const auto* descriptor = catalog->FindObservation(name);
-      if (!descriptor) {
-        *code = NOT_FOUND;
-        *message = "unknown observation sensor: " + name;
-        return {};
-      }
-      result.observation_spans.push_back(
-          {result.observation_scalar_count, descriptor->dimension()});
-      result.observation_scalar_count += descriptor->dimension();
-      result.observations_.push_back(*descriptor);
+SimulationCore::Impl::Impl(CoreOptions value)
+    : options(std::move(value)),
+      model(std::make_unique<internal::ModelRuntime>()),
+      catalog(std::make_unique<internal::ResourceCatalog>()),
+      snapshots(std::make_unique<detail::SnapshotManager>()) {}
+
+ResourceLayout SimulationCore::Impl::MakeLayout(const RegisterAdapterRequest& request,
+                                                ErrorCode* code, std::string* message) const {
+  ResourceLayout result;
+  std::unordered_set<std::string> names;
+  for (const auto& name : request.observation_names()) {
+    if (!names.insert(name).second) {
+      *code = INVALID_ARGUMENT;
+      *message = "duplicate observation: " + name;
+      return {};
     }
-    names.clear();
-    for (const auto& name : request.command_names()) {
-      if (!names.insert(name).second) {
-        *code = INVALID_ARGUMENT;
-        *message = "duplicate command: " + name;
-        return {};
-      }
-      const auto* descriptor = catalog->FindCommand(name);
-      if (!descriptor) {
-        *code = NOT_FOUND;
-        *message = "unknown command actuator: " + name;
-        return {};
-      }
-      result.command_spans.push_back({result.command_scalar_count, descriptor->dimension()});
-      result.command_scalar_count += descriptor->dimension();
-      result.commands_.push_back(*descriptor);
+    const auto* descriptor = catalog->FindObservation(name);
+    if (!descriptor) {
+      *code = NOT_FOUND;
+      *message = "unknown observation sensor: " + name;
+      return {};
     }
-    result.fingerprint = internal::ComputeLayoutFingerprint(result);
-    *code = OK;
-    return result;
+    result.observation_spans.push_back({result.observation_scalar_count, descriptor->dimension()});
+    result.observation_scalar_count += descriptor->dimension();
+    result.observations_.push_back(*descriptor);
   }
-  std::vector<double> Read(const ResourceLayout& layout) const {
-    std::vector<double> values;
-    values.reserve(layout.observation_scalar_count);
-    const mjModel* m = model->model_ptr();
-    const mjData* d = model->data_ptr();
-    for (const auto& observation : layout.observations()) {
-      const int sensor = observation.mujoco_id();
-      const int address = m->sensor_adr[sensor];
-      for (int i = 0; i < m->sensor_dim[sensor]; ++i)
-        values.push_back(static_cast<double>(d->sensordata[address + i]));
+  names.clear();
+  for (const auto& name : request.command_names()) {
+    if (!names.insert(name).second) {
+      *code = INVALID_ARGUMENT;
+      *message = "duplicate command: " + name;
+      return {};
     }
-    return values;
-  }
-  bool Due(const ObservationDelivery& delivery, std::uint64_t activation_tick,
-           std::uint64_t next_period) const {
-    if (delivery.has_every_n_steps())
-      return current_tick > activation_tick &&
-             (current_tick - activation_tick) % delivery.every_n_steps() == 0;
-    const long double elapsed =
-        static_cast<long double>(current_tick - activation_tick) * model->timestep();
-    return elapsed + 1e-15L >= static_cast<long double>(next_period) * delivery.period_s();
-  }
-  ObservationDelivery EffectiveDelivery(ObservationDelivery delivery) const {
-    const double minimum_period = 1.0 / options.controller_state_max_rate_hz;
-    if (delivery.has_period_s()) {
-      delivery.set_period_s(std::max(delivery.period_s(), minimum_period));
-      return delivery;
+    const auto* descriptor = catalog->FindCommand(name);
+    if (!descriptor) {
+      *code = NOT_FOUND;
+      *message = "unknown command actuator: " + name;
+      return {};
     }
-    const auto minimum_steps =
-        static_cast<std::uint32_t>(std::max(1.0, std::ceil(minimum_period / model->timestep())));
-    delivery.set_every_n_steps(std::max(delivery.every_n_steps(), minimum_steps));
+    result.command_spans.push_back({result.command_scalar_count, descriptor->dimension()});
+    result.command_scalar_count += descriptor->dimension();
+    result.commands_.push_back(*descriptor);
+  }
+  result.fingerprint = internal::ComputeLayoutFingerprint(result);
+  *code = OK;
+  return result;
+}
+std::vector<double> SimulationCore::Impl::Read(const ResourceLayout& layout) const {
+  std::vector<double> values;
+  values.reserve(layout.observation_scalar_count);
+  const mjModel* m = model->model_ptr();
+  const mjData* d = model->data_ptr();
+  for (const auto& observation : layout.observations()) {
+    const int sensor = observation.mujoco_id();
+    const int address = m->sensor_adr[sensor];
+    for (int i = 0; i < m->sensor_dim[sensor]; ++i)
+      values.push_back(static_cast<double>(d->sensordata[address + i]));
+  }
+  return values;
+}
+bool SimulationCore::Impl::Due(const ObservationDelivery& delivery, std::uint64_t activation_tick,
+                               std::uint64_t next_period) const {
+  if (delivery.has_every_n_steps())
+    return current_tick > activation_tick &&
+           (current_tick - activation_tick) % delivery.every_n_steps() == 0;
+  const long double elapsed =
+      static_cast<long double>(current_tick - activation_tick) * model->timestep();
+  return elapsed + 1e-15L >= static_cast<long double>(next_period) * delivery.period_s();
+}
+ObservationDelivery SimulationCore::Impl::EffectiveDelivery(ObservationDelivery delivery) const {
+  const double minimum_period = 1.0 / options.controller_state_max_rate_hz;
+  if (delivery.has_period_s()) {
+    delivery.set_period_s(std::max(delivery.period_s(), minimum_period));
     return delivery;
   }
-  ControllerRuntimePolicy PolicyFor(std::string_view adapter_id) const {
-    ControllerRuntimePolicy policy;
-    policy.command_timeout_ms = options.command_timeout_ms;
-    policy.command_keepalive_ms = options.command_keepalive_ms;
-    policy.offline_session_expire_ms = options.offline_session_expire_ms;
-    policy.state_delivery = EffectiveDelivery(options.controller_state_delivery);
-    policy.startup_policy = options.startup_policy;
-    policy.offline_policy = options.offline_policy;
-    policy.error_policy = options.error_policy;
-    policy.release_policy = options.release_policy;
-    const auto found =
-        std::find_if(options.controller_overrides.begin(), options.controller_overrides.end(),
-                     [adapter_id](const auto& value) { return value.adapter_id == adapter_id; });
-    if (found == options.controller_overrides.end()) return policy;
-    policy.command_timeout_ms = found->command_timeout_ms;
-    policy.command_keepalive_ms = found->command_keepalive_ms;
-    policy.offline_session_expire_ms = found->offline_session_expire_ms;
-    policy.state_delivery = EffectiveDelivery(found->state_delivery);
-    policy.startup_policy = found->startup_policy;
-    policy.offline_policy = found->offline_policy;
-    policy.error_policy = found->error_policy;
-    policy.release_policy = found->release_policy;
-    return policy;
+  const auto minimum_steps =
+      static_cast<std::uint32_t>(std::max(1.0, std::ceil(minimum_period / model->timestep())));
+  delivery.set_every_n_steps(std::max(delivery.every_n_steps(), minimum_steps));
+  return delivery;
+}
+ControllerRuntimePolicy SimulationCore::Impl::PolicyFor(std::string_view adapter_id) const {
+  ControllerRuntimePolicy policy;
+  policy.command_timeout_ms = options.command_timeout_ms;
+  policy.command_keepalive_ms = options.command_keepalive_ms;
+  policy.offline_session_expire_ms = options.offline_session_expire_ms;
+  policy.state_delivery = EffectiveDelivery(options.controller_state_delivery);
+  policy.startup_policy = options.startup_policy;
+  policy.offline_policy = options.offline_policy;
+  policy.error_policy = options.error_policy;
+  policy.release_policy = options.release_policy;
+  const auto found =
+      std::find_if(options.controller_overrides.begin(), options.controller_overrides.end(),
+                   [adapter_id](const auto& value) { return value.adapter_id == adapter_id; });
+  if (found == options.controller_overrides.end()) return policy;
+  policy.command_timeout_ms = found->command_timeout_ms;
+  policy.command_keepalive_ms = found->command_keepalive_ms;
+  policy.offline_session_expire_ms = found->offline_session_expire_ms;
+  policy.state_delivery = EffectiveDelivery(found->state_delivery);
+  policy.startup_policy = found->startup_policy;
+  policy.offline_policy = found->offline_policy;
+  policy.error_policy = found->error_policy;
+  policy.release_policy = found->release_policy;
+  return policy;
+}
+void SimulationCore::Impl::QueuePolicy(const Controller& controller, ControlPolicy policy) {
+  if (policy != ControlPolicy::kZero) return;
+  for (const auto& command : controller.layout.commands())
+    queued_policy_writes.push_back({command.mujoco_id(), 0.0});
+}
+bool SimulationCore::Impl::CommandValuesValid(const Controller& controller,
+                                              const ControllerCommand& command) const {
+  for (std::size_t resource = 0; resource < controller.layout.commands_.size(); ++resource) {
+    const auto& descriptor = controller.layout.commands_[resource];
+    const auto span = controller.layout.command_spans[resource];
+    for (std::size_t index = span.offset; index < span.offset + span.dimension; ++index) {
+      if (!CommandScalarValid(descriptor, command.commands[index])) return false;
+    }
   }
-  void QueuePolicy(const Controller& controller, ControlPolicy policy) {
-    if (policy != ControlPolicy::kZero) return;
-    for (const auto& command : controller.layout.commands())
-      queued_policy_writes.push_back({command.mujoco_id(), 0.0});
+  return true;
+}
+void SimulationCore::Impl::ApplyControllerWrites() {
+  if (!queued_policy_writes.empty()) {
+    model->ApplyActuatorWrites(queued_policy_writes);
+    queued_policy_writes.clear();
   }
-  bool CommandValuesValid(const Controller& controller, const ControllerCommand& command) const {
-    for (std::size_t resource = 0; resource < controller.layout.commands_.size(); ++resource) {
-      const auto& descriptor = controller.layout.commands_[resource];
-      const auto span = controller.layout.command_spans[resource];
-      for (std::size_t index = span.offset; index < span.offset + span.dimension; ++index) {
-        const double value = command.commands[index];
-        if (!std::isfinite(value)) return false;
-        if (descriptor.has_ctrl_range() &&
-            (value < descriptor.ctrl_min() || value > descriptor.ctrl_max()))
-          return false;
+  for (auto& [id, controller] : controllers) {
+    if (controller.command_dirty) {
+      std::vector<internal::ValidatedActuatorWrite> writes;
+      for (std::size_t index = 0; index < controller.last_command.size(); ++index)
+        writes.push_back(
+            {controller.layout.commands_[index].mujoco_id(), controller.last_command[index]});
+      model->ApplyActuatorWrites(writes);
+      controller.command_dirty = false;
+      controller.pending_policy.reset();
+    } else if (controller.pending_policy) {
+      if (*controller.pending_policy == ControlPolicy::kZero) {
+        std::vector<int> ids;
+        for (const auto& descriptor : controller.layout.commands_)
+          ids.push_back(descriptor.mujoco_id());
+        model->ZeroActuators(ids);
       }
-    }
-    return true;
-  }
-  void ApplyControllerWrites() {
-    if (!queued_policy_writes.empty()) {
-      model->ApplyActuatorWrites(queued_policy_writes);
-      queued_policy_writes.clear();
-    }
-    for (auto& [id, controller] : controllers) {
-      if (controller.command_dirty) {
-        std::vector<internal::ValidatedActuatorWrite> writes;
-        for (std::size_t index = 0; index < controller.last_command.size(); ++index)
-          writes.push_back(
-              {controller.layout.commands_[index].mujoco_id(), controller.last_command[index]});
-        model->ApplyActuatorWrites(writes);
-        controller.command_dirty = false;
-        controller.pending_policy.reset();
-      } else if (controller.pending_policy) {
-        if (*controller.pending_policy == ControlPolicy::kZero) {
-          std::vector<int> ids;
-          for (const auto& descriptor : controller.layout.commands_)
-            ids.push_back(descriptor.mujoco_id());
-          model->ZeroActuators(ids);
-        }
-        controller.pending_policy.reset();
-      }
+      controller.pending_policy.reset();
     }
   }
-  std::vector<ControllerStateFrame> BuildControllerStates(double time) {
-    std::vector<ControllerStateFrame> frames;
-    for (auto& [id, controller] : controllers) {
-      const bool publishes = controller.state == ACTIVE_NO_COMMAND || controller.state == ONLINE ||
-                             controller.state == OFFLINE;
-      if (!publishes || !Due(controller.policy.state_delivery, controller.activation_tick,
-                             controller.next_period))
-        continue;
-      ControllerStateFrame frame;
-      frame.identity = {
-          {controller.session, epoch}, current_tick, controller.layout.fingerprint, time};
-      frame.sequence = ++controller.state_sequence;
-      frame.observations = Read(controller.layout);
-      frames.push_back(std::move(frame));
-      if (controller.policy.state_delivery.has_period_s()) ++controller.next_period;
-    }
-    return frames;
+}
+std::vector<ControllerStateFrame> SimulationCore::Impl::BuildControllerStates(double time) {
+  std::vector<ControllerStateFrame> frames;
+  for (auto& [id, controller] : controllers) {
+    const bool publishes = controller.state == ACTIVE_NO_COMMAND || controller.state == ONLINE ||
+                           controller.state == OFFLINE;
+    if (!publishes ||
+        !Due(controller.policy.state_delivery, controller.activation_tick, controller.next_period))
+      continue;
+    ControllerStateFrame frame;
+    frame.identity = {
+        {controller.session, epoch}, current_tick, controller.layout.fingerprint, time};
+    frame.sequence = ++controller.state_sequence;
+    frame.observations = Read(controller.layout);
+    frames.push_back(std::move(frame));
+    if (controller.policy.state_delivery.has_period_s()) ++controller.next_period;
   }
-  std::vector<ObservationFrame> BuildObserverFrames(double time) {
-    std::vector<ObservationFrame> frames;
-    for (auto& [id, observer] : observers) {
-      if (observer.state != ONLINE) continue;
-      const bool first_delivery = !observer.last_delivery_tick;
-      const bool due =
-          first_delivery ||
-          (observer.delivery.has_every_n_steps()
-               ? current_tick - *observer.last_delivery_tick >= observer.delivery.every_n_steps()
-               : Due(observer.delivery, observer.activation_tick, observer.next_period));
-      if (!due) continue;
-      ObservationFrame frame;
-      frame.identity = {{observer.session, epoch}, current_tick, observer.layout.fingerprint, time};
-      frame.sequence = ++observer.sequence;
-      frame.observations = Read(observer.layout);
-      frames.push_back(std::move(frame));
-      observer.last_delivery_tick = current_tick;
-      if (observer.delivery.has_period_s()) {
-        if (first_delivery)
-          observer.activation_tick = current_tick;
-        else
-          ++observer.next_period;
-      }
-    }
-    return frames;
-  }
-  void CheckControllerDeadlines(std::chrono::steady_clock::time_point now, EngineEffects* effects,
-                                std::vector<std::string>* erase) {
-    for (auto& [id, controller] : controllers) {
-      if (controller.state == PROVISIONAL &&
-          now - controller.registered_at >
-              std::chrono::milliseconds(options.activation_timeout_ms)) {
-        erase->push_back(id);
-        effects->adapter_changes.push_back(Change(AdapterChangeKind::kActivationExpired, id,
-                                                  CONTROLLER, controller.session, PROVISIONAL,
-                                                  UNREGISTERED, current_tick));
-        continue;
-      }
-      const bool command_live = controller.state == ACTIVE_NO_COMMAND || controller.state == ONLINE;
-      if (command_live && now - controller.last_command_at >
-                              std::chrono::milliseconds(controller.policy.command_timeout_ms)) {
-        const auto old = controller.state;
-        controller.state = OFFLINE;
-        controller.offline_at = now;
-        controller.state_since_tick = current_tick;
-        ++controller.timeout_count;
-        controller.message = "controller command timed out";
-        controller.pending_policy = controller.policy.offline_policy;
-        controller.command_dirty = false;
-        effects->adapter_changes.push_back(Change(AdapterChangeKind::kTimedOut, id, CONTROLLER,
-                                                  controller.session, old, OFFLINE, current_tick,
-                                                  controller.message));
-      } else if (controller.state == OFFLINE && controller.policy.offline_session_expire_ms > 0 &&
-                 now - controller.offline_at >
-                     std::chrono::milliseconds(controller.policy.offline_session_expire_ms)) {
-        erase->push_back(id);
-        QueuePolicy(controller, controller.policy.release_policy);
-        effects->adapter_changes.push_back(Change(AdapterChangeKind::kUnregistered, id, CONTROLLER,
-                                                  controller.session, OFFLINE, UNREGISTERED,
-                                                  current_tick, "offline session expired"));
-      }
+  return frames;
+}
+std::vector<ObservationFrame> SimulationCore::Impl::BuildObserverFrames(double time) {
+  std::vector<ObservationFrame> frames;
+  for (auto& [id, observer] : observers) {
+    if (observer.state != ONLINE) continue;
+    const bool first_delivery = !observer.last_delivery_tick;
+    const bool due =
+        first_delivery ||
+        (observer.delivery.has_every_n_steps()
+             ? current_tick - *observer.last_delivery_tick >= observer.delivery.every_n_steps()
+             : Due(observer.delivery, observer.activation_tick, observer.next_period));
+    if (!due) continue;
+    ObservationFrame frame;
+    frame.identity = {{observer.session, epoch}, current_tick, observer.layout.fingerprint, time};
+    frame.sequence = ++observer.sequence;
+    frame.observations = Read(observer.layout);
+    frames.push_back(std::move(frame));
+    observer.last_delivery_tick = current_tick;
+    if (observer.delivery.has_period_s()) {
+      if (first_delivery)
+        observer.activation_tick = current_tick;
+      else
+        ++observer.next_period;
     }
   }
-  void CheckObserverDeadlines(std::chrono::steady_clock::time_point now, EngineEffects* effects,
-                              std::vector<std::string>* erase) {
-    for (auto& [id, observer] : observers) {
-      if (observer.state == PROVISIONAL &&
-          now - observer.registered_at > std::chrono::milliseconds(options.activation_timeout_ms)) {
-        erase->push_back(id);
-        effects->adapter_changes.push_back(Change(AdapterChangeKind::kActivationExpired, id,
-                                                  OBSERVER, observer.session, PROVISIONAL,
-                                                  UNREGISTERED, current_tick));
-      } else if (observer.state == ONLINE && now - observer.last_heartbeat_at >
-                                                 std::chrono::milliseconds(observer.timeout_ms)) {
-        observer.state = OFFLINE;
-        observer.state_since_tick = current_tick;
-        ++observer.timeout_count;
-        observer.message = "observer heartbeat timed out";
-        effects->adapter_changes.push_back(Change(AdapterChangeKind::kTimedOut, id, OBSERVER,
-                                                  observer.session, ONLINE, OFFLINE, current_tick,
-                                                  observer.message));
-      }
+  return frames;
+}
+void SimulationCore::Impl::CheckControllerDeadlines(std::chrono::steady_clock::time_point now,
+                                                    EngineEffects* effects,
+                                                    std::vector<std::string>* erase) {
+  for (auto& [id, controller] : controllers) {
+    if (controller.state == PROVISIONAL &&
+        now - controller.registered_at > std::chrono::milliseconds(options.activation_timeout_ms)) {
+      erase->push_back(id);
+      effects->adapter_changes.push_back(Change(AdapterChangeKind::kActivationExpired, id,
+                                                CONTROLLER, controller.session, PROVISIONAL,
+                                                UNREGISTERED, current_tick));
+      continue;
+    }
+    const bool command_live = controller.state == ACTIVE_NO_COMMAND || controller.state == ONLINE;
+    if (command_live && now - controller.last_command_at >
+                            std::chrono::milliseconds(controller.policy.command_timeout_ms)) {
+      const auto old = controller.state;
+      controller.state = OFFLINE;
+      controller.offline_at = now;
+      controller.state_since_tick = current_tick;
+      ++controller.timeout_count;
+      controller.message = "controller command timed out";
+      controller.pending_policy = controller.policy.offline_policy;
+      controller.command_dirty = false;
+      effects->adapter_changes.push_back(Change(AdapterChangeKind::kTimedOut, id, CONTROLLER,
+                                                controller.session, old, OFFLINE, current_tick,
+                                                controller.message));
+    } else if (controller.state == OFFLINE && controller.policy.offline_session_expire_ms > 0 &&
+               now - controller.offline_at >
+                   std::chrono::milliseconds(controller.policy.offline_session_expire_ms)) {
+      erase->push_back(id);
+      QueuePolicy(controller, controller.policy.release_policy);
+      effects->adapter_changes.push_back(Change(AdapterChangeKind::kUnregistered, id, CONTROLLER,
+                                                controller.session, OFFLINE, UNREGISTERED,
+                                                current_tick, "offline session expired"));
     }
   }
-  EngineResult<RegisterAdapterResponse> RegisterController(
-      const RegisterAdapterRequest& request, ResourceLayout layout,
-      std::chrono::steady_clock::time_point now) {
-    EngineResult<RegisterAdapterResponse> out;
-    auto& response = out.response;
-    if (layout.commands_.empty()) {
-      response.set_code(INVALID_ARGUMENT);
-      response.set_message("controller requires at least one command");
-      return out;
+}
+void SimulationCore::Impl::CheckObserverDeadlines(std::chrono::steady_clock::time_point now,
+                                                  EngineEffects* effects,
+                                                  std::vector<std::string>* erase) {
+  for (auto& [id, observer] : observers) {
+    if (observer.state == PROVISIONAL &&
+        now - observer.registered_at > std::chrono::milliseconds(options.activation_timeout_ms)) {
+      erase->push_back(id);
+      effects->adapter_changes.push_back(Change(AdapterChangeKind::kActivationExpired, id, OBSERVER,
+                                                observer.session, PROVISIONAL, UNREGISTERED,
+                                                current_tick));
+    } else if (observer.state == ONLINE &&
+               now - observer.last_heartbeat_at > std::chrono::milliseconds(observer.timeout_ms)) {
+      MarkObserverTimedOut(&observer);
+      effects->adapter_changes.push_back(Change(AdapterChangeKind::kTimedOut, id, OBSERVER,
+                                                observer.session, ONLINE, OFFLINE, current_tick,
+                                                observer.message));
     }
-    auto existing = controllers.find(request.adapter_id());
-    if (observers.contains(request.adapter_id()) ||
-        (existing != controllers.end() && existing->second.state != OFFLINE &&
-         existing->second.state != ERROR)) {
-      response.set_code(ALREADY_EXISTS);
-      response.set_message("adapter ID is already registered");
-      return out;
-    }
-    for (const auto& descriptor : layout.commands_) {
-      const auto owner = owners.find(descriptor.name());
-      if (owner != owners.end() && owner->second != request.adapter_id()) {
-        response.set_code(RESOURCE_CONFLICT);
-        response.set_message("command resource is already owned: " + descriptor.name());
-        return out;
-      }
-    }
-    std::optional<std::uint64_t> replaced;
-    if (existing != controllers.end()) {
-      replaced = existing->second.session;
-      const auto old_state = existing->second.state;
-      QueuePolicy(existing->second, existing->second.policy.release_policy);
-      sessions.erase(existing->second.session);
-      for (const auto& descriptor : existing->second.layout.commands_)
-        owners.erase(descriptor.name());
-      controllers.erase(existing);
-      out.effects.adapter_changes.push_back(
-          Change(AdapterChangeKind::kUnregistered, request.adapter_id(), CONTROLLER, *replaced,
-                 old_state, UNREGISTERED, current_tick, "session replaced"));
-    }
-    Controller controller;
-    controller.id = request.adapter_id();
-    controller.session = next_session++;
-    controller.layout = std::move(layout);
-    controller.registered_at = now;
-    controller.state_since_tick = current_tick;
-    controller.policy = PolicyFor(request.adapter_id());
-    const auto session = controller.session;
-    for (const auto& descriptor : controller.layout.commands_)
-      owners[descriptor.name()] = controller.id;
-    sessions[session] = {CONTROLLER, controller.id};
-    controllers.emplace(controller.id, std::move(controller));
-    auto& stored = controllers.at(request.adapter_id());
-    response.set_adapter_id(stored.id);
-    response.set_role(CONTROLLER);
-    response.set_session_id(session);
-    response.set_epoch(epoch);
-    response.layout_ = stored.layout;
-    response.set_state(PROVISIONAL);
-    response.controller_policy = stored.policy;
-    auto change = Change(replaced ? AdapterChangeKind::kReplaced : AdapterChangeKind::kRegistered,
-                         stored.id, CONTROLLER, session, UNREGISTERED, PROVISIONAL, current_tick);
-    change.previous_session_id = replaced;
-    out.effects.adapter_changes.push_back(std::move(change));
+  }
+}
+void SimulationCore::Impl::MarkObserverTimedOut(Observer* observer) {
+  observer->state = OFFLINE;
+  observer->state_since_tick = current_tick;
+  ++observer->timeout_count;
+  observer->message = "observer heartbeat timed out";
+}
+EngineResult<RegisterAdapterResponse> SimulationCore::Impl::RegisterController(
+    const RegisterAdapterRequest& request, ResourceLayout layout,
+    std::chrono::steady_clock::time_point now) {
+  EngineResult<RegisterAdapterResponse> out;
+  auto& response = out.response;
+  if (layout.commands_.empty()) {
+    response.set_code(INVALID_ARGUMENT);
+    response.set_message("controller requires at least one command");
     return out;
   }
-  EngineResult<RegisterAdapterResponse> RegisterObserver(
-      const RegisterAdapterRequest& request, ResourceLayout layout,
-      std::chrono::steady_clock::time_point now) {
-    EngineResult<RegisterAdapterResponse> out;
-    auto& response = out.response;
-    if (!layout.commands_.empty() || layout.observations_.empty() ||
-        !DeliveryValid(request.delivery())) {
-      response.set_code(INVALID_ARGUMENT);
-      response.set_message("invalid observer resources or delivery");
-      return out;
-    }
-    if (controllers.contains(request.adapter_id()) || observers.contains(request.adapter_id())) {
-      response.set_code(ALREADY_EXISTS);
-      response.set_message("adapter ID is already registered");
-      return out;
-    }
-    Observer observer;
-    observer.id = request.adapter_id();
-    observer.session = next_session++;
-    observer.layout = std::move(layout);
-    observer.delivery = request.delivery();
-    observer.timeout_ms = request.session_timeout_ms() ? request.session_timeout_ms()
-                                                       : options.observer_session_timeout_ms;
-    observer.registered_at = now;
-    observer.last_heartbeat_at = now;
-    observer.state_since_tick = current_tick;
-    const auto session = observer.session;
-    sessions[session] = {OBSERVER, observer.id};
-    observers.emplace(observer.id, std::move(observer));
-    auto& stored = observers.at(request.adapter_id());
-    response.set_adapter_id(stored.id);
-    response.set_role(OBSERVER);
-    response.set_session_id(session);
-    response.set_epoch(epoch);
-    response.layout_ = stored.layout;
-    response.set_state(PROVISIONAL);
-    out.effects.adapter_changes.push_back(Change(AdapterChangeKind::kRegistered, stored.id,
-                                                 OBSERVER, session, UNREGISTERED, PROVISIONAL,
-                                                 current_tick));
+  auto existing = controllers.find(request.adapter_id());
+  if (observers.contains(request.adapter_id()) ||
+      (existing != controllers.end() && existing->second.state != OFFLINE &&
+       existing->second.state != ERROR)) {
+    response.set_code(ALREADY_EXISTS);
+    response.set_message("adapter ID is already registered");
     return out;
   }
-  CoreOptions options;
-  std::unique_ptr<internal::ModelRuntime> model;
-  std::unique_ptr<internal::ResourceCatalog> catalog;
-  std::unique_ptr<detail::SnapshotManager> snapshots;
-  std::unordered_map<std::string, Controller> controllers;
-  std::unordered_map<std::string, Observer> observers;
-  std::unordered_map<std::uint64_t, std::pair<AdapterRole, std::string>> sessions;
-  std::unordered_map<std::string, std::string> owners;
-  std::vector<internal::ValidatedActuatorWrite> queued_policy_writes;
-  std::uint64_t next_session = 1, epoch = 1, current_tick = 0;
-  ServerState server_state = IDLE;
-  std::string status_message;
-};
+  for (const auto& descriptor : layout.commands_) {
+    const auto owner = owners.find(descriptor.name());
+    if (owner != owners.end() && owner->second != request.adapter_id()) {
+      response.set_code(RESOURCE_CONFLICT);
+      response.set_message("command resource is already owned: " + descriptor.name());
+      return out;
+    }
+  }
+  std::optional<std::uint64_t> replaced;
+  if (existing != controllers.end()) {
+    replaced = existing->second.session;
+    const auto old_state = existing->second.state;
+    QueuePolicy(existing->second, existing->second.policy.release_policy);
+    sessions.erase(existing->second.session);
+    for (const auto& descriptor : existing->second.layout.commands_)
+      owners.erase(descriptor.name());
+    controllers.erase(existing);
+    out.effects.adapter_changes.push_back(
+        Change(AdapterChangeKind::kUnregistered, request.adapter_id(), CONTROLLER, *replaced,
+               old_state, UNREGISTERED, current_tick, "session replaced"));
+  }
+  Controller controller;
+  controller.id = request.adapter_id();
+  controller.session = next_session++;
+  controller.layout = std::move(layout);
+  controller.registered_at = now;
+  controller.state_since_tick = current_tick;
+  controller.policy = PolicyFor(request.adapter_id());
+  const auto session = controller.session;
+  for (const auto& descriptor : controller.layout.commands_)
+    owners[descriptor.name()] = controller.id;
+  sessions[session] = {CONTROLLER, controller.id};
+  controllers.emplace(controller.id, std::move(controller));
+  auto& stored = controllers.at(request.adapter_id());
+  response.set_adapter_id(stored.id);
+  response.set_role(CONTROLLER);
+  response.set_session_id(session);
+  response.set_epoch(epoch);
+  response.layout_ = stored.layout;
+  response.set_state(PROVISIONAL);
+  response.controller_policy = stored.policy;
+  auto change = Change(replaced ? AdapterChangeKind::kReplaced : AdapterChangeKind::kRegistered,
+                       stored.id, CONTROLLER, session, UNREGISTERED, PROVISIONAL, current_tick);
+  change.previous_session_id = replaced;
+  out.effects.adapter_changes.push_back(std::move(change));
+  return out;
+}
+EngineResult<RegisterAdapterResponse> SimulationCore::Impl::RegisterObserver(
+    const RegisterAdapterRequest& request, ResourceLayout layout,
+    std::chrono::steady_clock::time_point now) {
+  EngineResult<RegisterAdapterResponse> out;
+  auto& response = out.response;
+  if (!layout.commands_.empty() || layout.observations_.empty() ||
+      !DeliveryValid(request.delivery())) {
+    response.set_code(INVALID_ARGUMENT);
+    response.set_message("invalid observer resources or delivery");
+    return out;
+  }
+  if (controllers.contains(request.adapter_id()) || observers.contains(request.adapter_id())) {
+    response.set_code(ALREADY_EXISTS);
+    response.set_message("adapter ID is already registered");
+    return out;
+  }
+  Observer observer;
+  observer.id = request.adapter_id();
+  observer.session = next_session++;
+  observer.layout = std::move(layout);
+  observer.delivery = request.delivery();
+  observer.timeout_ms = request.session_timeout_ms() ? request.session_timeout_ms()
+                                                     : options.observer_session_timeout_ms;
+  observer.registered_at = now;
+  observer.last_heartbeat_at = now;
+  observer.state_since_tick = current_tick;
+  const auto session = observer.session;
+  sessions[session] = {OBSERVER, observer.id};
+  observers.emplace(observer.id, std::move(observer));
+  auto& stored = observers.at(request.adapter_id());
+  response.set_adapter_id(stored.id);
+  response.set_role(OBSERVER);
+  response.set_session_id(session);
+  response.set_epoch(epoch);
+  response.layout_ = stored.layout;
+  response.set_state(PROVISIONAL);
+  out.effects.adapter_changes.push_back(Change(AdapterChangeKind::kRegistered, stored.id, OBSERVER,
+                                               session, UNREGISTERED, PROVISIONAL, current_tick));
+  return out;
+}
 SimulationCore::SimulationCore(CoreOptions options)
     : impl_(std::make_unique<Impl>(std::move(options))) {}
 SimulationCore::~SimulationCore() = default;
@@ -692,9 +654,17 @@ EngineEffects SimulationCore::AcceptHeartbeat(const AdapterHeartbeat& heartbeat,
   return out;
 }
 EngineEffects SimulationCore::Step() {
+  return Step(InteractiveStepInput{});
+}
+
+EngineEffects SimulationCore::Step(const InteractiveStepInput& input) {
   EngineEffects out;
   if (!IsModelLoaded() || impl_->server_state != RUNNING) return out;
   impl_->ApplyControllerWrites();
+  impl_->model->ApplyInteractiveActuatorWrites(input.actuator_writes);
+  if (input.replace_body_wrenches) {
+    impl_->model->ReplaceInteractiveBodyWrenches(input.body_wrenches);
+  }
   impl_->model->Step();
   ++impl_->current_tick;
   StepCompletedEvent event;

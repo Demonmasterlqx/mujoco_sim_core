@@ -17,6 +17,7 @@
 #include "controller_command_inbox.hpp"
 #include "ecal_server_transport.hpp"
 #include "server_event_queue.hpp"
+#include "viewer_input_state.hpp"
 
 namespace spdlog {
 class logger;
@@ -152,6 +153,42 @@ class SimulationLoop {
    * Controller 输入槽。 */
   void DrainControllerInputs(std::chrono::steady_clock::time_point);
 
+  /** Drains non-blocking local GUI input into simulation-thread state.
+   * 将非阻塞本地 GUI 输入清空到仿真线程状态。 */
+  void DrainViewerInputs();
+
+  /**
+   * @brief Applies Reset then the latest Pause/Run action on the Core owner thread.
+   *
+   * Successful Reset clears viewer data, advances the Sensor generation, and
+   * rebuilds runtime anchors. A rejected Pause/Run schedules a non-blocking GUI
+   * indicator correction. No transport or worker wait occurs here.
+   *
+   * 在 Core 所有者线程上依次应用 Reset 与最新 Pause/Run 动作。
+   *
+   * Reset 成功后清除 viewer 数据、推进 Sensor generation 并重建运行锚点。Pause/Run
+   * 被拒绝时排队非阻塞 GUI 指示器修正。本函数不等待传输或 worker。
+   *
+   * @param now Explicit steady-clock action boundary. 显式 steady clock 动作边界。
+   */
+  void HandleViewerSimulationActions(std::chrono::steady_clock::time_point now);
+
+  /**
+   * @brief Rebuilds pacing, viewer, and summary anchors after simulation-time Reset.
+   *
+   * The next Step and viewer capture become immediately due, while the next
+   * summary starts one complete configured period later. Tick and simulation
+   * anchors are copied from post-Reset Core state.
+   *
+   * 在仿真时间 Reset 后重建 pacing、viewer 与 summary 锚点。
+   *
+   * 下一 Step 与 viewer capture 立即到期；下一次 summary 则在一个完整配置周期后到期。
+   * tick 与 simulation 锚点从 Reset 后 Core 状态复制。
+   *
+   * @param now Explicit steady-clock Reset boundary. 显式 steady clock Reset 边界。
+   */
+  void ResetRuntimeAnchorsAfterSimulationReset(std::chrono::steady_clock::time_point now);
+
   /** Applies Core-owned effects in documented order. 按文档顺序应用 Core 自有效果。 */
   void ApplyEffects(mujoco_sim::core::EngineEffects);
 
@@ -225,6 +262,12 @@ class SimulationLoop {
   SimViewer* viewer_ = nullptr;
   /** Simulation-thread-owned live Core. 仿真线程独占的实时 Core。 */
   mujoco_sim::core::SimulationCore core_;
+  /** Simulation-thread GUI input merge and timeout state.
+   * 仿真线程的 GUI 输入合并与超时状态。 */
+  ViewerInputState viewer_input_state_;
+  /** Reusable output for non-blocking viewer consumption.
+   * 用于非阻塞 viewer 消费的可复用输出。 */
+  SimViewer::ViewerInputBatch viewer_input_batch_;
   /** Sensor runtime stopped during Finish(). 在 Finish() 中停止的 Sensor runtime。 */
   std::unique_ptr<SensorRuntime> sensor_runtime_;
   /** Bounded callback-to-loop event queue. 有界的回调到循环事件队列。 */

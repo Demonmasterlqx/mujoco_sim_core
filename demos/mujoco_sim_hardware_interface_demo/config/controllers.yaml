@@ -1,0 +1,32 @@
+controller_manager:
+  ros__parameters:
+    update_rate: 250
+    # The hardware read() callback is the /clock producer, so the controller
+    # manager itself must use wall time to avoid a startup dependency cycle.
+    use_sim_time: false
+
+    joint_state_broadcaster:
+      type: joint_state_broadcaster/JointStateBroadcaster
+    imu_sensor_broadcaster:
+      type: imu_sensor_broadcaster/IMUSensorBroadcaster
+    diff_drive_controller:
+      type: diff_drive_controller/DiffDriveController
+
+imu_sensor_broadcaster:
+  ros__parameters:
+    sensor_name: imu_sensor
+    frame_id: imu_link
+
+diff_drive_controller:
+  ros__parameters:
+    left_wheel_names: [left_wheel_joint]
+    right_wheel_names: [right_wheel_joint]
+    wheel_separation: 0.46
+    wheel_radius: 0.10
+    position_feedback: true
+    open_loop: false
+    publish_rate: 50.0
+    cmd_vel_timeout: 0.5
+    enable_odom_tf: true
+    odom_frame_id: odom
+    base_frame_id: base_link

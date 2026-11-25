@@ -51,8 +51,10 @@ inline bool HasExpectedStatusIdentity(const mujoco_sim::v4::ServerStatus& status
  *         将全局服务器状态映射为客户端动作。
  * @param status Borrowed parsed status with an already validated epoch.
  *               epoch 已校验的借用解析状态。
- * @return STOPPED as kStopped, ERROR_PAUSED as kError, otherwise kContinue.
- *         STOPPED 映射为 kStopped，ERROR_PAUSED 映射为 kError，其余为 kContinue。
+ * @return STOPPED as kStopped, ERROR_PAUSED as kError, and PAUSED or other
+ *         nonterminal states as kContinue.
+ *         STOPPED 映射为 kStopped，ERROR_PAUSED 映射为 kError，PAUSED 及其他非终态映射为
+ *         kContinue。
  */
 inline StatusDecision EvaluateServerState(const mujoco_sim::v4::ServerStatus& status) {
   if (status.state() == mujoco_sim::v4::STOPPED) {
